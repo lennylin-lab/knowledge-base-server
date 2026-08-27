@@ -19,6 +19,23 @@ setup.cfg/.flake8).
 **All four must pass before any commit.** CI runs exactly these commands —
 keep them fast enough to run locally on every change.
 
+### Tooling gotchas (learned 2026-08-27, scaffold task)
+
+> **Warning**: ruff config MUST keep the extend-exclude for Trellis harness
+> directories (`.trellis/`, `.claude/`, `.codex/`, `.cursor/`, `.agents/`).
+> These hold tooling scaffolds, not project code. Incident: a repo-wide
+> `ruff format .` rewrote Trellis hook scripts and had to be reverted with
+> `git restore`. If the excludes are ever dropped, `ruff format` will
+> silently reformat harness files again.
+
+- `types-python-frontmatter` does not exist on PyPI. When the Markdown
+  pipeline (`rag/`) starts importing `python-frontmatter`, add a mypy
+  override (`[[tool.mypy.overrides]] module = "frontmatter" ignore_missing_imports = true`)
+  instead of hunting for stubs.
+- Task artifacts: `check.jsonl` for code-touching tasks lists **all five**
+  backend spec files — a manifest that omits one (e.g. database-guidelines)
+  under-informs the check agent even when the dispatch prompt requires it.
+
 ## Python Style
 
 - Target Python 3.12+; modern syntax (`X | None`, `match`, f-strings).
