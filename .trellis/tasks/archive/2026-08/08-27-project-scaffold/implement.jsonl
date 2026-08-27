@@ -1,0 +1,5 @@
+{"file": ".trellis/spec/backend/directory-structure.md", "type": "file", "reason": "module map, layering matrix, naming — scaffold must create exactly these directories"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "type": "file", "reason": "engine/session/Base conventions, naming-convention metadata, pgvector migration rules"}
+{"file": ".trellis/spec/backend/error-handling.md", "type": "file", "reason": "AppError hierarchy + envelope handlers to implement in core/exceptions.py"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "type": "file", "reason": "structlog setup shape + request-id middleware contract"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "type": "file", "reason": "ruff/mypy/pytest config requirements, forbidden patterns, test naming"}
