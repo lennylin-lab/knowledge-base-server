@@ -6,9 +6,12 @@
 
 ## Overview
 
-- **Stack**: Python 3.12+ / FastAPI, fully async.
+- **Stack**: Python 3.12+ / FastAPI (fully async) + Pydantic AI agents +
+  PostgreSQL (SQLAlchemy 2.0 async + pgvector) + Elasticsearch +
+  MCP client (`mcp` SDK) + OpenAI-compatible LLM access.
 - **Layout**: `src/` layout with a single top-level package `app`.
-- **Layering**: `router → service → repository` (strict, see below).
+- **Layering**: `router → service → agent → (rag | mcp | repository)`,
+  see matrix below.
 - **Package manager**: uv (`pyproject.toml` + `uv.lock` are the source of truth).
 
 This workspace (`knowledge-base-server`) is **backend-only**. Frontend code
@@ -36,21 +39,42 @@ knowledge-base-server/
 │   │   └── document.py
 │   ├── schemas/              # Pydantic request/response DTOs
 │   │   └── document.py
-│   ├── repositories/         # data access layer (DB queries only)
+│   ├── repositories/         # PostgreSQL data access (DB queries only)
 │   │   └── document.py
-│   ├── services/             # business logic
-│   │   └── document.py
+│   ├── services/             # business logic / orchestration
+│   │   ├── document.py
+│   │   └── chat.py
+│   ├── agents/               # Pydantic AI agent definitions
+│   │   ├── qa.py             # QAAgent: knowledge-grounded answering
+│   │   ├── summarize.py
+│   │   ├── association.py    # knowledge-link analysis
+│   │   ├── writing.py        # assisted authoring
+│   │   └── prompts/          # prompt templates (markdown, versioned assets)
+│   ├── llm/                  # provider abstraction (no domain logic)
+│   │   ├── models.py         # Pydantic AI model factory from Settings
+│   │   └── embeddings.py     # EmbeddingProvider protocol + OpenAI-compat impl
+│   ├── rag/                  # retrieval-augmented generation pipeline
+│   │   ├── chunker.py        # markdown-aware chunking
+│   │   ├── indexer.py        # doc -> chunks -> embeddings -> stores
+│   │   └── retriever.py      # ES BM25 + pgvector, RRF fusion
+│   ├── mcp/                  # MCP extension mechanism
+│   │   ├── manager.py        # server lifecycle (stdio/HTTP), tool discovery
+│   │   └── tools.py          # MCP tools wrapped for agent registration
+│   ├── search/               # Elasticsearch access layer
+│   │   ├── es.py             # client from Settings, index lifecycle
+│   │   └── queries.py        # BM25 query builders
 │   ├── api/
 │   │   ├── deps.py           # shared FastAPI dependencies
 │   │   └── v1/
 │   │       ├── router.py     # aggregates endpoint routers for v1
 │   │       └── endpoints/
-│   │           └── documents.py
+│   │           ├── documents.py
+│   │           └── chat.py   # SSE streaming endpoint
 │   └── utils/                # pure helpers with no I/O
 └── tests/
-    ├── conftest.py           # async test fixtures, test DB, client factory
-    ├── test_documents_api.py # endpoint tests (name: test_<feature>_<behavior>)
-    └── test_documents_service.py
+    ├── conftest.py           # async fixtures, test DB, client factory
+    ├── test_documents_api.py
+    └── test_chat_api.py
 ```
 
 ---
@@ -61,31 +85,56 @@ knowledge-base-server/
 
 | Layer | Directory | May import | Must not import |
 |-------|-----------|-----------|-----------------|
-| Router | `api/` | `services/`, `schemas/`, `api/deps.py` | `models/`, `repositories/`, SQLAlchemy |
-| Service | `services/` | `repositories/`, `models/`, `schemas/`, `core/` | `api/`, FastAPI objects (`Request`, `Response`) |
-| Repository | `repositories/` | `models/`, `core/database.py` | `services/`, `api/`, Pydantic schemas |
+| Router | `api/` | `services/`, `schemas/`, `api/deps.py` | `models/`, `repositories/`, `agents/`, SQLAlchemy |
+| Service | `services/` | `repositories/`, `models/`, `schemas/`, `agents/`, `rag/`, `core/` | `api/`, FastAPI objects (`Request`, `Response`) |
+| Agent | `agents/` | `llm/`, `rag/`, `mcp/`, `schemas/`, `core/` | `api/`, `services/`, FastAPI objects |
+| RAG | `rag/` | `models/`, `repositories/`, `search/`, `llm/`, `core/` | `api/`, `services/`, `agents/` |
+| MCP | `mcp/` | `core/`, `schemas/` | `api/`, `services/`, `agents/`, `models/` |
+| LLM | `llm/` | `core/` | everything domain (`services/`, `agents/`, `rag/`, …) |
+| Repository | `repositories/` | `models/`, `core/database.py` | `services/`, `api/`, `agents/`, Pydantic schemas |
 
-Enforced conventions:
+Key points:
 
-- **Routers** parse/validate input, call exactly one service method, and map
-  its return value to a response schema. No `if` chains with business meaning,
-  no direct DB access.
-- **Services** own business rules, transactions, and cross-repository
-  orchestration. They are framework-agnostic plain functions/classes —
-  no `Request`/`Depends`/HTTP status codes here.
-- **Repositories** own every SQL query. They take/return ORM models
-  (or scalar values), never Pydantic schemas. A query that appears twice
-  belongs in a repository method, not duplicated in a service.
+- **Services drive agents, never the reverse.** A service picks the agent,
+  builds its run context, and registers extra tools as closures — that is how
+  service capabilities reach an agent without `agents/` importing `services/`
+  (prevents import cycles).
+- **`llm/` is a pure provider layer**: model instances, embedding clients,
+  retries/timeouts. It knows nothing about documents or knowledge. All model
+  names, `base_url`, API keys come from `Settings` — nothing hardcoded.
+- **`rag/` owns the retrieval pipeline**: chunking, embedding, hybrid search
+  (ES BM25 + pgvector cosine), RRF fusion. `search/` and `repositories/` are
+  its data-access backends.
+- **`mcp/` owns external tool integration**: server connections
+  (stdio + HTTP transports), tool discovery/registry, and wrapping MCP tools
+  so agents can register them like local functions. Tool results are passed
+  through as structured data; no knowledge-base business logic lives here.
+- **Routers** parse/validate input, call exactly one service method, map the
+  result to a response schema (or an SSE stream). No business meaning.
+- **Repositories** own every SQL query; `search/` owns every ES query.
+- **Prompt templates** (`agents/prompts/`) are versioned assets — changing a
+  prompt is a reviewable code change, not a runtime config tweak.
 
 ### Adding a new feature
 
+Standard entity (CRUD):
+
 1. Model in `models/<entity>.py` (+ Alembic migration).
-2. Schemas in `schemas/<entity>.py` (`<Entity>Create`, `<Entity>Update`,
-   `<Entity>Read`).
-3. Repository in `repositories/<entity>.py` (`DocumentRepository`).
-4. Service in `services/<entity>.py` (`DocumentService`).
+2. Schemas in `schemas/<entity>.py` (`<Entity>Create` / `Update` / `Read`).
+3. Repository in `repositories/<entity>.py` (`<Entity>Repository`).
+4. Service in `services/<entity>.py` (`<Entity>Service`).
 5. Router in `api/v1/endpoints/<entity_plural>.py`, registered in
    `api/v1/router.py`.
+
+New agent capability (e.g. a new knowledge task):
+
+1. Prompt template(s) in `agents/prompts/<task>.md`.
+2. Agent definition in `agents/<task>.py` (Pydantic AI `Agent`, model from
+   `llm/models.py`, tools from `rag/retriever.py` + `mcp/tools.py`).
+3. Orchestrating service method in `services/chat.py` (or a dedicated
+   service) — builds context, runs the agent, streams results.
+4. Router/SSE endpoint if user-facing.
+5. Tests with a faked model (see quality-guidelines.md).
 
 ---
 
@@ -93,17 +142,22 @@ Enforced conventions:
 
 - **Files/directories**: `snake_case`, singular for entity modules
   (`document.py`), plural for endpoint modules (`documents.py`).
-- **Classes**: `PascalCase` (`DocumentService`, `DocumentRepository`).
+- **Classes**: `PascalCase` (`DocumentService`, `QAAgent`,
+  `DocumentRepository`).
 - **Pydantic schemas**: `<Entity>Create` / `<Entity>Update` / `<Entity>Read`.
-- **Functions**: `snake_case`, verbs (`get_by_id`, `create`, `soft_delete`).
-- **Constants + env vars**: `UPPER_SNAKE_CASE` (`DATABASE_URL`, `SETTINGS`).
+- **Functions**: `snake_case`, verbs (`get_by_id`, `create`, `soft_delete`,
+  `retrieve`, `embed_chunks`).
+- **Constants + env vars**: `UPPER_SNAKE_CASE` (`DATABASE_URL`,
+  `OPENAI_BASE_URL`, `EMBEDDING_DIM`).
 - **Tests**: `test_<feature>_<behavior>.py::test_*`, e.g.
-  `test_documents_api.py::test_create_document_returns_201`.
+  `test_chat_api.py::test_qa_streams_citations`.
 
 ---
 
 ## Examples
 
-The project was scaffolded from empty; the first implemented entity
-(`models/document.py` + its repository/service/router) is the reference
-implementation — copy its shape when adding new entities.
+The AI-stack portions of these specs were written before implementation;
+code examples are canonical shapes. The first implemented vertical slice
+(`documents` CRUD + `QAAgent` chat) becomes the reference implementation —
+copy its shape when adding entities/agents, and update these examples to
+match actual code once it exists.

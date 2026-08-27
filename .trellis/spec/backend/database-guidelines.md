@@ -6,11 +6,19 @@
 
 ## Overview
 
-- **Database**: PostgreSQL 16+ (pgvector extension allowed for embeddings).
+- **Database**: PostgreSQL 16+ with the **pgvector** extension for RAG
+  embeddings. Vector column dimension is fixed at **1536**
+  (OpenAI `text-embedding-3-small`-class models via the OpenAI-compatible
+  endpoint); changing it later is a new-column + backfill migration, decided
+  explicitly, never casually.
 - **ORM**: SQLAlchemy 2.0 async (`asyncpg` driver), Mapped/mapped_column
-  declarative style only.
+  declarative style only. Vector columns use `pgvector.sqlalchemy.Vector`.
+- **Full-text BM25 lives in Elasticsearch, not PG** — PG stores relational +
+  vector data only (see `search/` in directory-structure.md).
 - **Migrations**: Alembic, async template. Schema changes never happen via
-  `create_all()` outside tests.
+  `create_all()` outside tests. Extension creation
+  (`CREATE EXTENSION IF NOT EXISTS vector`) ships as the first migration and
+  requires the extension available in the PG image (dev + CI).
 
 ---
 
@@ -85,6 +93,46 @@ Rules:
 - All foreign keys are explicit `ForeignKey(...)` with `ondelete=` specified.
 - Enums: `StrEnum` classes mapped with `SAEnum`; never bare string columns
   for closed sets.
+- **Ownership columns reserved**: even in the single-user MVP, documents
+  carry an optional `owner_id` column so the multi-user upgrade is a
+  migration + auth change, not a schema redesign.
+
+### Embeddings / pgvector models
+
+```python
+# models/document_chunk.py (canonical shape)
+from pgvector.sqlalchemy import Vector
+from sqlalchemy import Column, ForeignKey, Index, Text
+from sqlalchemy.dialects.postgresql import UUID
+
+class DocumentChunk(Base):
+    __tablename__ = "document_chunks"
+    __table_args__ = (
+        Index(
+            "ix_document_chunks_embedding_hnsw",
+            "embedding",
+            postgresql_using="hnsw",
+            postgresql_ops={"embedding": "vector_cosine_ops"},
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    document_id: Mapped[UUID] = mapped_column(
+        ForeignKey("documents.id", ondelete="CASCADE"), nullable=False
+    )
+    chunk_index: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    embedding = mapped_column(Vector(1536))  # dimension fixed, see Overview
+```
+
+Rules:
+
+- One row per chunk; `(document_id, chunk_index)` has a unique constraint.
+- Re-embedding a document deletes and re-inserts its chunks in one
+  transaction (chunks are derived data, never updated in place).
+- Embeddable tables keep an indexing status column on the parent
+  (`documents.index_status`: `pending | done | failed`) so the background
+  pipeline is observable and retryable.
 
 ## Query Patterns
 
@@ -110,6 +158,26 @@ class DocumentRepository:
         stmt = select(Document).order_by(Document.created_at.desc()).limit(limit)
         return (await self._session.execute(stmt)).scalars().all()
 ```
+
+Vector similarity lives in a repository too (`rag/` orchestrates, the
+repository executes SQL):
+
+```python
+# repositories/document_chunk.py (canonical shape)
+async def search_similar(
+    self, query_embedding: list[float], *, limit: int = 20
+) -> Sequence[DocumentChunk]:
+    stmt = (
+        select(DocumentChunk)
+        .order_by(DocumentChunk.embedding.cosine_distance(query_embedding))
+        .limit(limit)
+    )
+    return (await self._session.execute(stmt)).scalars().all()
+```
+
+Hybrid retrieval (`rag/retriever.py`) runs ES BM25 and pgvector searches
+concurrently, then fuses ranks with Reciprocal Rank Fusion (RRF) in Python —
+SQL/ES return candidate lists, fusion is plain code and unit-testable.
 
 Rules:
 
@@ -150,3 +218,8 @@ uv run alembic upgrade head
 - Business logic in repositories (validation, HTTP errors, calculations).
 - Committing inside repositories — transaction boundaries belong to services.
 - `Base.metadata.create_all()` outside test fixtures.
+- Embedding calls (`llm/embeddings.py`) inside repositories — repositories
+  store/search vectors; only `rag/` and `llm/` call providers.
+- Full-text search via PG `tsvector` for user-facing search — BM25 relevance
+  is Elasticsearch's job.
+- Changing `Vector(1536)` dimension without a dedicated migration plan.

@@ -64,6 +64,26 @@ logger.warning("app_error", code=exc.code, path=request.url.path)
 logger.exception("embedding_failed", document_id=str(doc_id))  # inside except
 ```
 
+## AI Stack Logging
+
+- **LLM calls** — one `info` event per completed call:
+  `model`, `provider` (host only), `input_tokens`, `output_tokens`,
+  `latency_ms`, `agent` name. Prompt/completion **content is never logged at
+  `info`** (user knowledge may be sensitive); `debug` may log truncated
+  previews with an explicit setting.
+- **Agent runs** — bind `run_id` (uuid4) at run start via `contextvars`,
+  same mechanism as `request_id`; emit `agent_run_started`
+  (agent, question length) and `agent_run_finished` (tool calls count,
+  outcome). Chat requests already carry `request_id`; `run_id` links a
+  request to its possibly-multiple agent runs.
+- **Retrieval** — `retrieval_executed` with `query_terms`, `es_hits`,
+  `vector_hits`, `fused_hits`, `latency_ms` per backend.
+- **MCP tools** — `mcp_tool_called` (tool, server, duration) and
+  `mcp_tool_failed` (tool, error code). Never log full tool payloads at
+  `info`; sizes are enough.
+- **Token usage** is a metric, not a log line — but the per-call events above
+  make aggregation possible.
+
 ## Log Levels
 
 | Level | Use for | Examples |
@@ -79,7 +99,11 @@ Rules:
 - `exception()` (with traceback) inside except blocks; never log the
   traceback via `str(exc)` into `message`.
 - No secrets in logs: passwords, tokens, API keys, full request bodies.
-  Redact or log ids instead.
+  Redact or log ids instead. **API keys and `base_url` query params of LLM
+  providers are secrets** — log the provider alias from Settings, not the URL.
+- **Full document contents and full prompts/completions are not logged**
+  at `info`/`warning` — knowledge-base content is user data. Lengths, ids,
+  and truncated previews (≤200 chars, `debug` only) are the ceiling.
 - Don't log-and-reraise the same error at multiple layers — log once at the
   boundary that handles it (usually the exception handler or job wrapper).
 - Metrics/counters don't belong in logs; keep them separate.

@@ -47,6 +47,23 @@ class ValidationError(AppError):
 class ForbiddenError(AppError):
     status_code = 403
     code = "forbidden"
+
+
+# --- LLM / agent stack (see error taxonomy below) ---
+
+class LLMProviderError(AppError):
+    status_code = 502
+    code = "llm_provider_error"
+
+
+class LLMRateLimitedError(AppError):
+    status_code = 429
+    code = "rate_limited"
+
+
+class MCPToolError(AppError):
+    status_code = 502
+    code = "mcp_tool_failed"
 ```
 
 Add a new subclass when a new failure mode appears — never overload an
@@ -95,6 +112,29 @@ envelope via a `RequestValidationError` handler.
 | Router | Lets exceptions propagate; maps nothing. Returns 2xx responses only. |
 | Service | Raises `NotFoundError` / `ConflictError` / etc. Never catches broad `Exception` to swallow. |
 | Repository | Raises SQLAlchemy errors as-is; translates to domain exceptions **only** for unique-violation → `ConflictError`. |
+| Agent (`agents/`) | Provider failures (5xx/connect/timeout from `openai` SDK) surface as-is to the service, which wraps them in `LLMProviderError`. |
+| `llm/` | Normalizes provider SDK exceptions; retries idempotent calls (configurable in Settings) before giving up. |
+| `mcp/` | A failing external tool raises `MCPToolError` **with the tool name in `details`**; the agent decides to continue degraded or abort. |
+
+## Error Taxonomy: LLM / MCP / streaming
+
+| Failure | Exception | HTTP | Notes |
+|---------|-----------|------|-------|
+| Provider 5xx / connection / timeout after retries | `LLMProviderError` | 502 | message generic; provider + model go to logs |
+| Provider rate limit | `LLMRateLimitedError` | 429 | include `Retry-After` when provider gives one |
+| Context window exceeded | `ValidationError` | 422 | chunking/retrieval bug — fix there, don't truncate silently |
+| External MCP tool failure | `MCPToolError` | 502 | `details: {"tool": "web_search"}`; agent may retry or degrade |
+| Mid-stream failure (SSE already 200) | — | — | emit a final SSE `error` event, then close the stream; never leave it hanging |
+
+Streaming rule: once the SSE response started (status 200 sent), the error
+envelope can no longer be delivered as a status code. The chat service wraps
+the agent run; on failure it pushes
+`event: error\ndata: {"code": "...", "message": "..."}\n\n` and completes the
+stream. The client contract (frontend repo) treats `error` event as terminal.
+
+Background pipeline (indexing/embedding) never raises to users: failures are
+caught at the job boundary, logged with full context, and the document's
+`index_status` flips to `failed` — user-facing APIs expose that status.
 
 Canonical service pattern:
 

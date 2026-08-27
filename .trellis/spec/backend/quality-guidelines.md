@@ -57,17 +57,44 @@ async def test_create_document_returns_201(client, db):
 New features ship with tests in the same change; bug fixes ship with a test
 that reproduces the bug first.
 
+### AI-stack test strategy (offline by default)
+
+- **No live LLM calls in the default test run.** Agents are tested with
+  Pydantic AI's `TestModel` (canned tool-call sequences) or `FunctionModel`
+  (scripted outputs). Provider SDK behavior (retries, error mapping) is
+  tested by mocking the `openai` client at the `llm/` boundary only —
+  nothing below `llm/` may import provider SDKs, so this boundary is stable.
+- Tests that must hit a real provider are marked `@pytest.mark.live_llm`
+  and **excluded by default** (`-m "not live_llm"` in pyproject); they are
+  for manual/nightly verification.
+- **Elasticsearch**: query builders are pure functions tested without a
+  server; client integration tests use testcontainers and are skippable
+  when Docker is unavailable (`ES_INTEGRATION=1` gate).
+- **pgvector**: test database image must include the `vector` extension;
+  similarity tests assert ordering, not exact distances.
+- **SSE endpoints**: tests consume the stream via `httpx.AsyncClient` and
+  assert event sequence, including the terminal `error` event path.
+- **RRF fusion and chunking** are pure logic — exhaustive unit tests, no
+  infrastructure.
+
 ## Review Checklist (apply before requesting/merging)
 
 1. `uv run ruff check . && uv run ruff format --check .` clean.
 2. `uv run mypy src` clean.
-3. `uv run pytest` green, new code covered.
+3. `uv run pytest` green, new code covered, no live LLM calls.
 4. Layering respected — routers thin, services framework-free, repositories
-   SQL-only (see directory-structure.md).
-5. Errors raised as `AppError` subclasses with the right status/code.
+   SQL-only, agents free of `services/`/FastAPI imports (see
+   directory-structure.md).
+5. Errors raised as `AppError` subclasses with the right status/code;
+   SSE failures emit the terminal `error` event.
 6. New queries: no N+1, eager loads where attributes are accessed.
-7. Schema changes: Alembic revision with working downgrade.
+7. Schema changes: Alembic revision with working downgrade; embedding
+   dimension untouched.
 8. No secrets or tokens in code, logs, or test fixtures (use env/Settings).
+9. Model names, `base_url`, timeouts, retry counts come from `Settings` —
+   no literals in `src/`.
+10. Prompt changes edit files under `agents/prompts/` (reviewable diff),
+    not inline f-strings buried in Python.
 
 ## Forbidden Patterns
 
@@ -81,3 +108,11 @@ that reproduces the bug first.
   async drivers.
 - Hardcoded config (URLs, ports, paths) — everything flows through
   `core/config.py` Settings.
+- Instantiating `openai.AsyncOpenAI` or Pydantic AI models outside `llm/` —
+  one factory, one place for retries/timeouts.
+- Synchronous LLM/embedding calls (`client.embeddings.create` without await)
+  or LLM calls on the event loop that could block — provider I/O is always
+  async.
+- Live provider calls in unmarked tests (must be `live_llm`).
+- Secrets in prompts, logs, or ES documents — indexing strips front-matter
+  secrets before persistence.
