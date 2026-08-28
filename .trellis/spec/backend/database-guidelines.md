@@ -204,6 +204,57 @@ Rules:
 - Destructive changes (drop column/table) ship as two steps: deploy code that
   stops writing → later revision drops.
 
+### Enum type lifecycle (the autogen trap)
+
+Autogenerate emits **broken** migrations for any model column using `SAEnum`
+on a PG `ENUM` type. The naive form breaks `upgrade → downgrade -1 → upgrade`
+with a `DuplicateObjectError` on the second upgrade. Three things conspire:
+
+1. `op.create_table`'s implicit `CREATE TYPE` is **not `checkfirst`-guarded** —
+   if a downgrade left the type behind (or the type pre-exists), the upgrade
+   crashes. Prevent this by creating the type **explicitly** before the table:
+   `sa.Enum("pending", "done", "failed", name="...").create(op.get_bind(), checkfirst=True)`.
+2. The generic `sa.Enum(..., create_type=False)` in the column is **silently
+   ignored** — SQLAlchemy drops "backend-inapplicable kwargs" with no warning,
+   so the implicit `CREATE TYPE` still fires inside `create_table`. Use the
+   **PG-specific** `postgresql.ENUM(..., create_type=False)` in the column so
+   the column does not re-emit the type the explicit step already made.
+3. The downgrade must **explicitly drop** the type with `checkfirst=True`
+   (`sa.Enum(name="...").drop(op.get_bind(), checkfirst=True)`); relying on the
+   implicit drop from `drop_table` is not symmetric with the explicit create.
+
+Canonical shape (from `0002_documents`):
+
+```python
+def upgrade() -> None:
+    sa.Enum("pending", "done", "failed", name="index_status").create(
+        op.get_bind(), checkfirst=True
+    )
+    op.create_table(
+        "documents",
+        ...
+        sa.Column(
+            "index_status",
+            postgresql.ENUM("pending", "done", "failed", name="index_status", create_type=False),
+            server_default="pending",
+            nullable=False,
+        ),
+        ...
+    )
+
+def downgrade() -> None:
+    op.drop_index(...)            # drop GIN/other indexes first
+    op.drop_table("documents")
+    sa.Enum(name="index_status").drop(op.get_bind(), checkfirst=True)
+```
+
+Also keep the `SAEnum` `values_callable=lambda e: [m.value for m in e]` on the
+**model** so the persisted values (`"pending"`) — not the member names
+(`"PENDING"`) — match the `server_default`. Verify the round trip with
+`alembic upgrade head` → `alembic downgrade -1` → `alembic upgrade head` and a
+`pg_type` check between steps; any `StrEnum`/`SAEnum` migration that does not
+follow this shape will fail it.
+
 ```bash
 uv run alembic revision --autogenerate -m "add documents table"
 uv run alembic upgrade head

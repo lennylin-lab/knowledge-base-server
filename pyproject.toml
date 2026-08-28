@@ -54,6 +54,11 @@ strict = true
 files = ["src"]
 plugins = []
 
+# No stubs exist for these (see quality-guidelines.md); do not hunt for stubs.
+[[tool.mypy.overrides]]
+module = ["frontmatter", "yaml"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
@@ -61,4 +66,5 @@ asyncio_default_fixture_loop_scope = "function"
 addopts = "-m 'not live_llm'"
 markers = [
     "live_llm: tests that call a real LLM provider (excluded from the default run)",
+    "db: tests that need the disposable PostgreSQL test database (auto-skip when PG is unreachable)",
 ]
