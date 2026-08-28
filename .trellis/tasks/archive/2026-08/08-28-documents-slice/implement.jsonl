@@ -1,0 +1,5 @@
+{"file": ".trellis/spec/backend/directory-structure.md", "type": "file", "reason": "entity module set + adding-a-new-feature order + layering matrix (router/service/repo imports)"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "type": "file", "reason": "model style, ARRAY/GIN, keyset pagination rule, enum mapping, soft-delete visibility, forbidden patterns"}
+{"file": ".trellis/spec/backend/error-handling.md", "type": "file", "reason": "AppError subclasses, envelope shape, per-layer raising rules"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "type": "file", "reason": "event names for entity lifecycle, no content logging"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "type": "file", "reason": "test strategy/naming, offline requirement, forbidden patterns, review checklist"}

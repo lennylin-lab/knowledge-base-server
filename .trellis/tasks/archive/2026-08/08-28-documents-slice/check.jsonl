@@ -1,0 +1,5 @@
+{"file": ".trellis/spec/backend/directory-structure.md", "type": "file", "reason": "verify module placement and layering (router thin, service framework-free, repo SQL-only)"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "type": "file", "reason": "verify model/query patterns, no session.query, no OFFSET, eager-load N/A check, migration downgrade"}
+{"file": ".trellis/spec/backend/error-handling.md", "type": "file", "reason": "verify envelope + codes on 404/422 paths, service raises not HTTPException"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "type": "file", "reason": "verify document lifecycle events, no content/tags in info logs"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "type": "file", "reason": "gates green, offline pytest contract, review checklist 1-10"}
