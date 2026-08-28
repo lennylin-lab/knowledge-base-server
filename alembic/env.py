@@ -14,6 +14,8 @@ from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
+# Side-effect import: tables register on Base.metadata for autogen.
+import app.models  # noqa: F401
 from app.core.config import get_settings
 from app.core.database import Base
 
@@ -21,9 +23,6 @@ config = context.config
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
-
-# Import model modules here so they register on Base.metadata before autogen.
-# (No models yet — the documents slice will add them, e.g. `import app.models`.)
 
 target_metadata = Base.metadata
 
