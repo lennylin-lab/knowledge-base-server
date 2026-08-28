@@ -87,7 +87,9 @@ Rules:
 - **Naming**: table names are `snake_case` plural (`documents`,
   `document_chunks`); columns are `snake_case`.
 - Primary keys: UUID (`uuid4`) by default; bigserial only for high-write
-  append-only tables.
+  append-only tables. The uuid4 default is **client-side** (SQLAlchemy
+  `default=`, not `server_default`) — raw psql/ops inserts must supply `id`
+  explicitly.
 - Timestamps: `DateTime(timezone=True)` — never naive datetimes.
   `created_at`/`updated_at` via `server_default=func.now()`.
 - All foreign keys are explicit `ForeignKey(...)` with `ondelete=` specified.
@@ -193,6 +195,28 @@ Rules:
   trigger SQL, load it eagerly in the repository.
 - SQL string escapes (`text()` with f-strings) are forbidden unless the
   statement cannot be expressed in the ORM; if unavoidable, bind parameters.
+
+## Elasticsearch (`search/`)
+
+All ES access lives in `search/` — same rule as repositories for SQL.
+Canonical replace pattern from `rag/indexer.py` + `search/es.py`:
+
+- **Explicit mapping** on index create (`ensure_index`): `document_id`
+  keyword, `title` text, `tags` keyword, `chunk_text` text, `chunk_index`
+  integer. Never rely on dynamic mapping — schema drift must be visible.
+- **Idempotent replace**: delete-by-query (`term: document_id`,
+  `conflicts="proceed"`) then bulk-index with **deterministic ids**
+  `f"{document_id}:{chunk_index}"`. A shrink leaves no orphans; a re-run
+  is always safe.
+- > **Warning: near-real-time visibility.** By default ES makes bulked docs
+  > visible only at the next refresh (~1s). A `delete_by_query` issued in
+  > the same pipeline run can miss docs bulk-indexed moments earlier —
+  > re-indexing then leaks orphans. Pass `refresh=True` on **both** the
+  > delete and the bulk write when the pipeline reads-back or replaces
+  > within one run. Correctness over write amplification for the MVP.
+- elasticsearch-py 8.x exposes **no common exception base**: catch
+  `(ApiError, TransportError, BulkIndexError)` and wrap into
+  `SearchIndexError` with operation/index/error_class details.
 
 ## Migrations (Alembic)
 

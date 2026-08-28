@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+from collections.abc import Callable
 from datetime import datetime
 from uuid import UUID
 
@@ -28,6 +29,10 @@ logger = structlog.get_logger(__name__)
 # Cursor payload keys stay short — cursors travel in every list request.
 _CURSOR_CREATED_AT_KEY = "ca"
 _CURSOR_ID_KEY = "id"
+
+# The service stays framework-free: how indexing gets scheduled (FastAPI
+# BackgroundTasks, a queue, ...) is the injecting caller's concern.
+ReindexEnqueuer = Callable[[UUID], None]
 
 
 def _parse_front_matter(content: str, request_title: str | None) -> tuple[str, list[str]]:
@@ -83,9 +88,15 @@ def _decode_cursor(cursor: str) -> tuple[datetime, UUID]:
 class DocumentService:
     """Orchestrates front-matter parsing, repository calls, and commits."""
 
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(self, session: AsyncSession, enqueuer: ReindexEnqueuer | None = None) -> None:
         self._session = session
         self._repo = DocumentRepository(session)
+        self._enqueuer = enqueuer
+
+    def _enqueue_indexing(self, doc_id: UUID) -> None:
+        """Schedule re-indexing; `None` enqueuer (default) is a no-op."""
+        if self._enqueuer is not None:
+            self._enqueuer(doc_id)
 
     async def create_document(self, payload: DocumentCreate) -> DocumentRead:
         """Persist a new document derived from its front matter."""
@@ -94,6 +105,8 @@ class DocumentService:
         document = await self._repo.create(document)
         await self._session.commit()
         logger.info("document_created", document_id=str(document.id), title=document.title)
+        # After commit only — a rolled-back write must never be indexed.
+        self._enqueue_indexing(document.id)
         return DocumentRead.model_validate(document)
 
     async def get_document(self, doc_id: UUID) -> DocumentReadDetail:
@@ -147,6 +160,7 @@ class DocumentService:
             document_id=str(document.id),
             title=document.title,
         )
+        self._enqueue_indexing(document.id)
         return DocumentRead.model_validate(document)
 
     async def delete_document(self, doc_id: UUID) -> None:

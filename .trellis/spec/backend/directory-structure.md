@@ -112,6 +112,13 @@ Key points:
 - **Routers** parse/validate input, call exactly one service method, map the
   result to a response schema (or an SSE stream). No business meaning.
 - **Repositories** own every SQL query; `search/` owns every ES query.
+- **Framework callbacks are injected as plain callables.** Services stay
+  framework-free by depending on a callable type they own (e.g.
+  `ReindexEnqueuer = Callable[[UUID], None]` in `services/document.py`);
+  the FastAPI adapter bridging it to `BackgroundTasks` lives in
+  `api/deps.py` — the **only** module allowed to import `BackgroundTasks`.
+  Reference implementation: document create/update → `deps.py` enqueuer →
+  `rag/indexer.run_indexing`.
 - **Prompt templates** (`agents/prompts/`) are versioned assets — changing a
   prompt is a reviewable code change, not a runtime config tweak.
 

@@ -1,6 +1,6 @@
 """Shared pytest fixtures.
 
-Two worlds live here:
+Three fixture worlds live here:
 
 - `client` — plain ASGI client against a fresh app, no database involved
   (health/error-envelope contract tests must pass offline).
@@ -8,16 +8,22 @@ Two worlds live here:
   `kb_test` database. A 1s reachability probe auto-skips those tests (with a
   visible reason) when PostgreSQL is not running, so the offline gate
   `uv run pytest` stays green.
+- `es`-marked tests — use `es_client` / `es_index_name`, backed by a unique
+  disposable index per test on the configured Elasticsearch node, with the
+  same probe-skip contract as `db`.
 """
 
 from __future__ import annotations
 
 import asyncio
 import os
+import uuid
 from collections.abc import AsyncIterator, Iterator
 
 import asyncpg
+import httpx
 import pytest
+from elasticsearch import AsyncElasticsearch
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
@@ -29,12 +35,16 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+from app.api.deps import SessionDep, get_document_service
 from app.core.database import Base, get_db
 from app.main import create_app
+from app.services.document import DocumentService
+from fakes import FakeEmbeddingProvider
 
 TEST_DATABASE_URL = os.environ.get(
     "KB_TEST_DATABASE_URL", "postgresql+asyncpg://kb:kb@localhost:5432/kb_test"
 )
+TEST_ELASTICSEARCH_URL = os.environ.get("KB_TEST_ELASTICSEARCH_URL", "http://localhost:9200")
 
 
 def _as_asyncpg_dsn(sqlalchemy_url: str, *, database: str | None = None) -> str:
@@ -73,10 +83,33 @@ def _pg_reachable() -> bool:
 _reachable: bool | None = None
 
 
+async def _es_probe(url: str) -> None:
+    async with httpx.AsyncClient(timeout=1.0) as client:
+        response = await client.get(url)
+        response.raise_for_status()
+
+
+def _es_reachable() -> bool:
+    """1s reachability probe against the ES node; memoized per session."""
+    global _es_reachable_flag
+    if _es_reachable_flag is None:
+        try:
+            asyncio.run(_es_probe(TEST_ELASTICSEARCH_URL))
+            _es_reachable_flag = True
+        except (httpx.HTTPError, OSError):
+            _es_reachable_flag = False
+    return _es_reachable_flag
+
+
+_es_reachable_flag: bool | None = None
+
+
 def pytest_runtest_setup(item: pytest.Item) -> None:
-    """Auto-skip `db`-marked tests when PG is unreachable (visible reason)."""
+    """Auto-skip `db`/`es`-marked tests when the backend is unreachable."""
     if item.get_closest_marker("db") is not None and not _pg_reachable():
         pytest.skip("PG not reachable")
+    if item.get_closest_marker("es") is not None and not _es_reachable():
+        pytest.skip("Elasticsearch not reachable")
 
 
 async def _create_test_database() -> None:
@@ -103,10 +136,15 @@ async def _create_test_database() -> None:
 
 
 async def _create_schema() -> None:
-    """Create every table on the test DB (tests never run migrations)."""
+    """Create every table on the test DB (tests never run migrations).
+
+    The pgvector extension is enabled here too — migration 0001 only ran
+    against the dev database, and `document_chunks.embedding` needs the type.
+    """
     engine = create_async_engine(TEST_DATABASE_URL)
     try:
         async with engine.begin() as conn:
+            await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
             await conn.run_sync(Base.metadata.create_all)
     finally:
         await engine.dispose()
@@ -123,7 +161,7 @@ def test_database_url() -> Iterator[str]:
 
 
 async def _truncate(engine: AsyncEngine) -> None:
-    """Empty every table between tests; CASCADE covers future FK relations."""
+    """Empty every table between tests; CASCADE covers FK relations."""
     table_names = ", ".join(Base.metadata.tables)
     async with engine.begin() as conn:
         await conn.execute(text(f"TRUNCATE TABLE {table_names} CASCADE"))
@@ -150,6 +188,40 @@ async def db_session(db_engine: AsyncEngine) -> AsyncIterator[AsyncSession]:
 
 
 @pytest.fixture
+def session_factory(db_engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
+    """A session factory bound to the per-test engine (pipeline/CLI tests)."""
+    return async_sessionmaker(db_engine, expire_on_commit=False)
+
+
+@pytest.fixture
+def fake_embedding_provider() -> FakeEmbeddingProvider:
+    """Shared deterministic provider (1536-dim, matching the DB column)."""
+    return FakeEmbeddingProvider()
+
+
+@pytest.fixture
+async def es_client() -> AsyncIterator[AsyncElasticsearch]:
+    """ES client for tests; paired with `es_index_name` for disposability."""
+    if not _es_reachable():
+        pytest.skip("Elasticsearch not reachable")
+    client = AsyncElasticsearch(hosts=[TEST_ELASTICSEARCH_URL], request_timeout=30)
+    try:
+        yield client
+    finally:
+        await client.close()
+
+
+@pytest.fixture
+async def es_index_name(es_client: AsyncElasticsearch) -> AsyncIterator[str]:
+    """A unique index name per test; whatever was created is deleted after."""
+    name = f"kb_documents_test-{uuid.uuid4().hex[:12]}"
+    yield name
+    exists = await es_client.indices.exists(index=name)
+    if bool(exists):
+        await es_client.indices.delete(index=name)
+
+
+@pytest.fixture
 async def app() -> AsyncIterator[FastAPI]:
     """A fresh app instance per test (factory pattern keeps tests isolated)."""
     return create_app()
@@ -165,14 +237,23 @@ async def client(app: FastAPI) -> AsyncIterator[AsyncClient]:
 
 @pytest.fixture
 async def db_client(app: FastAPI, db_engine: AsyncEngine) -> AsyncIterator[AsyncClient]:
-    """ASGI client with `get_db` overridden onto the test database."""
+    """ASGI client with `get_db` overridden onto the test database.
+
+    The document service is re-created WITHOUT an enqueuer: background
+    indexing against dev settings (real ES/OpenAI) must not fire from contract
+    tests. The write-path wiring has its own end-to-end test.
+    """
     factory = async_sessionmaker(db_engine, expire_on_commit=False)
 
     async def override_get_db() -> AsyncIterator[AsyncSession]:
         async with factory() as session:
             yield session
 
+    async def override_get_document_service(session: SessionDep) -> DocumentService:
+        return DocumentService(session)
+
     app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_document_service] = override_get_document_service
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
         yield ac

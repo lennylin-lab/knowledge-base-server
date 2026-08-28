@@ -6,10 +6,10 @@ from collections.abc import Sequence
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import any_, func, literal, select, tuple_
+from sqlalchemy import any_, func, literal, select, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.document import Document
+from app.models.document import Document, IndexStatus
 
 
 class DocumentRepository:
@@ -67,3 +67,21 @@ class DocumentRepository:
         # Deliberate SQL-expression assignment: now() is bound server-side so
         # the DB clock stays authoritative, same policy as the column defaults.
         document.deleted_at = func.now()
+
+    async def set_index_status(self, doc_id: UUID, status: IndexStatus) -> None:
+        """One UPDATE, no ORM load; the caller owns the transaction boundary."""
+        await self._session.execute(
+            update(Document).where(Document.id == doc_id).values(index_status=status)
+        )
+
+    async def list_by_index_status(
+        self, statuses: Sequence[IndexStatus], *, limit: int
+    ) -> Sequence[Document]:
+        """Live documents in any of `statuses`, oldest first (bounded sweep)."""
+        stmt = (
+            select(Document)
+            .where(Document.index_status.in_(list(statuses)), Document.deleted_at.is_(None))
+            .order_by(Document.created_at.asc(), Document.id.asc())
+            .limit(limit)
+        )
+        return (await self._session.execute(stmt)).scalars().all()

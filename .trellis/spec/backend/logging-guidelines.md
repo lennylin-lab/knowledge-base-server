@@ -71,6 +71,11 @@ logger.exception("embedding_failed", document_id=str(doc_id))  # inside except
   `latency_ms`, `agent` name. Prompt/completion **content is never logged at
   `info`** (user knowledge may be sensitive); `debug` may log truncated
   previews with an explicit setting.
+- **Embedding calls** (`llm/embeddings.py`) — `embeddings_completed` with
+  `model`, `text_count`, `total_tokens`, `latency_ms`. The text payloads
+  themselves are never logged (same sensitivity as prompts). "Provider
+  alias from Settings" is not yet actionable — no alias field exists in
+  `Settings`; until one is added, log `model` only, never `base_url`.
 - **Agent runs** — bind `run_id` (uuid4) at run start via `contextvars`,
   same mechanism as `request_id`; emit `agent_run_started`
   (agent, question length) and `agent_run_finished` (tool calls count,

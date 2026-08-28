@@ -67,6 +67,11 @@ class MCPToolError(AppError):
     code = "mcp_tool_failed"
 
 
+class SearchIndexError(AppError):
+    status_code = 502
+    code = "search_index_error"
+
+
 def error_response(
     status_code: int,
     code: str,

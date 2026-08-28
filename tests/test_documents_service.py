@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -220,3 +220,58 @@ async def test_delete_missing_document_raises_not_found(db_session):
 
     with pytest.raises(NotFoundError):
         await service.delete_document(uuid4())
+
+
+# --- indexing enqueue wiring (services stay framework-free) ---
+
+
+async def test_create_enqueues_indexing_once_after_commit(db_session):
+    captured: list[UUID] = []
+    service = DocumentService(db_session, enqueuer=captured.append)
+
+    created = await service.create_document(DocumentCreate(content="body"))
+
+    assert captured == [created.id]
+
+
+async def test_update_enqueues_indexing_once_after_commit(db_session):
+    captured: list[UUID] = []
+    service = DocumentService(db_session, enqueuer=captured.append)
+    created = await service.create_document(DocumentCreate(content="body"))
+    captured.clear()
+
+    await service.update_document(created.id, DocumentUpdate(title="touch"))
+
+    assert captured == [created.id]
+
+
+async def test_failed_write_does_not_enqueue(db_session):
+    captured: list[UUID] = []
+    service = DocumentService(db_session, enqueuer=captured.append)
+
+    with pytest.raises(ValidationError):
+        await service.create_document(DocumentCreate(content="---\ntags: notalist\n---\n"))
+    with pytest.raises(NotFoundError):
+        await service.update_document(uuid4(), DocumentUpdate(title="x"))
+
+    assert captured == []  # enqueue happens only after a successful commit
+
+
+async def test_omitted_enqueuer_is_a_noop(db_session):
+    service = DocumentService(db_session)  # default: no background indexing
+
+    created = await service.create_document(DocumentCreate(content="body"))
+    updated = await service.update_document(created.id, DocumentUpdate(title="touch"))
+
+    assert updated.index_status == IndexStatus.PENDING
+
+
+async def test_delete_does_not_enqueue(db_session):
+    captured: list[UUID] = []
+    service = DocumentService(db_session, enqueuer=captured.append)
+    created = await service.create_document(DocumentCreate(content="body"))
+    captured.clear()
+
+    await service.delete_document(created.id)
+
+    assert captured == []

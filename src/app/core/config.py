@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     # --- datastore ---
     DATABASE_URL: str = "postgresql+asyncpg://kb:kb@localhost:5432/kb"
     ELASTICSEARCH_URL: str = "http://localhost:9200"
+    ES_INDEX: str = "kb_documents"
 
     # --- LLM provider (OpenAI-compatible) ---
     OPENAI_BASE_URL: str = "https://api.openai.com/v1"
