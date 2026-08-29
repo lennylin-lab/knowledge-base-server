@@ -92,7 +92,11 @@ logger.exception("embedding_failed", document_id=str(doc_id))  # inside except
   provider failure — `error_class` only, search continues BM25-only).
 - **MCP tools** — `mcp_tool_called` (tool, server, duration) and
   `mcp_tool_failed` (tool, error code). Never log full tool payloads at
-  `info`; sizes are enough.
+  `info`; sizes are enough. Server lifecycle (implemented):
+  `mcp_config_missing` (info), `mcp_server_started` (server, transport,
+  tool_count), `mcp_server_failed` (server, error_class) at start,
+  `mcp_server_stop_failed` at shutdown. `env` values in server configs
+  are secrets — never logged.
 - **Token usage** is a metric, not a log line — but the per-call events above
   make aggregation possible.
 

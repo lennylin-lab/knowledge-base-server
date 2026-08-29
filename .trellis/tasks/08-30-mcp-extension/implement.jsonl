@@ -1,0 +1,5 @@
+{"file": ".trellis/spec/backend/directory-structure.md", "type": "file", "reason": "mcp/ module placement + layering (imports core/schemas only, never api/services/agents/models), singleton/lifecycle precedent (get_shared_es_client), agent tool-registration pattern"}
+{"file": ".trellis/spec/backend/error-handling.md", "type": "file", "reason": "MCPToolError contract (tool name in details), degrade-don't-abort policy for tool failures mid-chat, SSE terminal error rules unchanged"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "type": "file", "reason": "mcp_server_started/failed, mcp_tool_called/failed events; never log tool payloads or env values at info"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "type": "file", "reason": "offline test strategy (in-memory fake server, live_mcp marker mirroring live_llm), provider-constant timeout convention, forbidden patterns, review checklist"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "type": "file", "reason": "confirm no schema/migration changes expected in this task"}

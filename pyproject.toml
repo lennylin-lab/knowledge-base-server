@@ -15,7 +15,7 @@ dependencies = [
     "fastapi>=0.115",
     "httpx>=0.27",
     "markdown-it-py>=3.0",
-    "mcp>=1.0",
+    "mcp>=2.0",
     "openai>=1.40",
     "pgvector>=0.3",
     "pydantic-ai-slim[openai]>=1.0",
@@ -64,9 +64,10 @@ ignore_missing_imports = true
 testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
-addopts = "-m 'not live_llm'"
+addopts = "-m 'not live_llm and not live_mcp'"
 markers = [
     "live_llm: tests that call a real LLM provider (excluded from the default run)",
+    "live_mcp: tests that connect to real MCP servers from mcp.json (excluded from the default run)",
     "db: tests that need the disposable PostgreSQL test database (auto-skip when PG is unreachable)",
     "es: tests that need the local Elasticsearch node (auto-skip when ES is unreachable)",
 ]

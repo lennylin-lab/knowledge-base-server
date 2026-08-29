@@ -89,7 +89,7 @@ knowledge-base-server/
 | Service | `services/` | `repositories/`, `models/`, `schemas/`, `agents/`, `rag/`, `core/` | `api/`, FastAPI objects (`Request`, `Response`) |
 | Agent | `agents/` | `llm/`, `rag/`, `mcp/`, `schemas/`, `core/` | `api/`, `services/`, FastAPI objects |
 | RAG | `rag/` | `models/`, `repositories/`, `search/`, `llm/`, `core/` | `api/`, `services/`, `agents/` |
-| MCP | `mcp/` | `core/`, `schemas/` | `api/`, `services/`, `agents/`, `models/` |
+| MCP | `mcp/` | `core/`, `schemas/`, `pydantic-ai` (tool wrapping in `mcp/tools.py` only) | `api/`, `services/`, `agents/`, `models/`, FastAPI |
 | LLM | `llm/` | `core/` | everything domain (`services/`, `agents/`, `rag/`, …) |
 | Repository | `repositories/` | `models/`, `core/database.py` | `services/`, `api/`, `agents/`, Pydantic schemas |
 

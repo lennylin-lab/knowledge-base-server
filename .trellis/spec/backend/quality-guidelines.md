@@ -36,6 +36,18 @@ keep them fast enough to run locally on every change.
   backend spec files — a manifest that omits one (e.g. database-guidelines)
   under-informs the check agent even when the dispatch prompt requires it.
 
+### Tooling gotchas (learned 2026-08-30, MCP task)
+
+- **Dependency floors must match the API actually imported.** Incident:
+  `mcp>=1.0` in pyproject while `mcp/` imports the 2.x high-level
+  `Client` — a fresh resolution to 1.x would break every import. When a
+  task starts using a new major-version API of an existing dep, raise the
+  floor in the same change and re-lock.
+- **`.env.example` must enumerate every Settings group.** Adding a
+  Settings field without its commented example entry makes the config
+  surface undiscoverable; when a new group lands (e.g. `KB_MCP_CONFIG_PATH`),
+  update `.env.example` in the same task.
+
 ## Python Style
 
 - Target Python 3.12+; modern syntax (`X | None`, `match`, f-strings).

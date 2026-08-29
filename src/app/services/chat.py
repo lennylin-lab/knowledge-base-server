@@ -8,12 +8,13 @@ escape `ask` once streaming has started (error-handling spec, streaming rule).
 from __future__ import annotations
 
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from uuid import uuid4
 
 import openai
 import structlog
 from pydantic_ai.models import Model
+from pydantic_ai.tools import Tool
 
 from app.agents.qa import ChatDeps, SourceCollector, build_qa_agent
 from app.core.exceptions import (
@@ -39,11 +40,20 @@ logger = structlog.get_logger(__name__)
 class ChatService:
     """Streams one knowledge-grounded answer per question."""
 
-    def __init__(self, retriever: Retriever, model: Model, *, mode: SearchMode) -> None:
+    def __init__(
+        self,
+        retriever: Retriever,
+        model: Model,
+        *,
+        mode: SearchMode,
+        extra_tools: Sequence[Tool[ChatDeps]] = (),
+    ) -> None:
         self._retriever = retriever
         self._mode = mode
         self._model = model
-        self._agent = build_qa_agent(model)
+        # Wrapped MCP tools arrive here (wired once per process in deps.py);
+        # the default empty sequence keeps the agent identical to pre-MCP.
+        self._agent = build_qa_agent(model, extra_tools=extra_tools)
 
     async def ask(self, question: str, *, limit: int = 8) -> AsyncIterator[ChatStreamEvent]:
         """Run one QA turn, yielding typed stream events in contract order.

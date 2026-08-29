@@ -13,6 +13,7 @@ from uuid import UUID
 from pydantic_ai.messages import ModelMessage, ModelRequest, ToolReturnPart
 from pydantic_ai.models.function import DeltaToolCall, FunctionModel
 
+from app.mcp.manager import McpToolResult
 from app.models.document_chunk import EMBEDDING_DIM
 from app.rag.retriever import ChunkKey, RetrievedChunk, SearchOutcome
 
@@ -172,6 +173,30 @@ def empty_outcome(mode: Literal["hybrid", "bm25"] = "hybrid") -> SearchOutcome:
     return SearchOutcome(mode=mode, items=[], es_hits=0, vector_hits=0)
 
 
+class FakeMcpManager:
+    """Stands in for `mcp.manager.McpManager`: scripted result or a raise.
+
+    Records `(server, tool, arguments)` per call so tests assert what a
+    wrapped agent tool actually asked the manager for. `build_agent_tools`
+    only touches `call_tool`, so no other surface is needed.
+    """
+
+    def __init__(
+        self,
+        result: McpToolResult | None = None,
+        error: Exception | None = None,
+    ) -> None:
+        self.result = result if result is not None else McpToolResult(text="42", structured=None)
+        self.error = error
+        self.calls: list[tuple[str, str, dict[str, Any]]] = []
+
+    async def call_tool(self, server: str, tool: str, arguments: dict[str, Any]) -> McpToolResult:
+        self.calls.append((server, tool, dict(arguments)))
+        if self.error is not None:
+            raise self.error
+        return self.result
+
+
 def _tool_return_count(messages: list[ModelMessage]) -> int:
     """Completed tool calls visible in the run's message history."""
     return sum(
@@ -190,24 +215,31 @@ def scripted_chat_model(
     fail_during_answer: Exception | None = None,
     fail_after_parts: int = 0,
     tool_results: list[str] | None = None,
+    tool_name: str = "search_knowledge",
+    tool_args: Sequence[dict[str, Any]] | None = None,
 ) -> FunctionModel:
     """FunctionModel scripting the QA turn: tool calls first, then streamed text.
 
     Phase detection is behavioral, like a real model: while fewer tool results
     are visible in the history than scripted `tool_calls`, the next model
-    request asks for `search_knowledge`; after that, `answer_parts` stream as
-    text deltas (one yield each — matching `debounce_by=None` streaming).
+    request asks for the tool; after that, `answer_parts` stream as text
+    deltas (one yield each — matching `debounce_by=None` streaming).
+
+    `tool_name`/`tool_args` script calls to a non-retrieval tool (e.g. a
+    wrapped MCP tool): each scripted call sends `tool_args[i]` (defaulting to
+    `{"query": tool_calls[i]}` for `search_knowledge`).
 
     `fail_before_run` raises on every model request (provider down at start);
     `fail_during_answer` raises after `fail_after_parts` text parts were
     yielded (provider died mid-stream).
 
-    `tool_results`, when given, accumulates the `search_knowledge` tool return
-    values as the model saw them (one entry per completed call, in order) —
-    the observable for citation-numbering assertions.
+    `tool_results`, when given, accumulates the tool return values as the
+    model saw them (one entry per completed call, in order) — the observable
+    for citation-numbering and MCP-error-string assertions.
     """
     queries = list(tool_calls)
     parts = list(answer_parts)
+    args = list(tool_args) if tool_args is not None else None
 
     async def stream_function(messages: list[ModelMessage], info: object) -> Any:
         if fail_before_run is not None:
@@ -218,16 +250,17 @@ def scripted_chat_model(
                 for message in messages
                 if isinstance(message, ModelRequest)
                 for part in message.parts
-                if isinstance(part, ToolReturnPart) and part.tool_name == "search_knowledge"
+                if isinstance(part, ToolReturnPart) and part.tool_name == tool_name
             ]
             # History grows per model request; record only returns not seen yet.
             tool_results.extend(fresh[len(tool_results) :])
         returned = _tool_return_count(messages)
         if returned < len(queries):
+            payload = args[returned] if args is not None else {"query": queries[returned]}
             yield {
                 0: DeltaToolCall(
-                    name="search_knowledge",
-                    json_args=json.dumps({"query": queries[returned]}),
+                    name=tool_name,
+                    json_args=json.dumps(payload),
                     tool_call_id=f"call_{returned}",
                 )
             }

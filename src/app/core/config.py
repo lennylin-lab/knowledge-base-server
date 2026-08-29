@@ -32,6 +32,11 @@ class Settings(BaseSettings):
     EMBEDDING_DIM: int = 1536
     CHAT_MODEL: str = "gpt-4o-mini"
 
+    # --- MCP extension ---
+    # Path to a Claude-Desktop-style `{"mcpServers": {...}}` file; relative
+    # paths resolve against the working directory. Missing file = no servers.
+    MCP_CONFIG_PATH: str = "mcp.json"
+
     # --- observability ---
     LOG_LEVEL: str = "INFO"
     LOG_FORMAT: str = "console"  # "console" | "json"

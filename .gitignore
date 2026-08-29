@@ -19,6 +19,9 @@ htmlcov/
 .env.*
 !.env.example
 
+# MCP server config (may hold real API keys in `env`); copy from mcp.json.example
+mcp.json
+
 # Claude Code local settings (machine-specific) and transient temp files
 .claude/settings.local.json
 .claude/*.tmp.*

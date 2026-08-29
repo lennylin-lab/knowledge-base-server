@@ -10,12 +10,13 @@ or anything FastAPI (see directory-structure.md).
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.models import Model
+from pydantic_ai.tools import Tool
 
 from app.rag.retriever import RetrievedChunk, Retriever
 from app.schemas.search import SearchHit
@@ -54,11 +55,13 @@ class SourceCollector:
 
     `on_append` is set by the orchestrating service so it can flush `sources`
     stream events as soon as a tool call returns — without the agent knowing
-    anything about streaming.
+    anything about streaming. External (MCP) tool calls are counted too, so
+    the run's `tool_calls` total covers every tool the agent invoked.
     """
 
     def __init__(self, on_append: Callable[[list[SearchHit]], None] | None = None) -> None:
         self._batches: list[list[SearchHit]] = []
+        self._external_calls = 0
         self.on_append = on_append
 
     def append(self, items: list[SearchHit]) -> None:
@@ -66,10 +69,15 @@ class SourceCollector:
         if self.on_append is not None:
             self.on_append(items)
 
+    def record_external_tool_call(self) -> int:
+        """Count one external (non-retrieval) tool call; returns the new total."""
+        self._external_calls += 1
+        return self._external_calls
+
     @property
     def tool_calls(self) -> int:
-        """Number of completed retrieval tool calls in this run."""
-        return len(self._batches)
+        """Completed tool calls in this run: retrieval batches + external calls."""
+        return len(self._batches) + self._external_calls
 
     @property
     def total_hits(self) -> int:
@@ -88,6 +96,14 @@ class ChatDeps:
     retriever: Retriever
     limit: int
     collector: SourceCollector
+
+    def record_external_tool_call(self) -> None:
+        """Satisfies `mcp.tools.McpCallObserver` structurally (no import needed).
+
+        Wrappers built by `mcp/tools.py` duck-type this so external tool calls
+        land in the run's `tool_calls` total without `mcp/` importing `agents/`.
+        """
+        self.collector.record_external_tool_call()
 
 
 def format_context_blocks(hits: list[SearchHit], *, start: int = 1) -> str:
@@ -126,15 +142,21 @@ async def search_knowledge(ctx: RunContext[ChatDeps], query: str) -> str:
     return format_context_blocks(hits, start=start)
 
 
-def build_qa_agent(model: Model) -> Agent[ChatDeps, str]:
+def build_qa_agent(
+    model: Model, extra_tools: Sequence[Tool[ChatDeps]] = ()
+) -> Agent[ChatDeps, str]:
     """Construct the reusable QA agent around an injected model.
 
     Tests pass a `FunctionModel`; production passes the Settings-built model
     from `llm/models.py` — model construction never happens here.
+
+    `extra_tools` (wrapped MCP tools in production) register after
+    `search_knowledge`; the empty default keeps the agent's toolset — and its
+    behavior — byte-identical to the pre-MCP agent.
     """
     return Agent(
         model,
         deps_type=ChatDeps,
         instructions=_QA_INSTRUCTIONS,
-        tools=[search_knowledge],
+        tools=[search_knowledge, *extra_tools],
     )

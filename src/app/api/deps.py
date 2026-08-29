@@ -14,6 +14,8 @@ from app.core.database import SessionFactory, get_db
 from app.core.exceptions import ChatUnavailableError
 from app.llm.embeddings import OpenAIEmbeddingProvider
 from app.llm.models import get_chat_model
+from app.mcp.manager import get_mcp_manager
+from app.mcp.tools import build_agent_tools
 from app.rag.indexer import run_indexing
 from app.rag.retriever import Retriever
 from app.search.es import get_shared_es_client
@@ -101,6 +103,12 @@ def build_chat_service(settings: Settings) -> ChatService:
         raise ChatUnavailableError(
             "Chat is not configured: set OPENAI_API_KEY to enable it",
         )
+    # External MCP tools ride along when the (process-lifetime) manager is up
+    # with a non-empty tool snapshot; unconfigured deployments build none and
+    # the agent is exactly the pre-MCP one. The snapshot is taken once here —
+    # config changes need a restart (documented, no hot reload).
+    manager = get_mcp_manager()
+    extra_tools = build_agent_tools(manager, manager.list_tools()) if manager.running else []
     # With a non-empty key the embedding provider always exists, so the chat
     # retriever is always wired hybrid; BM25-only chat is not a state this
     # constructor can produce.
@@ -108,6 +116,7 @@ def build_chat_service(settings: Settings) -> ChatService:
         _build_retriever(settings, embedding_provider_from_settings(settings)),
         get_chat_model(settings),
         mode="hybrid",
+        extra_tools=extra_tools,
     )
 
 

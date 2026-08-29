@@ -1,0 +1,5 @@
+{"file": ".trellis/spec/backend/directory-structure.md", "type": "file", "reason": "verify mcp/ layering (core-only imports), manager singleton + lifespan ownership, prompt asset updated as reviewable diff"}
+{"file": ".trellis/spec/backend/error-handling.md", "type": "file", "reason": "verify malformed config = loud startup error, server failure isolation, tool failure = error string to model (run continues), MCPToolError details carry server+tool"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "type": "file", "reason": "verify mcp event names/fields, no payload/env logging, latency on tool calls"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "type": "file", "reason": "gates green, no subprocess/network in default tests, live_mcp deselected, regression: unconfigured behavior byte-identical, review checklist"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "type": "file", "reason": "confirm zero schema/migration drift"}

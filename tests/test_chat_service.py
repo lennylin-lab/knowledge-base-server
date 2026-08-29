@@ -13,7 +13,10 @@ import openai
 import structlog
 from structlog.testing import capture_logs
 
+from app.agents.qa import SourceCollector
 from app.core.exceptions import SearchIndexError
+from app.mcp.manager import McpToolInfo, McpToolResult
+from app.mcp.tools import build_agent_tools
 from app.rag.retriever import RetrievedChunk, SearchOutcome
 from app.schemas.chat import (
     AnswerDeltaEvent,
@@ -23,7 +26,12 @@ from app.schemas.chat import (
     SourcesEvent,
 )
 from app.services.chat import ChatService
-from fakes import StubRetriever, retrieved_chunk, scripted_chat_model
+from fakes import (
+    FakeMcpManager,
+    StubRetriever,
+    retrieved_chunk,
+    scripted_chat_model,
+)
 
 QUESTION = "What do the notes say about zorblat?"
 ANSWER_PARTS = ["Zorblat is a test term ", "used in fixtures [1]."]
@@ -311,3 +319,113 @@ async def test_run_id_is_bound_into_every_log_line_and_question_text_never_logge
     assert started["question_length"] == len(QUESTION)
     # The question itself is user data: never logged at any level.
     assert QUESTION not in str(logs)
+
+
+# --- external (MCP) tool integration (offline; fake manager) ---
+
+
+def _mcp_tools(manager: FakeMcpManager) -> list[object]:
+    """One wrapped external tool, as deps.py would build from a snapshot."""
+    return build_agent_tools(
+        manager,
+        [
+            McpToolInfo(
+                server="alpha",
+                name="add",
+                description="Add two integers.",
+                input_schema={
+                    "type": "object",
+                    "properties": {"a": {"type": "integer"}, "b": {"type": "integer"}},
+                    "required": ["a", "b"],
+                },
+            )
+        ],
+    )
+
+
+async def test_mcp_tool_call_streams_answer_and_counts_in_tool_calls() -> None:
+    manager = FakeMcpManager(result=McpToolResult(text="3", structured={"result": 3}))
+    service = ChatService(
+        StubRetriever(),
+        scripted_chat_model(
+            tool_calls=["add 1 and 2"],
+            tool_name="mcp_alpha_add",
+            tool_args=[{"a": 1, "b": 2}],
+            answer_parts=["One plus two is 3 (external: alpha)."],
+        ),
+        mode="hybrid",
+        extra_tools=_mcp_tools(manager),
+    )
+
+    events = await _collect(service, QUESTION)
+
+    # No `sources` event: external tools never emit KB sources (by design).
+    assert _names(events) == ["RunStartedEvent", "AnswerDeltaEvent", "DoneEvent"]
+    assert _answer_text(events) == "One plus two is 3 (external: alpha)."
+    assert manager.calls == [("alpha", "add", {"a": 1, "b": 2})]
+    done = events[-1]
+    assert isinstance(done, DoneEvent)
+    assert done.outcome == "success"
+    assert done.tool_calls == 1  # the external call is counted
+
+
+async def test_mcp_tool_failure_mid_run_still_ends_with_done() -> None:
+    manager = FakeMcpManager(error=RuntimeError("transport exploded"))
+    tool_results: list[str] = []
+    service = ChatService(
+        StubRetriever(),
+        scripted_chat_model(
+            tool_calls=["add anything"],
+            tool_name="mcp_alpha_add",
+            tool_args=[{"a": 1, "b": 1}],
+            answer_parts=["I could not verify that externally."],
+            tool_results=tool_results,
+        ),
+        mode="hybrid",
+        extra_tools=_mcp_tools(manager),
+    )
+
+    events = await _collect(service, QUESTION)
+
+    # The degraded tool result reached the model; the run completed normally —
+    # an external failure must never become a terminal error event.
+    assert tool_results == ["tool mcp_alpha_add failed: RuntimeError"]
+    assert _names(events) == ["RunStartedEvent", "AnswerDeltaEvent", "DoneEvent"]
+    done = events[-1]
+    assert isinstance(done, DoneEvent)
+    assert done.outcome == "success"
+    assert not any(isinstance(event, ErrorEvent) for event in events)
+
+
+async def test_without_extra_tools_the_agent_behaves_as_before() -> None:
+    # Default construction path (no MCP configured): identical contract to
+    # the pre-MCP service, pinned next to the integration tests on purpose.
+    retriever = _make_retriever()
+    service = ChatService(
+        retriever,
+        scripted_chat_model(tool_calls=["zorblat"], answer_parts=ANSWER_PARTS),
+        mode="hybrid",
+    )
+
+    events = await _collect(service, QUESTION)
+
+    assert _names(events) == [
+        "RunStartedEvent",
+        "SourcesEvent",
+        "AnswerDeltaEvent",
+        "AnswerDeltaEvent",
+        "DoneEvent",
+    ]
+
+
+async def test_collector_counts_retrieval_and_external_calls_together() -> None:
+    # The run-wide `tool_calls` total mixes both tool families; pinned at the
+    # collector level so the DoneEvent semantics stay explicit.
+    collector = SourceCollector()
+
+    collector.append([])
+    collector.record_external_tool_call()
+    collector.append([])
+
+    assert collector.tool_calls == 3
+    assert collector.total_hits == 0  # external calls contribute no KB hits
