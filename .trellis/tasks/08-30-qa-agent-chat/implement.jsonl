@@ -1,0 +1,5 @@
+{"file": ".trellis/spec/backend/directory-structure.md", "type": "file", "reason": "agent placement + new-agent-capability order (prompts → agent → service → router), layering (agents import llm/rag/schemas/core, never services; tool closure/deps injection pattern)"}
+{"file": ".trellis/spec/backend/error-handling.md", "type": "file", "reason": "SSE mid-stream failure rule (terminal error event, never hang), AppError subclass convention for ChatUnavailableError, taxonomy table"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "type": "file", "reason": "agent run events (agent_run_started/finished, run_id contextvar binding), question text never logged, token usage fields"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "type": "file", "reason": "faked-model test strategy (FunctionModel), offline requirement, live_llm marker, forbidden patterns, review checklist"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "type": "file", "reason": "no schema change expected; retriever reuse rules (live-doc join already handled in rag/retriever.py)"}

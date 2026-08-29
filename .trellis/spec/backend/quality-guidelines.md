@@ -108,8 +108,10 @@ that reproduces the bug first.
 7. Schema changes: Alembic revision with working downgrade; embedding
    dimension untouched.
 8. No secrets or tokens in code, logs, or test fixtures (use env/Settings).
-9. Model names, `base_url`, timeouts, retry counts come from `Settings` —
-   no literals in `src/`.
+9. Model names and `base_url` come from `Settings` — no literals in
+   `src/`. SDK timeout/retry defaults are the one exception: they live as
+   provider-layer constants in `llm/` (`_REQUEST_TIMEOUT`,
+   `_MAX_RETRIES` — same defaults across embeddings and chat).
 10. Prompt changes edit files under `agents/prompts/` (reviewable diff),
     not inline f-strings buried in Python.
 

@@ -67,8 +67,10 @@ logger.exception("embedding_failed", document_id=str(doc_id))  # inside except
 ## AI Stack Logging
 
 - **LLM calls** — one `info` event per completed call:
-  `model`, `provider` (host only), `input_tokens`, `output_tokens`,
-  `latency_ms`, `agent` name. Prompt/completion **content is never logged at
+  `model` (model name only — **never `base_url`**; a provider-alias
+  field may be added to Settings later, none exists yet),
+  `input_tokens`, `output_tokens`, `latency_ms`, `agent` name.
+  Prompt/completion **content is never logged at
   `info`** (user knowledge may be sensitive); `debug` may log truncated
   previews with an explicit setting.
 - **Embedding calls** (`llm/embeddings.py`) — `embeddings_completed` with

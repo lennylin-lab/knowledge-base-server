@@ -72,6 +72,14 @@ class SearchIndexError(AppError):
     code = "search_index_error"
 
 
+class ChatUnavailableError(AppError):
+    """Chat cannot run at all (e.g. no provider API key) — unlike search there
+    is no non-LLM fallback, so it fails fast with a clean envelope."""
+
+    status_code = 503
+    code = "chat_unavailable"
+
+
 def error_response(
     status_code: int,
     code: str,

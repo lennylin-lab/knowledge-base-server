@@ -115,7 +115,7 @@ envelope via a `RequestValidationError` handler.
 | Layer | On failure |
 |-------|-----------|
 | Router | Lets exceptions propagate; maps nothing. Returns 2xx responses only. |
-| Service | Raises `NotFoundError` / `ConflictError` / etc. Never catches broad `Exception` to swallow. |
+| Service | Raises `NotFoundError` / `ConflictError` / etc. Never catches broad `Exception` to swallow. Narrow exception: services may import provider SDK **exception types** (e.g. `openai.RateLimitError`) to map into `LLMProviderError` subclasses — SDK *clients* are constructed only in `llm/`. |
 | Repository | Raises SQLAlchemy errors as-is; translates to domain exceptions **only** for unique-violation → `ConflictError`. |
 | Agent (`agents/`) | Provider failures (5xx/connect/timeout from `openai` SDK) surface as-is to the service, which wraps them in `LLMProviderError`. |
 | `llm/` | Normalizes provider SDK exceptions; retries idempotent calls (configurable in Settings) before giving up. |
@@ -138,6 +138,20 @@ envelope can no longer be delivered as a status code. The chat service wraps
 the agent run; on failure it pushes
 `event: error\ndata: {"code": "...", "message": "..."}\n\n` and completes the
 stream. The client contract (frontend repo) treats `error` event as terminal.
+
+Canonical SSE event set (chat, implemented in `services/chat.py`):
+`run_started` (run_id, mode) → `sources` (SearchHit items, after each
+retrieval tool call) → `answer_delta` (text parts) → `done`
+(run_id, outcome, tool_calls, latency_ms) | `error` (terminal). The
+service generator must never raise after the first event is yielded —
+everything becomes an `error` event; client disconnects
+(`CancelledError`/`GeneratorExit`) propagate for cancellation instead.
+
+Gate-style dependency ordering: FastAPI resolves `Depends` **before** body
+validation, so an unconfigured dependency (e.g. no API key → 503
+`chat_unavailable`) wins over an invalid body (422). That is accepted
+behavior for configuration-gate dependencies — document it at the
+construction site, don't reorder.
 
 Background pipeline (indexing/embedding) never raises to users: failures are
 caught at the job boundary, logged with full context, and the document's

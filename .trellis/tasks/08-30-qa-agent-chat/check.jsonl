@@ -1,0 +1,5 @@
+{"file": ".trellis/spec/backend/directory-structure.md", "type": "file", "reason": "verify agents/ layering (no services/api imports, deps injection not module state), prompt as versioned asset, router thin + one service call"}
+{"file": ".trellis/spec/backend/error-handling.md", "type": "file", "reason": "verify SSE terminal error rule, no-key 503 envelope before stream, SearchIndexError path through the tool, no escaped exceptions after first event"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "type": "file", "reason": "verify agent_run events, run_id contextvar, question_length not text, usage/latency fields"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "type": "file", "reason": "gates green, offline contract, faked-model tests only (no accidental live calls), review checklist"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "type": "file", "reason": "confirm no unexpected schema/migration changes; retriever usage unchanged"}

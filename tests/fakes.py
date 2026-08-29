@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import random
-from typing import Any
+from collections.abc import Sequence
+from typing import Any, Literal
 from uuid import UUID
 
+from pydantic_ai.messages import ModelMessage, ModelRequest, ToolReturnPart
+from pydantic_ai.models.function import DeltaToolCall, FunctionModel
+
 from app.models.document_chunk import EMBEDDING_DIM
+from app.rag.retriever import ChunkKey, RetrievedChunk, SearchOutcome
 
 
 def basis_vector(index: int, dim: int = EMBEDDING_DIM) -> list[float]:
@@ -110,3 +116,125 @@ class StubEsClient:
 
     async def close(self) -> None:
         self.closed = True
+
+
+# --- chat doubles (offline; no live LLM anywhere near these) ---
+
+
+def retrieved_chunk(
+    document_id: UUID | None = None,
+    *,
+    chunk_index: int = 0,
+    content: str = "chunk content",
+    document_title: str = "Notes",
+    document_tags: list[str] | None = None,
+    score: float = 0.5,
+    es_rank: int | None = 1,
+    vector_rank: int | None = 1,
+) -> RetrievedChunk:
+    """A hydrated retrieval chunk with sane defaults; ids are random."""
+    return RetrievedChunk(
+        key=ChunkKey(document_id or UUID(int=0), chunk_index),
+        score=score,
+        es_rank=es_rank,
+        vector_rank=vector_rank,
+        content=content,
+        document_title=document_title,
+        document_tags=document_tags or [],
+    )
+
+
+class StubRetriever:
+    """Stands in for `rag.retriever.Retriever`: scripted outcome or a raise.
+
+    Records `(query, limit)` per call so tests assert what the agent's tool
+    actually asked for.
+    """
+
+    def __init__(
+        self, outcome: SearchOutcome | None = None, error: Exception | None = None
+    ) -> None:
+        self.outcome = outcome if outcome is not None else empty_outcome()
+        self.error = error
+        self.calls: list[tuple[str, int]] = []
+
+    async def retrieve(
+        self, query: str, *, limit: int = 10, tag: str | None = None
+    ) -> SearchOutcome:
+        self.calls.append((query, limit))
+        if self.error is not None:
+            raise self.error
+        return self.outcome
+
+
+def empty_outcome(mode: Literal["hybrid", "bm25"] = "hybrid") -> SearchOutcome:
+    """A retrieval outcome with no hits."""
+    return SearchOutcome(mode=mode, items=[], es_hits=0, vector_hits=0)
+
+
+def _tool_return_count(messages: list[ModelMessage]) -> int:
+    """Completed tool calls visible in the run's message history."""
+    return sum(
+        isinstance(part, ToolReturnPart)
+        for message in messages
+        if isinstance(message, ModelRequest)
+        for part in message.parts
+    )
+
+
+def scripted_chat_model(
+    *,
+    tool_calls: Sequence[str] = (),
+    answer_parts: Sequence[str] = (),
+    fail_before_run: Exception | None = None,
+    fail_during_answer: Exception | None = None,
+    fail_after_parts: int = 0,
+    tool_results: list[str] | None = None,
+) -> FunctionModel:
+    """FunctionModel scripting the QA turn: tool calls first, then streamed text.
+
+    Phase detection is behavioral, like a real model: while fewer tool results
+    are visible in the history than scripted `tool_calls`, the next model
+    request asks for `search_knowledge`; after that, `answer_parts` stream as
+    text deltas (one yield each — matching `debounce_by=None` streaming).
+
+    `fail_before_run` raises on every model request (provider down at start);
+    `fail_during_answer` raises after `fail_after_parts` text parts were
+    yielded (provider died mid-stream).
+
+    `tool_results`, when given, accumulates the `search_knowledge` tool return
+    values as the model saw them (one entry per completed call, in order) —
+    the observable for citation-numbering assertions.
+    """
+    queries = list(tool_calls)
+    parts = list(answer_parts)
+
+    async def stream_function(messages: list[ModelMessage], info: object) -> Any:
+        if fail_before_run is not None:
+            raise fail_before_run
+        if tool_results is not None:
+            fresh = [
+                str(part.content)
+                for message in messages
+                if isinstance(message, ModelRequest)
+                for part in message.parts
+                if isinstance(part, ToolReturnPart) and part.tool_name == "search_knowledge"
+            ]
+            # History grows per model request; record only returns not seen yet.
+            tool_results.extend(fresh[len(tool_results) :])
+        returned = _tool_return_count(messages)
+        if returned < len(queries):
+            yield {
+                0: DeltaToolCall(
+                    name="search_knowledge",
+                    json_args=json.dumps({"query": queries[returned]}),
+                    tool_call_id=f"call_{returned}",
+                )
+            }
+            return
+        for index, part in enumerate(parts):
+            if fail_during_answer is not None and index == fail_after_parts:
+                raise fail_during_answer
+            yield part
+
+    return FunctionModel(stream_function=stream_function, model_name="scripted-qa")
