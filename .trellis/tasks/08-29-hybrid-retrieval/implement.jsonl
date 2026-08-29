@@ -1,0 +1,5 @@
+{"file": ".trellis/spec/backend/directory-structure.md", "type": "file", "reason": "layering matrix (rag may import repositories/search/llm; search/ no domain logic; router→service→rag), module placement retriever.py/queries.py, enqueuer-style callable injection precedent"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "type": "file", "reason": "search_similar canonical shape (cosine_distance ordering), ES section (replace semantics, refresh gotcha, exception tuple), select() rules, no OFFSET"}
+{"file": ".trellis/spec/backend/error-handling.md", "type": "file", "reason": "SearchIndexError placement and envelope mapping, degradation vs failure asymmetry, no raw provider exceptions escaping"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "type": "file", "reason": "retrieval_executed/search_executed event fields, query text NOT logged (q_length only), error_class without content"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "type": "file", "reason": "offline test strategy (pure-unit first, probe-skip for db/es), fake provider patterns, forbidden patterns, review checklist"}

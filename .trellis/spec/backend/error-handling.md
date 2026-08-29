@@ -64,6 +64,11 @@ class LLMRateLimitedError(AppError):
 class MCPToolError(AppError):
     status_code = 502
     code = "mcp_tool_failed"
+
+
+class SearchIndexError(AppError):
+    status_code = 502
+    code = "search_index_error"
 ```
 
 Add a new subclass when a new failure mode appears — never overload an
@@ -124,6 +129,8 @@ envelope via a `RequestValidationError` handler.
 | Provider rate limit | `LLMRateLimitedError` | 429 | include `Retry-After` when provider gives one |
 | Context window exceeded | `ValidationError` | 422 | chunking/retrieval bug — fix there, don't truncate silently |
 | External MCP tool failure | `MCPToolError` | 502 | `details: {"tool": "web_search"}`; agent may retry or degrade |
+| Vector leg unavailable at search time (no key configured, or provider error mid-search) | — | 200 | **degrade, never 5xx**: warn (`vector_search_disabled`/`vector_search_degraded`), continue BM25-only, response `mode: "bm25"` |
+| ES search failure | `SearchIndexError` | 502 | broken ranking dependency — propagate; never return silently-empty results. When both legs fail, the ES error wins |
 | Mid-stream failure (SSE already 200) | — | — | emit a final SSE `error` event, then close the stream; never leave it hanging |
 
 Streaming rule: once the SSE response started (status 200 sent), the error

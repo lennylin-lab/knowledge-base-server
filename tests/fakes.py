@@ -11,6 +11,13 @@ from uuid import UUID
 from app.models.document_chunk import EMBEDDING_DIM
 
 
+def basis_vector(index: int, dim: int = EMBEDDING_DIM) -> list[float]:
+    """One-hot unit vector: basis(0) and basis(1) are orthogonal (cosine 1)."""
+    vector = [0.0] * dim
+    vector[index] = 1.0
+    return vector
+
+
 class FakeEmbeddingProvider:
     """Deterministic offline stand-in: hash-seeded, unit-norm vectors.
 
@@ -35,6 +42,28 @@ class FakeEmbeddingProvider:
         vector = [rng.uniform(-1.0, 1.0) for _ in range(self._dim)]
         norm = math.sqrt(sum(component * component for component in vector))
         return [component / norm for component in vector]
+
+
+class ScriptedEmbeddingProvider:
+    """Preset vector map (text → vector); unmapped texts get `default`.
+
+    Lets tests plant known neighbors: index-time chunk texts and the search
+    query can be scripted onto the same vector (distance 0) or orthogonal
+    ones (distance 1). `error`, when set, raises on the next call — for
+    provider-failure paths.
+    """
+
+    def __init__(self, default: list[float] | None = None) -> None:
+        self.vectors: dict[str, list[float]] = {}
+        self.default: list[float] = default if default is not None else basis_vector(0)
+        self.error: Exception | None = None
+        self.calls: list[list[str]] = []
+
+    async def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        self.calls.append(list(texts))
+        if self.error is not None:
+            raise self.error
+        return [self.vectors.get(text, self.default) for text in texts]
 
 
 class RecordingEsStore:

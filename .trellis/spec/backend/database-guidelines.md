@@ -165,17 +165,32 @@ Vector similarity lives in a repository too (`rag/` orchestrates, the
 repository executes SQL):
 
 ```python
-# repositories/document_chunk.py (canonical shape)
+# repositories/document_chunk.py (canonical shape — implemented in hybrid-retrieval)
+# Retrieval reads JOIN live documents: PG is the single visibility source
+# of truth — soft-deleted documents' chunks never surface, regardless of
+# what ES still indexes (ES ranks, PG hydrates).
 async def search_similar(
-    self, query_embedding: list[float], *, limit: int = 20
-) -> Sequence[DocumentChunk]:
+    self, embedding: list[float], *, limit: int, tag: str | None = None
+) -> Sequence[ChunkRow]:   # hydrated: chunk cols + document title/tags
     stmt = (
-        select(DocumentChunk)
-        .order_by(DocumentChunk.embedding.cosine_distance(query_embedding))
+        select(_LIVE_CHUNK_SELECT)          # chunk + document columns
+        .join(Document, Document.id == DocumentChunk.document_id)
+        .where(Document.deleted_at.is_(None))   # + AND :tag = ANY(Document.tags)
+        .order_by(DocumentChunk.embedding.cosine_distance(embedding))
         .limit(limit)
     )
-    return (await self._session.execute(stmt)).scalars().all()
+    ...
+
+async def get_live_chunks(
+    self, keys: Sequence[tuple[UUID, int]]
+) -> dict[tuple[UUID, int], ChunkRow]:
+    # tuple-IN hydration for ES-leg keys (document_id, chunk_index);
+    # bounded by the candidate pool; keys of deleted docs hydrate to
+    # nothing and are dropped by the caller
 ```
+
+Rule: **retrieval queries always join live documents**
+(`deleted_at IS NULL`). Visibility filtering never lives in ES.
 
 Hybrid retrieval (`rag/retriever.py`) runs ES BM25 and pgvector searches
 concurrently, then fuses ranks with Reciprocal Rank Fusion (RRF) in Python —

@@ -8,13 +8,15 @@ document content — in the details.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from functools import lru_cache
+from typing import Any, NamedTuple
 from uuid import UUID
 
 import structlog
 from elasticsearch import ApiError, AsyncElasticsearch, TransportError
 from elasticsearch.helpers import BulkIndexError, async_bulk
 
-from app.core.config import Settings
+from app.core.config import Settings, get_settings
 from app.core.exceptions import SearchIndexError
 
 logger = structlog.get_logger(__name__)
@@ -39,6 +41,14 @@ _CHUNK_MAPPINGS: dict[str, dict[str, dict[str, str]]] = {
 def get_es_client(settings: Settings) -> AsyncElasticsearch:
     """Client from Settings — the only construction site for ES clients."""
     return AsyncElasticsearch(hosts=[settings.ELASTICSEARCH_URL], request_timeout=30)
+
+
+@lru_cache(maxsize=1)
+def get_shared_es_client() -> AsyncElasticsearch:
+    """Process-lifetime client for request paths: one transport pool per app
+    lifetime, never one per request. (The indexing pipeline deliberately
+    keeps its own short-lived client — it runs detached from requests.)"""
+    return get_es_client(get_settings())
 
 
 async def ensure_index(client: AsyncElasticsearch, index: str) -> None:
@@ -111,3 +121,30 @@ def _wrap(operation: str, index: str, exc: Exception) -> SearchIndexError:
         "Search index operation failed",
         details={"operation": operation, "index": index, "error_class": type(exc).__name__},
     )
+
+
+class EsChunkHit(NamedTuple):
+    """One ranked ES hit: the chunk key (parsed from the doc id) + BM25 score."""
+
+    document_id: UUID
+    chunk_index: int
+    score: float
+
+
+async def search_chunks(
+    client: AsyncElasticsearch, *, index: str, body: dict[str, Any]
+) -> list[EsChunkHit]:
+    """Run one prepared chunk query (see `queries.py`); hits as keys + scores.
+
+    Source retrieval stays disabled by the caller: content lives in PG, and
+    the deterministic doc id `{document_id}:{chunk_index}` carries the key.
+    """
+    try:
+        response = await client.search(index=index, **body)
+    except _ES_ERRORS as exc:
+        raise _wrap("search_chunks", index, exc) from exc
+    hits: list[EsChunkHit] = []
+    for hit in response["hits"]["hits"]:
+        document_id, _, chunk_index = hit["_id"].rpartition(":")
+        hits.append(EsChunkHit(UUID(document_id), int(chunk_index), float(hit["_score"] or 0.0)))
+    return hits

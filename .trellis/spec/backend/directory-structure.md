@@ -112,6 +112,10 @@ Key points:
 - **Routers** parse/validate input, call exactly one service method, map the
   result to a response schema (or an SSE stream). No business meaning.
 - **Repositories** own every SQL query; `search/` owns every ES query.
+  ES clients have two explicit lifecycles: the read path (retrieval) shares
+  one process-lifetime client (`get_shared_es_client`, lru_cache in
+  `search/es.py`), while the indexing pipeline builds its own short-lived
+  client per run and closes it — never a client per request.
 - **Framework callbacks are injected as plain callables.** Services stay
   framework-free by depending on a callable type they own (e.g.
   `ReindexEnqueuer = Callable[[UUID], None]` in `services/document.py`);

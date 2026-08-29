@@ -1,0 +1,5 @@
+{"file": ".trellis/spec/backend/directory-structure.md", "type": "file", "reason": "verify layering: endpoint thin, service framework-free, rag imports only its allowed set, queries.py pure dict builders"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "type": "file", "reason": "verify search_similar join + live-doc filter + cosine ordering, tuple-IN hydration bounded, ES exception wrapping"}
+{"file": ".trellis/spec/backend/error-handling.md", "type": "file", "reason": "verify degradation asymmetry (ES failure raises SearchIndexError→502, provider failure degrades), no leaked SDK exceptions"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "type": "file", "reason": "verify search event fields, no query text at info, no chunk content in logs"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "type": "file", "reason": "gates green, offline contract intact, review checklist 1-10"}

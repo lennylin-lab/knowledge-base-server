@@ -81,8 +81,13 @@ logger.exception("embedding_failed", document_id=str(doc_id))  # inside except
   (agent, question length) and `agent_run_finished` (tool calls count,
   outcome). Chat requests already carry `request_id`; `run_id` links a
   request to its possibly-multiple agent runs.
-- **Retrieval** — `retrieval_executed` with `query_terms`, `es_hits`,
-  `vector_hits`, `fused_hits`, `latency_ms` per backend.
+- **Retrieval** — `search_executed` (service level, one per search) with
+  `q_length` (**never the query text** — queries may contain sensitive
+  phrasing), `limit`, `tag`, `mode` (`hybrid`/`bm25`), `hit_count`,
+  `es_hits`, `vector_hits`, `latency_ms`. Vector-leg problems are
+  warnings, not errors: `vector_search_disabled` (no API key, once per
+  process at wiring time) and `vector_search_degraded` (mid-search
+  provider failure — `error_class` only, search continues BM25-only).
 - **MCP tools** — `mcp_tool_called` (tool, server, duration) and
   `mcp_tool_failed` (tool, error code). Never log full tool payloads at
   `info`; sizes are enough.

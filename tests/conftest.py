@@ -18,7 +18,8 @@ from __future__ import annotations
 import asyncio
 import os
 import uuid
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from uuid import UUID
 
 import asyncpg
 import httpx
@@ -37,9 +38,16 @@ from sqlalchemy.ext.asyncio import (
 
 from app.api.deps import SessionDep, get_document_service
 from app.core.database import Base, get_db
+from app.llm.embeddings import EmbeddingProvider
 from app.main import create_app
+from app.models.document import IndexStatus
+from app.rag.indexer import IndexingPipeline
+from app.schemas.document import DocumentCreate
 from app.services.document import DocumentService
 from fakes import FakeEmbeddingProvider
+
+# Seeding callback: (provider, markdown content) -> created document id.
+type Seeder = Callable[[EmbeddingProvider, str], Awaitable[UUID]]
 
 TEST_DATABASE_URL = os.environ.get(
     "KB_TEST_DATABASE_URL", "postgresql+asyncpg://kb:kb@localhost:5432/kb_test"
@@ -197,6 +205,35 @@ def session_factory(db_engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
 def fake_embedding_provider() -> FakeEmbeddingProvider:
     """Shared deterministic provider (1536-dim, matching the DB column)."""
     return FakeEmbeddingProvider()
+
+
+@pytest.fixture
+async def seed_indexed(
+    session_factory: async_sessionmaker[AsyncSession],
+    es_client: AsyncElasticsearch,
+    es_index_name: str,
+) -> AsyncIterator[Seeder]:
+    """Seed one document exactly as production does: service write -> pipeline.
+
+    The provider is a parameter (retrieval tests script its vector map before
+    seeding so the vector leg has known neighbors). No manual ES writes.
+    """
+
+    async def seed(provider: EmbeddingProvider, content: str) -> UUID:
+        async with session_factory() as session:
+            created = await DocumentService(session).create_document(
+                DocumentCreate(content=content)
+            )
+        pipeline = IndexingPipeline(
+            session_factory=session_factory,
+            embedding_provider=provider,
+            es_client=es_client,
+            es_index=es_index_name,
+        )
+        assert await pipeline.process_document(created.id) is IndexStatus.DONE
+        return created.id
+
+    yield seed
 
 
 @pytest.fixture
