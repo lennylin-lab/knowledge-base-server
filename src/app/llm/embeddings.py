@@ -53,8 +53,8 @@ class OpenAIEmbeddingProvider:
     def from_settings(cls, settings: Settings) -> OpenAIEmbeddingProvider:
         """Wire the provider from application Settings."""
         return cls(
-            base_url=settings.OPENAI_BASE_URL,
-            api_key=settings.OPENAI_API_KEY.get_secret_value(),
+            base_url=settings.EMBEDDING_BASE_URL,
+            api_key=settings.EMBEDDING_API_KEY.get_secret_value(),
             model=settings.EMBEDDING_MODEL,
         )
 

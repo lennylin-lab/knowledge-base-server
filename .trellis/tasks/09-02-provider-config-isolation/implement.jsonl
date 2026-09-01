@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/backend/quality-guidelines.md", "type": "file", "reason": "config-through-Settings rule, .env.example completeness gotcha, review checklist"}
+{"file": ".trellis/spec/backend/directory-structure.md", "type": "file", "reason": "llm/ layer must read config from Settings only; example snippets may reference old variable names"}

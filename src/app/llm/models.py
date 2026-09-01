@@ -25,8 +25,8 @@ def get_chat_model(settings: Settings) -> Model:
     # The client is injected rather than letting the provider build its own so
     # timeouts/retries are configured in exactly one place — this module.
     client = AsyncOpenAI(
-        base_url=settings.OPENAI_BASE_URL,
-        api_key=settings.OPENAI_API_KEY.get_secret_value(),
+        base_url=settings.CHAT_BASE_URL,
+        api_key=settings.CHAT_API_KEY.get_secret_value(),
         timeout=_REQUEST_TIMEOUT,
         max_retries=_MAX_RETRIES,
     )

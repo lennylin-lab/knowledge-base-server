@@ -110,8 +110,8 @@ async def test_run_id_is_echoed_across_the_stream(
 async def test_live_provider_streams_a_complete_run():
     """One real question through the production wiring (manual/CI opt-in)."""
     settings = get_settings()
-    if not settings.OPENAI_API_KEY.get_secret_value():
-        pytest.skip("OPENAI_API_KEY not configured")
+    if not settings.CHAT_API_KEY.get_secret_value():
+        pytest.skip("CHAT_API_KEY not configured")
     service = build_chat_service(settings)
 
     events = [event async for event in service.ask("What is a zorblat?", limit=3)]

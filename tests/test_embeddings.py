@@ -15,6 +15,7 @@ import pytest
 from app.core.config import Settings
 from app.core.exceptions import LLMProviderError, LLMRateLimitedError
 from app.llm.embeddings import EmbeddingProvider, OpenAIEmbeddingProvider
+from app.llm.models import get_chat_model
 from fakes import FakeEmbeddingProvider
 
 
@@ -140,14 +141,34 @@ async def test_provider_rejects_mismatched_vector_count():
 
 def test_from_settings_wires_client_configuration():
     settings = Settings(
-        OPENAI_BASE_URL="http://provider.test/v1",
-        OPENAI_API_KEY="sk-test",
+        EMBEDDING_BASE_URL="http://provider.test/v1",
+        EMBEDDING_API_KEY="sk-test",
         EMBEDDING_MODEL="embed-x",
     )
 
     provider = OpenAIEmbeddingProvider.from_settings(settings)
 
     assert provider._model == "embed-x"
+
+
+def test_layers_read_their_own_provider_variables():
+    # Pin the config isolation: the embedding leg is built from EMBEDDING_*,
+    # the chat leg from CHAT_* — changing one side never touches the other.
+    settings = Settings(
+        EMBEDDING_BASE_URL="http://embed.test/v1",
+        EMBEDDING_API_KEY="embed-key",
+        EMBEDDING_MODEL="embed-x",
+        CHAT_BASE_URL="http://chat.test/v1",
+        CHAT_API_KEY="chat-key",
+    )
+
+    provider = OpenAIEmbeddingProvider.from_settings(settings)
+    chat_model = get_chat_model(settings)
+
+    assert str(provider._client.base_url).rstrip("/") == "http://embed.test/v1"
+    assert provider._client.api_key == "embed-key"
+    assert str(chat_model.provider.client.base_url).rstrip("/") == "http://chat.test/v1"
+    assert chat_model.provider.client.api_key == "chat-key"
 
 
 class StubSdkClient:

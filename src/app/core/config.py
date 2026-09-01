@@ -23,13 +23,17 @@ class Settings(BaseSettings):
     ELASTICSEARCH_URL: str = "http://localhost:9200"
     ES_INDEX: str = "kb_documents"
 
-    # --- LLM provider (OpenAI-compatible) ---
-    OPENAI_BASE_URL: str = "https://api.openai.com/v1"
-    OPENAI_API_KEY: SecretStr = SecretStr("")
+    # --- LLM providers (OpenAI-compatible) ---
+    # Embedding and chat are independently configurable: each layer reads only
+    # its own base_url/api key, so the two may point at different providers.
+    EMBEDDING_BASE_URL: str = "https://api.openai.com/v1"
+    EMBEDDING_API_KEY: SecretStr = SecretStr("")
     EMBEDDING_MODEL: str = "text-embedding-3-small"
     # Fixed vector dimension — see database-guidelines.md; changing it is a
     # dedicated new-column + backfill migration, never a casual edit.
     EMBEDDING_DIM: int = 1536
+    CHAT_BASE_URL: str = "https://api.openai.com/v1"
+    CHAT_API_KEY: SecretStr = SecretStr("")
     CHAT_MODEL: str = "gpt-4o-mini"
 
     # --- MCP extension ---

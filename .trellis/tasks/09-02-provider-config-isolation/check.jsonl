@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/backend/quality-guidelines.md", "type": "file", "reason": "verify no old variable names remain anywhere (incl. specs), gates green, .env.example complete"}
+{"file": ".trellis/spec/backend/directory-structure.md", "type": "file", "reason": "verify llm/ layering unchanged, example snippets updated"}

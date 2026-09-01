@@ -95,6 +95,6 @@ async def test_chat_service_builds_without_extra_tools_when_manager_not_running(
     from app.core.config import Settings
 
     monkeypatch.setattr(deps_module, "get_mcp_manager", lambda: McpManager({}))
-    service = build_chat_service(Settings(OPENAI_API_KEY=SecretStr("test-key")))
+    service = build_chat_service(Settings(CHAT_API_KEY=SecretStr("test-key")))
 
     assert service is not None

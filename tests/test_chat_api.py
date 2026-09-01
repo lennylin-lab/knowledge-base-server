@@ -167,7 +167,7 @@ async def test_provider_failure_mid_stream_emits_terminal_error_event(app):
 async def test_unconfigured_chat_returns_503_envelope_before_any_stream(app):
     # The real constructor, not a stub: the key check must fire here.
     app.dependency_overrides[get_chat_service] = lambda: build_chat_service(
-        Settings(OPENAI_API_KEY=SecretStr(""))
+        Settings(CHAT_API_KEY=SecretStr(""))
     )
     transport = ASGITransport(app=app)
 
@@ -188,7 +188,7 @@ async def test_invalid_body_on_unconfigured_chat_still_returns_503(app):
     # contract as any auth-style dependency. The 422 contract holds whenever
     # the service IS constructible (see the stubbed tests below).
     app.dependency_overrides[get_chat_service] = lambda: build_chat_service(
-        Settings(OPENAI_API_KEY=SecretStr(""))
+        Settings(CHAT_API_KEY=SecretStr(""))
     )
     transport = ASGITransport(app=app)
 
@@ -201,7 +201,7 @@ async def test_invalid_body_on_unconfigured_chat_still_returns_503(app):
 
 
 async def test_build_chat_service_with_key_returns_hybrid_service():
-    service = build_chat_service(Settings(OPENAI_API_KEY=SecretStr("test-key")))
+    service = build_chat_service(Settings(CHAT_API_KEY=SecretStr("test-key")))
 
     assert isinstance(service, ChatService)
 

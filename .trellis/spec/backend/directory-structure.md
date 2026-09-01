@@ -159,7 +159,7 @@ New agent capability (e.g. a new knowledge task):
 - **Functions**: `snake_case`, verbs (`get_by_id`, `create`, `soft_delete`,
   `retrieve`, `embed_chunks`).
 - **Constants + env vars**: `UPPER_SNAKE_CASE` (`DATABASE_URL`,
-  `OPENAI_BASE_URL`, `EMBEDDING_DIM`).
+  `EMBEDDING_BASE_URL`, `EMBEDDING_DIM`).
 - **Tests**: `test_<feature>_<behavior>.py::test_*`, e.g.
   `test_chat_api.py::test_qa_streams_citations`.
 

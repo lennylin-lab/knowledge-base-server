@@ -50,7 +50,7 @@ def embedding_provider_from_settings(settings: Settings) -> OpenAIEmbeddingProvi
     failure (see design.md); the accompanying warning is emitted by
     `build_search_service` so it fires once per construction.
     """
-    if settings.OPENAI_API_KEY.get_secret_value():
+    if settings.EMBEDDING_API_KEY.get_secret_value():
         return OpenAIEmbeddingProvider.from_settings(settings)
     return None
 
@@ -70,7 +70,7 @@ def build_search_service(settings: Settings) -> SearchService:
     """Wire the search service from Settings (uncached constructor)."""
     provider = embedding_provider_from_settings(settings)
     if provider is None:
-        logger.warning("vector_search_disabled", reason="openai_api_key_not_configured")
+        logger.warning("vector_search_disabled", reason="embedding_api_key_not_configured")
     return SearchService(_build_retriever(settings, provider))
 
 
@@ -99,9 +99,9 @@ def build_chat_service(settings: Settings) -> ChatService:
     dependency. The 422 request-schema contract holds whenever the service is
     constructible (key present).
     """
-    if not settings.OPENAI_API_KEY.get_secret_value():
+    if not settings.CHAT_API_KEY.get_secret_value():
         raise ChatUnavailableError(
-            "Chat is not configured: set OPENAI_API_KEY to enable it",
+            "Chat is not configured: set CHAT_API_KEY to enable it",
         )
     # External MCP tools ride along when the (process-lifetime) manager is up
     # with a non-empty tool snapshot; unconfigured deployments build none and
