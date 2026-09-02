@@ -82,7 +82,14 @@ logger.exception("embedding_failed", document_id=str(doc_id))  # inside except
   same mechanism as `request_id`; emit `agent_run_started`
   (agent, question length) and `agent_run_finished` (tool calls count,
   outcome). Chat requests already carry `request_id`; `run_id` links a
-  request to its possibly-multiple agent runs.
+  request to its possibly-multiple agent runs. Two clarifications from
+  the agents suite: (a) `logger.bind` suffices for run_id when the run
+  has no nested module loggers (toolless agents); reserve contextvars
+  for runs whose tool calls log from other modules (chat retrieval).
+  (b) `agent_run_failed` (run-scoped, `error` level, traceback) and the
+  envelope handler's `app_error` (request-scoped, `warning`) are
+  complementary audit surfaces, not a double log — the traceback appears
+  exactly once.
 - **Retrieval** — `search_executed` (service level, one per search) with
   `q_length` (**never the query text** — queries may contain sensitive
   phrasing), `limit`, `tag`, `mode` (`hybrid`/`bm25`), `hit_count`,

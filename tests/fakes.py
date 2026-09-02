@@ -10,7 +10,14 @@ from collections.abc import Sequence
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic_ai.messages import ModelMessage, ModelRequest, ToolReturnPart
+from pydantic_ai.messages import (
+    ModelMessage,
+    ModelRequest,
+    ModelResponse,
+    TextPart,
+    ToolReturnPart,
+    UserPromptPart,
+)
 from pydantic_ai.models.function import DeltaToolCall, FunctionModel
 
 from app.mcp.manager import McpToolResult
@@ -271,3 +278,41 @@ def scripted_chat_model(
             yield part
 
     return FunctionModel(stream_function=stream_function, model_name="scripted-qa")
+
+
+def _first_user_prompt(messages: list[ModelMessage]) -> str:
+    """Text of the run's user prompt (single-turn runs: the first one found)."""
+    for message in messages:
+        if isinstance(message, ModelRequest):
+            for part in message.parts:
+                if isinstance(part, UserPromptPart) and isinstance(part.content, str):
+                    return part.content
+    return ""
+
+
+def scripted_summarize_model(
+    outputs: Sequence[str],
+    *,
+    prompts: list[str] | None = None,
+) -> FunctionModel:
+    """FunctionModel scripting tool-free summarize passes (plain text out).
+
+    The i-th model request returns `outputs[i]`; the last entry repeats if a
+    run makes more requests than scripted, so unexpected extra passes surface
+    through `prompts`-length assertions instead of an opaque framework error.
+    `prompts`, when given, collects each request's user prompt in order — the
+    observable for direct-vs-map-reduce phase checks.
+
+    Built on `function` (not `stream_function`): the summarize path runs
+    `Agent.run`, which FunctionModel only supports via a non-streaming
+    `function`.
+    """
+    scripted = list(outputs)
+    seen = prompts if prompts is not None else []
+
+    async def function(messages: list[ModelMessage], info: object) -> ModelResponse:
+        seen.append(_first_user_prompt(messages))
+        index = min(len(seen) - 1, len(scripted) - 1)
+        return ModelResponse(parts=[TextPart(content=scripted[index])])
+
+    return FunctionModel(function, model_name="scripted-summarize")

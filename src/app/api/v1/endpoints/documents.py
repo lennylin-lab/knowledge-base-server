@@ -7,7 +7,8 @@ from uuid import UUID
 
 from fastapi import APIRouter, Query, status
 
-from app.api.deps import DocumentServiceDep
+from app.api.deps import DocumentServiceDep, SummarizeServiceDep
+from app.schemas.agents import SummaryResult
 from app.schemas.document import (
     DocumentCreate,
     DocumentPage,
@@ -54,3 +55,9 @@ async def update_document(
 async def delete_document(document_id: UUID, service: DocumentServiceDep) -> None:
     """Soft-delete a document."""
     await service.delete_document(document_id)
+
+
+@router.post("/{document_id}/summary", response_model=SummaryResult)
+async def summarize_document(document_id: UUID, service: SummarizeServiceDep) -> SummaryResult:
+    """Compute an LLM summary of the document (synchronous, not persisted)."""
+    return await service.summarize_document(document_id)

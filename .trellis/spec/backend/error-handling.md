@@ -167,6 +167,11 @@ async def get_document(self, doc_id: UUID) -> DocumentRead:
     return DocumentRead.model_validate(doc)
 ```
 
+Sync agent endpoints (summarize, later siblings) map provider failures
+to `AppError` subclasses and **re-raise** — the shared handler returns
+the envelope. The SSE terminal-`error`-event path above is the special
+case reserved for streams that already sent a 200.
+
 ## Rules
 
 - **Never** `except Exception: pass` (or log-and-continue) anywhere in `src/`.

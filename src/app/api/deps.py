@@ -19,6 +19,7 @@ from app.mcp.tools import build_agent_tools
 from app.rag.indexer import run_indexing
 from app.rag.retriever import Retriever
 from app.search.es import get_shared_es_client
+from app.services.agents import SummarizeService
 from app.services.chat import ChatService
 from app.services.document import DocumentService
 from app.services.search import SearchService
@@ -129,3 +130,36 @@ def get_chat_service() -> ChatService:
 
 
 ChatServiceDep = Annotated[ChatService, Depends(get_chat_service)]
+
+
+def build_summarize_service(settings: Settings) -> SummarizeService:
+    """Wire the summarize service from Settings (uncached constructor).
+
+    Same no-key gate as chat: without `CHAT_API_KEY` this raises
+    `ChatUnavailableError` before any document load or model call. Summarize
+    has no non-LLM fallback either, so it reuses chat's error (503
+    `chat_unavailable`) rather than inventing a near-identical one. The
+    configured `CHAT_MODEL` name is passed alongside the model so responses
+    echo it even when tests inject a FunctionModel stand-in.
+    """
+    if not settings.CHAT_API_KEY.get_secret_value():
+        raise ChatUnavailableError(
+            "Summarize is not configured: set CHAT_API_KEY to enable it",
+        )
+    return SummarizeService(
+        get_chat_model(settings),
+        settings.CHAT_MODEL,
+        session_factory=SessionFactory,
+    )
+
+
+@lru_cache(maxsize=1)
+def get_summarize_service() -> SummarizeService:
+    """Cached accessor like `get_chat_service`: one model and SDK client per
+    process. The service opens its own session per run via the injected
+    session factory (the Retriever pattern), so it needs no request-scoped
+    session — and the no-key path still fails every request."""
+    return build_summarize_service(get_settings())
+
+
+SummarizeServiceDep = Annotated[SummarizeService, Depends(get_summarize_service)]
