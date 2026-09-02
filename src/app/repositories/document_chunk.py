@@ -23,6 +23,15 @@ class ChunkRow(NamedTuple):
     document_tags: list[str]
 
 
+class NeighborDocumentRow(NamedTuple):
+    """One live document that owns chunks near another document's chunks."""
+
+    document_id: UUID
+    title: str
+    tags: list[str]
+    distance: float
+
+
 # Shared shape for both retrieval reads: chunk columns + owning document,
 # live documents only (`deleted_at IS NULL`) — PG is the single source of
 # truth for visibility, so ES-side staleness cannot leak results. `Select` is
@@ -120,6 +129,63 @@ class DocumentChunkRepository:
         )
         rows = (await self._session.execute(stmt)).all()
         return {(row.document_id, row.chunk_index): _as_chunk_row(row) for row in rows}
+
+    async def find_neighbor_documents(
+        self, document_id: UUID, *, limit: int
+    ) -> Sequence[NeighborDocumentRow]:
+        """Association vector leg: live documents with chunks nearest to this
+        document's own chunk embeddings, one row per document.
+
+        One indexed cosine query per source-chunk embedding (HNSW-friendly,
+        unlike a pair-computing self-join), keeping each candidate document's
+        best distance; the source document is excluded directly and
+        soft-deleted owners via the shared live-document join. Documents with
+        no chunks yield no queries and an empty result — the caller reads that
+        as "vector leg unavailable", not as an error.
+        """
+        source_embeddings = [
+            row[0]
+            for row in (
+                await self._session.execute(
+                    select(DocumentChunk.embedding).where(DocumentChunk.document_id == document_id)
+                )
+            ).all()
+        ]
+        best: dict[UUID, NeighborDocumentRow] = {}
+        for embedding in source_embeddings:
+            distance = DocumentChunk.embedding.cosine_distance(embedding)
+            stmt = (
+                _LIVE_CHUNK_SELECT.add_columns(distance.label("distance"))
+                .where(DocumentChunk.document_id != document_id)
+                .order_by(distance)
+                .limit(limit)
+            )
+            for row in (await self._session.execute(stmt)).all():
+                candidate = NeighborDocumentRow(
+                    document_id=row.document_id,
+                    title=row.document_title,
+                    tags=list(row.document_tags),
+                    distance=row.distance,
+                )
+                current = best.get(row.document_id)
+                if current is None or candidate.distance < current.distance:
+                    best[row.document_id] = candidate
+        ranked = sorted(best.values(), key=lambda row: (row.distance, row.document_id))
+        return ranked[:limit]
+
+    async def first_chunk_content(self, document_id: UUID) -> str | None:
+        """Content of the document's first chunk; `None` when none exist.
+
+        A content-only column read (no embedding payloads travel) for callers
+        that need a bounded excerpt of the indexed body.
+        """
+        stmt = (
+            select(DocumentChunk.content)
+            .where(DocumentChunk.document_id == document_id)
+            .order_by(DocumentChunk.chunk_index.asc())
+            .limit(1)
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
 
 
 def _as_chunk_row(row: Row[Any]) -> ChunkRow:

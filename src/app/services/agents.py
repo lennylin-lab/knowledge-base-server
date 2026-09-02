@@ -1,14 +1,17 @@
-"""Summarize orchestration: document load, chunk-aware passes, lifecycle logs.
+"""Sync agent orchestration: summarize passes and association candidates.
 
-Synchronous single response (unlike chat's SSE stream): one call yields one
-computed summary, never persisted. Long documents summarize map-reduce style
-with the production chunker — one model pass per chunk, sequentially (no
-parallel fan-out in v1), then one combine pass over the chunk summaries.
+Synchronous single responses (unlike chat's SSE stream): one call yields one
+computed result, never persisted. Summarize runs chunk-aware passes — long
+documents map-reduce style with the production chunker (one model pass per
+chunk, sequentially, then one combine pass). Association gathers its
+deterministic candidates (pgvector neighbors + tag overlap) BEFORE any model
+call, so the LLM only curates what the database surfaced.
 """
 
 from __future__ import annotations
 
 import time
+from collections.abc import Sequence
 from uuid import UUID, uuid4
 
 import openai
@@ -16,6 +19,13 @@ import structlog
 from pydantic_ai.models import Model
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.agents.association import (
+    AssociationCandidate,
+    AssociationDeps,
+    AssociationsOutput,
+    build_association_agent,
+    render_association_prompt,
+)
 from app.agents.summarize import (
     SummarizeDeps,
     build_summarize_agent,
@@ -30,8 +40,9 @@ from app.core.exceptions import (
 )
 from app.models.document import Document
 from app.rag.chunker import chunk_markdown
-from app.repositories.document import DocumentRepository
-from app.schemas.agents import SummaryResult
+from app.repositories.document import DocumentRepository, TagOverlapRow
+from app.repositories.document_chunk import DocumentChunkRepository, NeighborDocumentRow
+from app.schemas.agents import AssociationItem, AssociationsResult, SummaryResult
 
 logger = structlog.get_logger(__name__)
 
@@ -152,7 +163,7 @@ def _as_app_error(exc: Exception) -> AppError:
     """Map a failed run onto the error taxonomy — same mapping as chat's.
 
     Chat converts the mapping into a terminal SSE event because its stream is
-    already open; this endpoint re-raises instead so the shared handler
+    already open; sync endpoints re-raise instead so the shared handler
     returns the matching HTTP envelope. Details stay in logs either way.
     """
     if isinstance(exc, AppError):
@@ -162,3 +173,202 @@ def _as_app_error(exc: Exception) -> AppError:
     if isinstance(exc, openai.APIError):
         return LLMProviderError("LLM provider request failed")
     return AppError("Internal server error")
+
+
+# Both candidate legs are bounded to this size (PRD: ~10 per leg) — enough
+# signal for the model without an unbounded prompt.
+CANDIDATE_LIMIT = 10
+# Fallback excerpt bound when the source has no chunks yet: matches the
+# chunker's per-chunk ceiling, so indexed and unindexed sources feed the
+# prompt similarly sized excerpts.
+EXCERPT_CHAR_LIMIT = 1600
+
+
+class AssociationService:
+    """Computes (never persists) one document's related documents per call."""
+
+    def __init__(
+        self,
+        model: Model,
+        model_name: str,
+        *,
+        session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        self._model_name = model_name
+        self._session_factory = session_factory
+        # Built once per process (the service itself is process-lifetime);
+        # per-request state rides in AssociationDeps, never on the agent.
+        self._agent = build_association_agent(model)
+
+    async def associate_document(self, doc_id: UUID) -> AssociationsResult:
+        """Curate related documents for one live document via the LLM.
+
+        Deterministic candidates are gathered before any model call: a
+        missing/soft-deleted source raises NotFoundError and a source with no
+        candidates at all returns an empty result — neither ever reaches the
+        model. The model's selection is joined back onto the candidate
+        metadata; ids it returned that were not candidates (hallucinated or
+        duplicated) are dropped, so the response only ever carries
+        deterministic metadata plus the LLM-written reasons. Reasons and
+        content are never logged — ids and counts only.
+        """
+        started = time.perf_counter()
+        document, candidates, excerpt = await self._gather(doc_id)
+        log = logger.bind(document_id=str(doc_id), run_id=uuid4().hex)
+        if not candidates:
+            # No signal to curate: skip the run (and its lifecycle events)
+            # rather than logging a run that never happened.
+            latency_ms = round((time.perf_counter() - started) * 1000, 2)
+            log.info(
+                "agent_run_skipped",
+                agent="association",
+                reason="no_candidates",
+                latency_ms=latency_ms,
+            )
+            return AssociationsResult(
+                document_id=doc_id,
+                associations=[],
+                model=self._model_name,
+                latency_ms=latency_ms,
+            )
+
+        deps = AssociationDeps(title=document.title, tags=list(document.tags))
+        prompt = render_association_prompt(deps, excerpt, candidates)
+        log.info("agent_run_started", agent="association", candidate_count=len(candidates))
+        try:
+            result = await self._agent.run(prompt, deps=deps)
+        except Exception as exc:
+            failure = _as_app_error(exc)
+            # Run-level audit event closing the agent_run_started trail (see
+            # the summarize twin for the two-scopes rationale); the envelope
+            # comes from re-raising into the shared handler.
+            log.exception(
+                "agent_run_failed",
+                agent="association",
+                outcome=failure.code,
+                error_class=type(exc).__name__,
+                latency_ms=round((time.perf_counter() - started) * 1000, 2),
+            )
+            raise failure from exc
+
+        items, dropped = _join_selections(result.output, candidates)
+        usage = result.usage
+        latency_ms = round((time.perf_counter() - started) * 1000, 2)
+        log.info(
+            "agent_run_finished",
+            agent="association",
+            model=self._model_name,
+            outcome="success",
+            latency_ms=latency_ms,
+            input_tokens=usage.input_tokens or 0,
+            output_tokens=usage.output_tokens or 0,
+            candidate_count=len(candidates),
+            selected_count=len(items),
+            dropped_count=dropped,
+        )
+        return AssociationsResult(
+            document_id=doc_id,
+            associations=items,
+            model=self._model_name,
+            latency_ms=latency_ms,
+        )
+
+    async def _gather(self, doc_id: UUID) -> tuple[Document, list[AssociationCandidate], str]:
+        """Load the live source, both candidate legs, and a bounded excerpt.
+
+        One session for the whole read set. The document load comes first: a
+        missing or soft-deleted source must 404 before any other work. The
+        vector leg needs the source's own chunks — no chunks means it returns
+        nothing and the run continues on tag candidates alone.
+        """
+        async with self._session_factory() as session:
+            documents = DocumentRepository(session)
+            chunks = DocumentChunkRepository(session)
+            document = await documents.get_by_id(doc_id)
+            if document is None:
+                raise NotFoundError(f"Document {doc_id} not found")
+            vector_rows = await chunks.find_neighbor_documents(doc_id, limit=CANDIDATE_LIMIT)
+            tag_rows = await documents.find_by_tag_overlap(
+                document.tags, exclude_id=doc_id, limit=CANDIDATE_LIMIT
+            )
+            excerpt = await chunks.first_chunk_content(doc_id)
+        if excerpt is None:
+            excerpt = document.content[:EXCERPT_CHAR_LIMIT]
+        return document, _merge_candidates(vector_rows, tag_rows), excerpt
+
+
+def _vector_signal(distance: float) -> str:
+    """Human-readable vector-leg signal for prompts and responses."""
+    return f"similar content (cosine distance {distance:.4f})"
+
+
+def _tag_signal(shared_tags: Sequence[str]) -> str:
+    """Human-readable tag-leg signal for prompts and responses."""
+    return f"shared tags: {', '.join(shared_tags)}"
+
+
+def _merge_candidates(
+    vector_rows: Sequence[NeighborDocumentRow], tag_rows: Sequence[TagOverlapRow]
+) -> list[AssociationCandidate]:
+    """Union both legs into one candidate list, vector-ranked first.
+
+    A document surfaced by both legs appears once with both signals; a
+    document only the tag leg found keeps its own signal. Leg order is
+    deterministic (distance then id; recency then id), so the prompt order is
+    too.
+    """
+    tag_shared = {tag_row.document_id: tag_row.shared_tags for tag_row in tag_rows}
+    candidates: dict[UUID, AssociationCandidate] = {}
+    for vector_row in vector_rows:
+        shared = tag_shared.get(vector_row.document_id)
+        signal = _vector_signal(vector_row.distance)
+        if shared:
+            signal = f"{signal}; {_tag_signal(shared)}"
+        candidates[vector_row.document_id] = AssociationCandidate(
+            document_id=vector_row.document_id,
+            title=vector_row.title,
+            tags=list(vector_row.tags),
+            signal=signal,
+        )
+    for tag_row in tag_rows:
+        if tag_row.document_id in candidates:
+            continue
+        candidates[tag_row.document_id] = AssociationCandidate(
+            document_id=tag_row.document_id,
+            title=tag_row.title,
+            tags=list(tag_row.tags),
+            signal=_tag_signal(tag_row.shared_tags),
+        )
+    return list(candidates.values())
+
+
+def _join_selections(
+    output: AssociationsOutput, candidates: Sequence[AssociationCandidate]
+) -> tuple[list[AssociationItem], int]:
+    """Join the LLM's picks back onto candidate metadata.
+
+    Every returned item carries the deterministic title/tags/signal gathered
+    before the run — the model contributes only the selection and the reason.
+    Picks whose id was not a candidate, or repeats an already-joined one, are
+    dropped; the count (never the content) is returned for logging.
+    """
+    by_id = {candidate.document_id: candidate for candidate in candidates}
+    items: list[AssociationItem] = []
+    seen: set[UUID] = set()
+    dropped = 0
+    for pick in output.associations:
+        candidate = by_id.get(pick.document_id)
+        if candidate is None or pick.document_id in seen:
+            dropped += 1
+            continue
+        seen.add(pick.document_id)
+        items.append(
+            AssociationItem(
+                document_id=candidate.document_id,
+                title=candidate.title,
+                tags=list(candidate.tags),
+                reason=pick.reason,
+                signal=candidate.signal,
+            )
+        )
+    return items, dropped

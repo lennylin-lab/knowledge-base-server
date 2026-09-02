@@ -90,6 +90,10 @@ logger.exception("embedding_failed", document_id=str(doc_id))  # inside except
   envelope handler's `app_error` (request-scoped, `warning`) are
   complementary audit surfaces, not a double log — the traceback appears
   exactly once.
+  A run that short-circuits before invoking the model (e.g. no
+  candidates) emits `agent_run_skipped` (agent, reason) instead — a
+  skipped run is an auditable outcome, not a silent gap between
+  started/finished.
 - **Retrieval** — `search_executed` (service level, one per search) with
   `q_length` (**never the query text** — queries may contain sensitive
   phrasing), `limit`, `tag`, `mode` (`hybrid`/`bm25`), `hit_count`,

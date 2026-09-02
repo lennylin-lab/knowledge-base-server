@@ -199,6 +199,12 @@ SQL/ES return candidate lists, fusion is plain code and unit-testable.
 Rules:
 
 - **Always async** (`AsyncSession`); sync engines are forbidden in `src/`.
+- Result shaping **tied to the query strategy** is repository-legal:
+  per-parameter query loops (e.g. one cosine query per source-chunk
+  embedding, HNSW-servable), min-keep dedupe over the fetched rows,
+  projections of fetched columns (shared-tag intersection). **Domain
+  policy is not** — "what counts as related/valid" never lives in a
+  repository.
 - Use `select()` + `.execute()`; the legacy `session.query()` API is
   **forbidden**.
 - Exactly-one expectations: `scalar_one()` / `scalar_one_or_none()` —

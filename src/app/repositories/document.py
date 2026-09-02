@@ -4,12 +4,22 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import datetime
+from typing import NamedTuple
 from uuid import UUID
 
 from sqlalchemy import any_, func, literal, select, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.document import Document, IndexStatus
+
+
+class TagOverlapRow(NamedTuple):
+    """One live document sharing at least one tag with a source document."""
+
+    document_id: UUID
+    title: str
+    tags: list[str]
+    shared_tags: list[str]
 
 
 class DocumentRepository:
@@ -85,3 +95,38 @@ class DocumentRepository:
             .limit(limit)
         )
         return (await self._session.execute(stmt)).scalars().all()
+
+    async def find_by_tag_overlap(
+        self, tags: Sequence[str], *, exclude_id: UUID, limit: int
+    ) -> Sequence[TagOverlapRow]:
+        """Association tag leg: live documents sharing at least one tag.
+
+        Uses the PG array overlap operator (`&&`, GIN-indexed like the tag
+        filter); an empty tag list can overlap nothing, so it short-circuits
+        without a query. `shared_tags` (the exact intersection with the
+        source tags, sorted for a deterministic signal string) is computed
+        from the returned row — a projection of data already fetched, not a
+        policy.
+        """
+        if not tags:
+            return ()
+        stmt = (
+            select(Document.id, Document.title, Document.tags)
+            .where(
+                Document.deleted_at.is_(None),
+                Document.id != exclude_id,
+                Document.tags.overlap(list(tags)),
+            )
+            .order_by(Document.created_at.desc(), Document.id.desc())
+            .limit(limit)
+        )
+        source_tags = set(tags)
+        return [
+            TagOverlapRow(
+                document_id=row.id,
+                title=row.title,
+                tags=list(row.tags),
+                shared_tags=sorted(source_tags.intersection(row.tags)),
+            )
+            for row in (await self._session.execute(stmt)).all()
+        ]

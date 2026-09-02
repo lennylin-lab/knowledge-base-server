@@ -7,8 +7,8 @@ from uuid import UUID
 
 from fastapi import APIRouter, Query, status
 
-from app.api.deps import DocumentServiceDep, SummarizeServiceDep
-from app.schemas.agents import SummaryResult
+from app.api.deps import AssociationServiceDep, DocumentServiceDep, SummarizeServiceDep
+from app.schemas.agents import AssociationsResult, SummaryResult
 from app.schemas.document import (
     DocumentCreate,
     DocumentPage,
@@ -61,3 +61,11 @@ async def delete_document(document_id: UUID, service: DocumentServiceDep) -> Non
 async def summarize_document(document_id: UUID, service: SummarizeServiceDep) -> SummaryResult:
     """Compute an LLM summary of the document (synchronous, not persisted)."""
     return await service.summarize_document(document_id)
+
+
+@router.post("/{document_id}/associations", response_model=AssociationsResult)
+async def associate_document(
+    document_id: UUID, service: AssociationServiceDep
+) -> AssociationsResult:
+    """Compute LLM-curated related documents (synchronous, not persisted)."""
+    return await service.associate_document(document_id)

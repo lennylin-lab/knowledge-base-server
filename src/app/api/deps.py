@@ -19,7 +19,7 @@ from app.mcp.tools import build_agent_tools
 from app.rag.indexer import run_indexing
 from app.rag.retriever import Retriever
 from app.search.es import get_shared_es_client
-from app.services.agents import SummarizeService
+from app.services.agents import AssociationService, SummarizeService
 from app.services.chat import ChatService
 from app.services.document import DocumentService
 from app.services.search import SearchService
@@ -163,3 +163,33 @@ def get_summarize_service() -> SummarizeService:
 
 
 SummarizeServiceDep = Annotated[SummarizeService, Depends(get_summarize_service)]
+
+
+def build_association_service(settings: Settings) -> AssociationService:
+    """Wire the association service from Settings (uncached constructor).
+
+    Same no-key gate as chat and summarize: without `CHAT_API_KEY` this
+    raises `ChatUnavailableError` before any document load, candidate query,
+    or model call. Reuses chat's error (503 `chat_unavailable`) for the same
+    one-no-LLM-fallback-gate reason as summarize.
+    """
+    if not settings.CHAT_API_KEY.get_secret_value():
+        raise ChatUnavailableError(
+            "Associations are not configured: set CHAT_API_KEY to enable it",
+        )
+    return AssociationService(
+        get_chat_model(settings),
+        settings.CHAT_MODEL,
+        session_factory=SessionFactory,
+    )
+
+
+@lru_cache(maxsize=1)
+def get_association_service() -> AssociationService:
+    """Cached accessor like `get_summarize_service`: one model and SDK client
+    per process, own session per run, and the no-key path still fails every
+    request."""
+    return build_association_service(get_settings())
+
+
+AssociationServiceDep = Annotated[AssociationService, Depends(get_association_service)]

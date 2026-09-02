@@ -14,3 +14,24 @@ class SummaryResult(BaseModel):
     summary: str
     model: str
     latency_ms: float
+
+
+class AssociationItem(BaseModel):
+    """One related document: deterministic candidate metadata plus the
+    LLM-written reason. Every field except `reason` comes from the candidate
+    set gathered before the run — the model only selects and explains."""
+
+    document_id: UUID
+    title: str
+    tags: list[str]
+    reason: str
+    signal: str
+
+
+class AssociationsResult(BaseModel):
+    """Related documents as returned by the associations endpoint."""
+
+    document_id: UUID
+    associations: list[AssociationItem]
+    model: str
+    latency_ms: float

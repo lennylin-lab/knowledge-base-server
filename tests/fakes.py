@@ -15,10 +15,11 @@ from pydantic_ai.messages import (
     ModelRequest,
     ModelResponse,
     TextPart,
+    ToolCallPart,
     ToolReturnPart,
     UserPromptPart,
 )
-from pydantic_ai.models.function import DeltaToolCall, FunctionModel
+from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
 
 from app.mcp.manager import McpToolResult
 from app.models.document_chunk import EMBEDDING_DIM
@@ -316,3 +317,43 @@ def scripted_summarize_model(
         return ModelResponse(parts=[TextPart(content=scripted[index])])
 
     return FunctionModel(function, model_name="scripted-summarize")
+
+
+def scripted_association_model(
+    picks: Sequence[dict[str, Any]],
+    *,
+    prompts: list[str] | None = None,
+    fail: Exception | None = None,
+) -> FunctionModel:
+    """FunctionModel scripting one structured-output association run.
+
+    The model responds by calling the agent's single output tool with
+    `{"associations": [...]}` — pydantic-ai validates the payload exactly as
+    it would a real provider's tool call, so valid pick dicts surface as the
+    agent's output type and invalid ones exercise the framework retry path.
+    `prompts`, when given, collects the run's user prompt (candidates and all)
+    so tests can assert what the deterministic gathering actually surfaced;
+    its length doubles as the model-call count. `fail` raises instead, for
+    provider-failure mapping.
+
+    The output tool's name is read from `AgentInfo` (not hardcoded) so the
+    fake survives framework renaming of the tool.
+    """
+    payload = {"associations": [dict(pick) for pick in picks]}
+
+    async def function(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        if fail is not None:
+            raise fail
+        if prompts is not None:
+            prompts.append(_first_user_prompt(messages))
+        assert info.output_tools, "association agent must use structured output"
+        return ModelResponse(
+            parts=[
+                ToolCallPart(
+                    tool_name=info.output_tools[0].name,
+                    args=json.dumps(payload),
+                )
+            ]
+        )
+
+    return FunctionModel(function, model_name="scripted-association")
