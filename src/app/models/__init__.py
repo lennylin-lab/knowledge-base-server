@@ -3,7 +3,16 @@
 
 from __future__ import annotations
 
+from app.models.chat import ChatMessage, ChatSession, MessageRole
 from app.models.document import Document, IndexStatus
 from app.models.document_chunk import EMBEDDING_DIM, DocumentChunk
 
-__all__ = ["EMBEDDING_DIM", "Document", "DocumentChunk", "IndexStatus"]
+__all__ = [
+    "EMBEDDING_DIM",
+    "ChatMessage",
+    "ChatSession",
+    "Document",
+    "DocumentChunk",
+    "IndexStatus",
+    "MessageRole",
+]
