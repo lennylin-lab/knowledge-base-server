@@ -7,9 +7,7 @@ REAL `build_chat_service` to prove the key check fires before any stream.
 
 from __future__ import annotations
 
-import json
 from collections.abc import AsyncIterator
-from typing import Any
 
 import httpx
 import openai
@@ -22,31 +20,9 @@ from app.api.deps import build_chat_service, get_chat_service
 from app.core.config import Settings
 from app.rag.retriever import SearchOutcome
 from app.services.chat import ChatService
-from fakes import StubRetriever, retrieved_chunk, scripted_chat_model
+from fakes import StubRetriever, parse_sse, retrieved_chunk, scripted_chat_model
 
 QUESTION = "What do the notes say about zorblat?"
-
-
-def parse_sse(body: str) -> list[tuple[str, Any]]:
-    """Parse an SSE body into (event_name, decoded_data) pairs.
-
-    Tolerant of line-ending style, keepalive comments, and multi-line data —
-    only complete event blocks with both fields are returned.
-    """
-    events: list[tuple[str, Any]] = []
-    for block in body.replace("\r\n", "\n").split("\n\n"):
-        name: str | None = None
-        data_lines: list[str] = []
-        for line in block.split("\n"):
-            if not line.strip() or line.startswith(":"):
-                continue
-            if line.startswith("event:"):
-                name = line.removeprefix("event:").strip()
-            elif line.startswith("data:"):
-                data_lines.append(line.removeprefix("data:").strip())
-        if name is not None and data_lines:
-            events.append((name, json.loads("\n".join(data_lines))))
-    return events
 
 
 def _stub_service() -> ChatService:
@@ -204,6 +180,21 @@ async def test_build_chat_service_with_key_returns_hybrid_service():
     service = build_chat_service(Settings(CHAT_API_KEY=SecretStr("test-key")))
 
     assert isinstance(service, ChatService)
+
+
+def test_build_chat_service_mode_tracks_the_embedding_wiring():
+    # Since provider-config isolation the keys are independent: chat with
+    # only CHAT_API_KEY wires a BM25-only retriever, and run_started.mode
+    # must report that truthfully (chat previously pinned hybrid).
+    # `_mode` is read directly — the constructor wires a real model, so
+    # the stream cannot run offline.
+    bm25_only = build_chat_service(Settings(CHAT_API_KEY=SecretStr("k")))
+    hybrid = build_chat_service(
+        Settings(CHAT_API_KEY=SecretStr("k"), EMBEDDING_API_KEY=SecretStr("e"))
+    )
+
+    assert bm25_only._mode == "bm25"
+    assert hybrid._mode == "hybrid"
 
 
 # --- validation contract (offline) ---

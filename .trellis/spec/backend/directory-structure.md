@@ -125,6 +125,17 @@ Key points:
   `rag/indexer.run_indexing`.
 - **Prompt templates** (`agents/prompts/`) are versioned assets — changing a
   prompt is a reviewable code change, not a runtime config tweak.
+- **SSE endpoints streaming the chat event vocabulary** (writing, later
+  siblings) reuse `to_sse`/`_EVENT_NAMES` from `api/v1/endpoints/chat.py` —
+  it owns that wire format (payloads in `schemas/chat.py`). Hoist to a
+  neutral `api/` helper when a third streamer appears.
+- **Three agent shapes are now reference patterns**: QA (streaming,
+  retrieval-first tool), summarize (sync plain text, map-reduce),
+  association (sync structured output over pre-gathered deterministic
+  candidates, joined back to candidate metadata), writing (streaming,
+  retrieval-optional tool). Copy the closest one; the structured-output
+  join-back pattern (LLM picks + deterministic metadata) is the
+  hallucination guard — never return LLM-invented entities.
 
 ### Adding a new feature
 

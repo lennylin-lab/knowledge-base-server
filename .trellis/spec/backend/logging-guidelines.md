@@ -94,6 +94,10 @@ logger.exception("embedding_failed", document_id=str(doc_id))  # inside except
   candidates) emits `agent_run_skipped` (agent, reason) instead — a
   skipped run is an auditable outcome, not a silent gap between
   started/finished.
+  `agent_run_started`'s payload-length field is agent-specific —
+  `question_length` (chat), `draft_length`/`instruction_length`
+  (writing), `content_length` (summarize): name it for the agent's
+  input, don't cargo-cult chat's field.
 - **Retrieval** — `search_executed` (service level, one per search) with
   `q_length` (**never the query text** — queries may contain sensitive
   phrasing), `limit`, `tag`, `mode` (`hybrid`/`bm25`), `hit_count`,

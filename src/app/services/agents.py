@@ -1,22 +1,26 @@
-"""Sync agent orchestration: summarize passes and association candidates.
+"""Agent orchestration: summarize passes, association candidates, writing runs.
 
-Synchronous single responses (unlike chat's SSE stream): one call yields one
-computed result, never persisted. Summarize runs chunk-aware passes — long
-documents map-reduce style with the production chunker (one model pass per
-chunk, sequentially, then one combine pass). Association gathers its
+Summarize and association are synchronous single responses: one call yields
+one computed result, never persisted. Summarize runs chunk-aware passes —
+long documents map-reduce style with the production chunker (one model pass
+per chunk, sequentially, then one combine pass). Association gathers its
 deterministic candidates (pgvector neighbors + tag overlap) BEFORE any model
-call, so the LLM only curates what the database surfaced.
+call, so the LLM only curates what the database surfaced. Writing streams
+suggestions over chat's SSE event vocabulary, with `ChatService.ask`'s stream
+discipline: run_id binding, sources flushed per tool call, and nothing may
+escape `suggest` once the first event is yielded.
 """
 
 from __future__ import annotations
 
 import time
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
 from uuid import UUID, uuid4
 
 import openai
 import structlog
 from pydantic_ai.models import Model
+from pydantic_ai.tools import Tool
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.agents.association import (
@@ -26,12 +30,14 @@ from app.agents.association import (
     build_association_agent,
     render_association_prompt,
 )
+from app.agents.qa import SourceCollector
 from app.agents.summarize import (
     SummarizeDeps,
     build_summarize_agent,
     render_document_prompt,
     render_reduce_prompt,
 )
+from app.agents.writing import WritingDeps, build_writing_agent, render_writing_prompt
 from app.core.exceptions import (
     AppError,
     LLMProviderError,
@@ -40,9 +46,20 @@ from app.core.exceptions import (
 )
 from app.models.document import Document
 from app.rag.chunker import chunk_markdown
+from app.rag.retriever import Retriever
 from app.repositories.document import DocumentRepository, TagOverlapRow
 from app.repositories.document_chunk import DocumentChunkRepository, NeighborDocumentRow
 from app.schemas.agents import AssociationItem, AssociationsResult, SummaryResult
+from app.schemas.chat import (
+    AnswerDeltaEvent,
+    ChatStreamEvent,
+    DoneEvent,
+    ErrorEvent,
+    RunStartedEvent,
+    SearchMode,
+    SourcesEvent,
+)
+from app.schemas.search import SearchHit
 
 logger = structlog.get_logger(__name__)
 
@@ -372,3 +389,121 @@ def _join_selections(
             )
         )
     return items, dropped
+
+
+def _drain(pending: list[list[SearchHit]]) -> list[list[SearchHit]]:
+    """Take all pending retrieval batches, leaving the buffer empty.
+
+    Twin of `services.chat._drain`, kept local rather than imported across
+    service modules' private names: four trivial lines, and chat's module
+    stays untouched.
+    """
+    batches = list(pending)
+    pending.clear()
+    return batches
+
+
+class WritingService:
+    """Streams one writing-suggestion run per draft (chat's event vocabulary).
+
+    Mirrors `ChatService.ask`'s discipline: run_id bound into structlog
+    contextvars for the whole generator, sources flushed as soon as each
+    retrieval tool call returns, and every failure after the first event
+    becoming a terminal `error` event — nothing may escape `suggest`.
+    Retrieval is OPTIONAL (the model decides), so a zero-tool run simply has
+    no `sources` event and reports `tool_calls=0`. Draft and instruction text
+    are never logged; lengths only.
+    """
+
+    def __init__(
+        self,
+        retriever: Retriever,
+        model: Model,
+        *,
+        mode: SearchMode,
+        extra_tools: Sequence[Tool[WritingDeps]] = (),
+    ) -> None:
+        self._retriever = retriever
+        self._mode = mode
+        self._model = model
+        # Built once per process (the service itself is process-lifetime);
+        # per-request state rides in WritingDeps, never on the agent. The
+        # extra_tools seam stays open for wrapped MCP tools in a later task.
+        self._agent = build_writing_agent(model, extra_tools=extra_tools)
+
+    async def suggest(
+        self, draft: str, instruction: str | None = None, *, limit: int = 8
+    ) -> AsyncIterator[ChatStreamEvent]:
+        """Run one writing-assistance turn, yielding chat-contract events.
+
+        The draft (plus optional instruction) is rendered into the user
+        prompt; the model then streams its suggestion, calling
+        `search_knowledge` only when it judges the knowledge base helpful.
+        """
+        run_id = uuid4().hex
+        structlog.contextvars.bind_contextvars(run_id=run_id)
+        started = time.perf_counter()
+
+        # The service owns the flush hook: the agent appends, the service
+        # drains (same hand-off as chat, so `agents/` stays stream-free).
+        pending: list[list[SearchHit]] = []
+        collector = SourceCollector(on_append=pending.append)
+        deps = WritingDeps(retriever=self._retriever, limit=limit, collector=collector)
+
+        logger.info(
+            "agent_run_started",
+            agent="writing",
+            draft_length=len(draft),
+            instruction_length=len(instruction) if instruction is not None else None,
+        )
+        yield RunStartedEvent(run_id=run_id, mode=self._mode)
+
+        usage_input_tokens: int | None = None
+        usage_output_tokens: int | None = None
+        try:
+            async with self._agent.run_stream(
+                render_writing_prompt(draft, instruction), deps=deps
+            ) as result:
+                async for delta in result.stream_text(delta=True, debounce_by=None):
+                    # Tool calls (and their sources) can land between parts;
+                    # drain before the part so sources always precede the text
+                    # they ground.
+                    for batch in _drain(pending):
+                        yield SourcesEvent(items=batch)
+                    if delta:
+                        yield AnswerDeltaEvent(text=delta)
+                usage = result.usage
+                usage_input_tokens = usage.input_tokens or None
+                usage_output_tokens = usage.output_tokens or None
+            for batch in _drain(pending):
+                yield SourcesEvent(items=batch)
+        except Exception as exc:
+            failure = _as_app_error(exc)
+            logger.exception(
+                "agent_run_failed",
+                agent="writing",
+                outcome=failure.code,
+                error_class=type(exc).__name__,
+                tool_calls=collector.tool_calls,
+                latency_ms=round((time.perf_counter() - started) * 1000, 2),
+            )
+            yield ErrorEvent(code=failure.code, message=failure.message)
+            return
+
+        latency_ms = round((time.perf_counter() - started) * 1000, 2)
+        logger.info(
+            "agent_run_finished",
+            agent="writing",
+            model=self._model.model_name,
+            outcome="success",
+            tool_calls=collector.tool_calls,
+            latency_ms=latency_ms,
+            input_tokens=usage_input_tokens,
+            output_tokens=usage_output_tokens,
+        )
+        yield DoneEvent(
+            run_id=run_id,
+            outcome="success",
+            tool_calls=collector.tool_calls,
+            latency_ms=latency_ms,
+        )

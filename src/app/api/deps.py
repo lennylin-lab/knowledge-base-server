@@ -19,7 +19,7 @@ from app.mcp.tools import build_agent_tools
 from app.rag.indexer import run_indexing
 from app.rag.retriever import Retriever
 from app.search.es import get_shared_es_client
-from app.services.agents import AssociationService, SummarizeService
+from app.services.agents import AssociationService, SummarizeService, WritingService
 from app.services.chat import ChatService
 from app.services.document import DocumentService
 from app.services.search import SearchService
@@ -110,13 +110,14 @@ def build_chat_service(settings: Settings) -> ChatService:
     # config changes need a restart (documented, no hot reload).
     manager = get_mcp_manager()
     extra_tools = build_agent_tools(manager, manager.list_tools()) if manager.running else []
-    # With a non-empty key the embedding provider always exists, so the chat
-    # retriever is always wired hybrid; BM25-only chat is not a state this
-    # constructor can produce.
+    # Since provider-config isolation the embedding key is independent of
+    # CHAT_API_KEY: chat with only a chat key wires a BM25-only retriever,
+    # and run_started.mode must report that truthfully (writing's pattern).
+    provider = embedding_provider_from_settings(settings)
     return ChatService(
-        _build_retriever(settings, embedding_provider_from_settings(settings)),
+        _build_retriever(settings, provider),
         get_chat_model(settings),
-        mode="hybrid",
+        mode="hybrid" if provider is not None else "bm25",
         extra_tools=extra_tools,
     )
 
@@ -193,3 +194,43 @@ def get_association_service() -> AssociationService:
 
 
 AssociationServiceDep = Annotated[AssociationService, Depends(get_association_service)]
+
+
+def build_writing_service(settings: Settings) -> WritingService:
+    """Wire the writing service from Settings (uncached constructor).
+
+    Same no-key gate as chat: without `CHAT_API_KEY` this raises
+    `ChatUnavailableError` BEFORE any stream can start (a clean 503 envelope,
+    never a half-open stream). Unlike chat's constructor, the retriever may
+    legitimately degrade to BM25 when no embedding key is configured —
+    retrieval is optional for writing, so such runs simply report
+    `mode: "bm25"`. Wrapped MCP tools are not wired into writing yet; the
+    agent's `extra_tools` seam stays empty until that later task.
+
+    Ordering note: FastAPI resolves dependencies before body validation, so
+    an unconfigured deployment answers 503 `chat_unavailable` even for
+    invalid request bodies (see `build_chat_service`).
+    """
+    if not settings.CHAT_API_KEY.get_secret_value():
+        raise ChatUnavailableError(
+            "Writing assistance is not configured: set CHAT_API_KEY to enable it",
+        )
+    provider = embedding_provider_from_settings(settings)
+    if provider is None:
+        logger.warning("vector_search_disabled", reason="embedding_api_key_not_configured")
+    return WritingService(
+        _build_retriever(settings, provider),
+        get_chat_model(settings),
+        mode="hybrid" if provider is not None else "bm25",
+    )
+
+
+@lru_cache(maxsize=1)
+def get_writing_service() -> WritingService:
+    """Cached accessor like `get_chat_service`: one model, one retriever and
+    one SDK client per process; `lru_cache` never memoizes raised exceptions,
+    so the no-key path still fails every request."""
+    return build_writing_service(get_settings())
+
+
+WritingServiceDep = Annotated[WritingService, Depends(get_writing_service)]

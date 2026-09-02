@@ -34,11 +34,13 @@ _EVENT_NAMES: dict[type[ChatStreamEvent], str] = {
 }
 
 
-async def _to_sse(events: AsyncIterator[ChatStreamEvent]) -> AsyncIterator[dict[str, str]]:
+async def to_sse(events: AsyncIterator[ChatStreamEvent]) -> AsyncIterator[dict[str, str]]:
     """Serialize typed events to sse-starlette's dict shape.
 
     The event name is the discriminator; the payload is model-serialized JSON
-    so clients parse one consistent shape per event.
+    so clients parse one consistent shape per event. Public because every
+    endpoint streaming the chat event vocabulary shares it (writing today):
+    one wire format, one place.
     """
     async for event in events:
         yield {"event": _EVENT_NAMES[type(event)], "data": event.model_dump_json()}
@@ -47,4 +49,4 @@ async def _to_sse(events: AsyncIterator[ChatStreamEvent]) -> AsyncIterator[dict[
 @router.post("", response_class=EventSourceResponse, response_model=None)
 async def chat(payload: ChatRequest, service: ChatServiceDep) -> EventSourceResponse:
     """Stream a knowledge-grounded answer as SSE."""
-    return EventSourceResponse(_to_sse(service.ask(payload.question, limit=payload.limit)))
+    return EventSourceResponse(to_sse(service.ask(payload.question, limit=payload.limit)))

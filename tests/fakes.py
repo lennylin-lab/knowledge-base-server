@@ -127,6 +127,33 @@ class StubEsClient:
         self.closed = True
 
 
+# --- SSE wire helper (shared by every streaming-endpoint test) ---
+
+
+def parse_sse(body: str) -> list[tuple[str, Any]]:
+    """Parse an SSE body into (event_name, decoded_data) pairs.
+
+    Tolerant of line-ending style, keepalive comments, and multi-line data —
+    only complete event blocks with both fields are returned. Lives here (not
+    in one endpoint's test module) because every SSE endpoint streams the one
+    chat event vocabulary: one parser, one home.
+    """
+    events: list[tuple[str, Any]] = []
+    for block in body.replace("\r\n", "\n").split("\n\n"):
+        name: str | None = None
+        data_lines: list[str] = []
+        for line in block.split("\n"):
+            if not line.strip() or line.startswith(":"):
+                continue
+            if line.startswith("event:"):
+                name = line.removeprefix("event:").strip()
+            elif line.startswith("data:"):
+                data_lines.append(line.removeprefix("data:").strip())
+        if name is not None and data_lines:
+            events.append((name, json.loads("\n".join(data_lines))))
+    return events
+
+
 # --- chat doubles (offline; no live LLM anywhere near these) ---
 
 
@@ -223,10 +250,11 @@ def scripted_chat_model(
     fail_during_answer: Exception | None = None,
     fail_after_parts: int = 0,
     tool_results: list[str] | None = None,
+    prompts: list[str] | None = None,
     tool_name: str = "search_knowledge",
     tool_args: Sequence[dict[str, Any]] | None = None,
 ) -> FunctionModel:
-    """FunctionModel scripting the QA turn: tool calls first, then streamed text.
+    """FunctionModel scripting a streaming agent turn: tool calls, then text.
 
     Phase detection is behavioral, like a real model: while fewer tool results
     are visible in the history than scripted `tool_calls`, the next model
@@ -244,6 +272,11 @@ def scripted_chat_model(
     `tool_results`, when given, accumulates the tool return values as the
     model saw them (one entry per completed call, in order) — the observable
     for citation-numbering and MCP-error-string assertions.
+
+    `prompts`, when given, records the user prompt seen by each model request
+    (the same text repeats per request within one run, so its length doubles
+    as the model-request count) — the observable for what the orchestrator
+    actually put in the prompt.
     """
     queries = list(tool_calls)
     parts = list(answer_parts)
@@ -252,6 +285,8 @@ def scripted_chat_model(
     async def stream_function(messages: list[ModelMessage], info: object) -> Any:
         if fail_before_run is not None:
             raise fail_before_run
+        if prompts is not None:
+            prompts.append(_first_user_prompt(messages))
         if tool_results is not None:
             fresh = [
                 str(part.content)

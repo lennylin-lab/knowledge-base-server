@@ -172,6 +172,12 @@ to `AppError` subclasses and **re-raise** — the shared handler returns
 the envelope. The SSE terminal-`error`-event path above is the special
 case reserved for streams that already sent a 200.
 
+`run_started.mode` must report the retriever **actually wired**
+(`"hybrid" if embedding provider is not None else "bm25"`) — since
+provider-config isolation the embedding and chat keys are independent,
+so a chat-key-only deployment wires BM25-only and must say so. Both
+chat and writing compute mode from the wiring; keep it that way.
+
 ## Rules
 
 - **Never** `except Exception: pass` (or log-and-continue) anywhere in `src/`.

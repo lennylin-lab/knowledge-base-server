@@ -47,6 +47,10 @@ keep them fast enough to run locally on every change.
   Settings field without its commented example entry makes the config
   surface undiscoverable; when a new group lands (e.g. `KB_MCP_CONFIG_PATH`),
   update `.env.example` in the same task.
+- **Helpers shared across test modules live in `tests/fakes.py` (doubles,
+  parsers) or `tests/corpus.py` (fixtures/data) — never in a `test_*`
+  module.** Test-module → test-module imports are the one edge the suite
+  must not grow (parse_sse was relocated for exactly this).
 
 ## Python Style
 

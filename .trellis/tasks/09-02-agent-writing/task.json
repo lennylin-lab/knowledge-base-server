@@ -1,9 +1,9 @@
 {
-  "id": "builtin-agents",
-  "name": "builtin-agents",
-  "title": "Built-in agents: summarize, association, writing",
+  "id": "agent-writing",
+  "name": "agent-writing",
+  "title": "Writing assistant agent with SSE suggest endpoint",
   "description": "",
-  "status": "planning",
+  "status": "in_progress",
   "dev_type": null,
   "scope": null,
   "package": null,
@@ -18,12 +18,8 @@
   "commit": null,
   "pr_url": null,
   "subtasks": [],
-  "children": [
-    "09-02-agent-summarize",
-    "09-02-agent-association",
-    "09-02-agent-writing"
-  ],
-  "parent": null,
+  "children": [],
+  "parent": "09-02-builtin-agents",
   "relatedFiles": [],
   "notes": "",
   "meta": {}
