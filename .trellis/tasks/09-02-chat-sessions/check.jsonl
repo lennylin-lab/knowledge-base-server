@@ -1,0 +1,5 @@
+{"file": ".trellis/spec/backend/database-guidelines.md", "type": "file", "reason": "verify enum lifecycle in 0004 (explicit create/drop checkfirst), FK CASCADE, keyset pagination, no OFFSET, no commits in repositories, round trip"}
+{"file": ".trellis/spec/backend/directory-structure.md", "type": "file", "reason": "verify layering (router thin, service framework-free, repo SQL-only), module placement, session_factory pattern consistency"}
+{"file": ".trellis/spec/backend/error-handling.md", "type": "file", "reason": "verify 404 before stream starts, terminal error semantics preserved, stateless regression"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "type": "file", "reason": "verify no message content in logs (lengths only), session events named correctly"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "type": "file", "reason": "gates green, offline contract, .env.example updated, review checklist"}

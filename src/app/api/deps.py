@@ -23,6 +23,7 @@ from app.services.agents import AssociationService, SummarizeService, WritingSer
 from app.services.chat import ChatService
 from app.services.document import DocumentService
 from app.services.search import SearchService
+from app.services.session import ChatSessionService
 
 logger = structlog.get_logger(__name__)
 
@@ -42,6 +43,14 @@ def get_document_service(session: SessionDep, background_tasks: BackgroundTasks)
 
 
 DocumentServiceDep = Annotated[DocumentService, Depends(get_document_service)]
+
+
+def get_chat_session_service(session: SessionDep) -> ChatSessionService:
+    """One service per request, sharing the request's session."""
+    return ChatSessionService(session)
+
+
+ChatSessionServiceDep = Annotated[ChatSessionService, Depends(get_chat_session_service)]
 
 
 def embedding_provider_from_settings(settings: Settings) -> OpenAIEmbeddingProvider | None:
@@ -119,6 +128,10 @@ def build_chat_service(settings: Settings) -> ChatService:
         get_chat_model(settings),
         mode="hybrid" if provider is not None else "bm25",
         extra_tools=extra_tools,
+        # Session persistence: the process-lifetime service opens one session
+        # per ask() via the factory (the SummarizeService lifetime pattern).
+        session_factory=SessionFactory,
+        history_char_budget=settings.CHAT_HISTORY_CHAR_BUDGET,
     )
 
 

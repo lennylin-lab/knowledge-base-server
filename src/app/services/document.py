@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-import base64
-import json
 from collections.abc import Callable
-from datetime import datetime
 from uuid import UUID
 
 import frontmatter
@@ -23,12 +20,9 @@ from app.schemas.document import (
     DocumentReadDetail,
     DocumentUpdate,
 )
+from app.utils.cursor import decode_cursor, encode_cursor
 
 logger = structlog.get_logger(__name__)
-
-# Cursor payload keys stay short — cursors travel in every list request.
-_CURSOR_CREATED_AT_KEY = "ca"
-_CURSOR_ID_KEY = "id"
 
 # The service stays framework-free: how indexing gets scheduled (FastAPI
 # BackgroundTasks, a queue, ...) is the injecting caller's concern.
@@ -65,24 +59,6 @@ def _parse_front_matter(content: str, request_title: str | None) -> tuple[str, l
             tags.append(normalized)
 
     return resolved_title, tags
-
-
-def _encode_cursor(created_at: datetime, doc_id: UUID) -> str:
-    """Opaque keyset cursor: urlsafe-base64 JSON of (created_at, id)."""
-    payload = json.dumps(
-        {_CURSOR_CREATED_AT_KEY: created_at.isoformat(), _CURSOR_ID_KEY: str(doc_id)}
-    )
-    return base64.urlsafe_b64encode(payload.encode()).decode()
-
-
-def _decode_cursor(cursor: str) -> tuple[datetime, UUID]:
-    """Inverse of `_encode_cursor`; any malformed input is a 422."""
-    try:
-        data = json.loads(base64.urlsafe_b64decode(cursor.encode()))
-        return datetime.fromisoformat(data[_CURSOR_CREATED_AT_KEY]), UUID(data[_CURSOR_ID_KEY])
-    except (ValueError, KeyError, TypeError) as exc:
-        # binascii.Error (bad base64) and JSONDecodeError subclass ValueError.
-        raise ValidationError("Invalid cursor", details={"cursor": cursor}) from exc
 
 
 class DocumentService:
@@ -122,7 +98,7 @@ class DocumentService:
         tag: str | None = None,
     ) -> DocumentPage:
         """Keyset-paginated listing, optionally filtered by tag membership."""
-        decoded = _decode_cursor(cursor) if cursor is not None else None
+        decoded = decode_cursor(cursor) if cursor is not None else None
         normalized_tag = tag.strip().lower() if tag else None
         rows = await self._repo.list_page(cursor=decoded, limit=limit, tag=normalized_tag)
 
@@ -130,7 +106,7 @@ class DocumentService:
         if len(rows) > limit:
             rows = rows[:limit]
             last = rows[-1]
-            next_cursor = _encode_cursor(last.created_at, last.id)
+            next_cursor = encode_cursor(last.created_at, last.id)
 
         return DocumentPage(
             items=[DocumentRead.model_validate(row) for row in rows],

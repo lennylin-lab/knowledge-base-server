@@ -112,6 +112,11 @@ logger.exception("embedding_failed", document_id=str(doc_id))  # inside except
   tool_count), `mcp_server_failed` (server, error_class) at start,
   `mcp_server_stop_failed` at shutdown. `env` values in server configs
   are secrets — never logged.
+- **Chat sessions** — `session_created` / `session_deleted`
+  (session_id; title is loggable — same data class as document titles),
+  `chat_message_persisted` (session_id, role, content_length — **never
+  content**: stored messages are Q&A pairs, the most sensitive payload
+  in the system).
 - **Token usage** is a metric, not a log line — but the per-call events above
   make aggregation possible.
 

@@ -1,13 +1,17 @@
-"""Chat API contract (offline): SSE wire format, validation, 503 wiring.
+"""Chat API contract: SSE wire format, validation, 503 wiring, sessions.
 
 The chat dependency is overridden with a FunctionModel-backed service, so no
 request here can reach a real provider. The unconfigured-chat case drives the
 REAL `build_chat_service` to prove the key check fires before any stream.
+Session-persistence tests (`db`-marked) wire that stub service to the
+disposable test database — the production lifetime pattern.
 """
 
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from datetime import datetime
+from uuid import UUID
 
 import httpx
 import openai
@@ -15,9 +19,11 @@ import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from pydantic import SecretStr
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.api.deps import build_chat_service, get_chat_service
 from app.core.config import Settings
+from app.core.database import get_db
 from app.rag.retriever import SearchOutcome
 from app.services.chat import ChatService
 from fakes import StubRetriever, parse_sse, retrieved_chunk, scripted_chat_model
@@ -241,3 +247,117 @@ async def test_limit_boundaries_are_accepted(chat_client, limit):
     resp = await _post(chat_client, {"question": QUESTION, "limit": limit})
 
     assert resp.status_code == 200
+
+
+async def test_stateless_regression_body_without_session_id_streams(chat_client):
+    # Bodies without session_id stay accepted, and the stateless service
+    # (no persistence wired — exactly the pre-session construction) reports
+    # session_id: null in its events.
+    resp = await _post(chat_client, {"question": QUESTION})
+
+    assert resp.status_code == 200
+    events = parse_sse(resp.text)
+    run_started, done = events[0][1], events[-1][1]
+    assert run_started["session_id"] is None
+    assert done["session_id"] is None
+
+
+# --- session persistence through the API (disposable test DB) ---
+
+
+@pytest.fixture
+async def db_chat_client(app: FastAPI, db_engine: AsyncEngine) -> AsyncIterator[AsyncClient]:
+    """ASGI client whose scripted chat service persists to the test DB.
+
+    `get_db` is overridden too, so the session endpoints read what the chat
+    endpoint wrote — the full production flow minus the provider.
+    """
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+
+    async def override_get_db() -> AsyncIterator[AsyncSession]:
+        async with factory() as session:
+            yield session
+
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_chat_service] = lambda: ChatService(
+        StubRetriever(),
+        scripted_chat_model(answer_parts=["Grounded answer."]),
+        mode="hybrid",
+        session_factory=factory,
+    )
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        yield ac
+    app.dependency_overrides.clear()
+
+
+@pytest.mark.db
+async def test_chat_without_session_id_creates_session_visible_in_events_and_api(db_chat_client):
+    resp = await _post(db_chat_client, {"question": QUESTION})
+
+    assert resp.status_code == 200
+    events = parse_sse(resp.text)
+    run_started, done = events[0][1], events[-1][1]
+    assert run_started["session_id"]
+    assert done["session_id"] == run_started["session_id"]
+
+    detail = await db_chat_client.get(f"/api/v1/chat/sessions/{run_started['session_id']}")
+    assert detail.status_code == 200
+    body = detail.json()
+    assert body["title"] == QUESTION  # short question: title is verbatim
+    assert [message["role"] for message in body["messages"]] == ["user", "assistant"]
+    assert body["messages"][0]["content"] == QUESTION
+    assert body["messages"][1]["content"] == "Grounded answer."
+    # Same run, two renderings: events stream the bare hex, the stored column
+    # is a UUID that serializes with dashes.
+    assert UUID(body["messages"][1]["run_id"]) == UUID(run_started["run_id"])
+
+
+@pytest.mark.db
+async def test_second_api_turn_continues_the_same_session(db_chat_client):
+    first = await _post(db_chat_client, {"question": "first question"})
+    session_id = parse_sse(first.text)[0][1]["session_id"]
+    detail_after_first = (await db_chat_client.get(f"/api/v1/chat/sessions/{session_id}")).json()
+
+    second = await _post(db_chat_client, {"question": "second question", "session_id": session_id})
+
+    assert second.status_code == 200
+    assert parse_sse(second.text)[0][1]["session_id"] == session_id
+    detail = (await db_chat_client.get(f"/api/v1/chat/sessions/{session_id}")).json()
+    assert [message["content"] for message in detail["messages"]] == [
+        "first question",
+        "Grounded answer.",
+        "second question",
+        "Grounded answer.",
+    ]
+    # PRD: each turn advances the session's updated_at (recency ordering).
+    assert datetime.fromisoformat(detail["updated_at"]) > datetime.fromisoformat(
+        detail_after_first["updated_at"]
+    )
+
+
+@pytest.mark.db
+async def test_continuing_missing_session_returns_404_envelope_not_a_stream(db_chat_client):
+    resp = await _post(
+        db_chat_client,
+        {"question": QUESTION, "session_id": "00000000-0000-0000-0000-000000000000"},
+    )
+
+    # The 404 must be a JSON envelope raised before the stream starts — not
+    # an event-stream response with an error event.
+    assert resp.status_code == 404
+    assert resp.headers["content-type"].startswith("application/json")
+    assert resp.json()["error"]["code"] == "not_found"
+
+
+@pytest.mark.db
+async def test_deleted_session_cannot_be_continued(db_chat_client):
+    first = await _post(db_chat_client, {"question": QUESTION})
+    session_id = parse_sse(first.text)[0][1]["session_id"]
+    delete_resp = await db_chat_client.delete(f"/api/v1/chat/sessions/{session_id}")
+    assert delete_resp.status_code == 204
+
+    resp = await _post(db_chat_client, {"question": QUESTION, "session_id": session_id})
+
+    assert resp.status_code == 404
+    assert resp.json()["error"]["code"] == "not_found"

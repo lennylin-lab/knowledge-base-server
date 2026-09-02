@@ -153,6 +153,14 @@ validation, so an unconfigured dependency (e.g. no API key → 503
 behavior for configuration-gate dependencies — document it at the
 construction site, don't reorder.
 
+Pre-stream failures in SSE endpoints use the **priming pattern**
+(`api/v1/endpoints/chat.py`): `await events.__anext__()` before
+constructing `EventSourceResponse` — sse-starlette sends
+`http.response.start` before pulling the first body item, so without
+priming a pre-stream error (e.g. session 404) arrives after the 200.
+Priming makes it a clean JSON envelope; contextvars bound during priming
+propagate into the streaming task.
+
 Background pipeline (indexing/embedding) never raises to users: failures are
 caught at the job boundary, logged with full context, and the document's
 `index_status` flips to `failed` — user-facing APIs expose that status.

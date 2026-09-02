@@ -36,6 +36,9 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+# Side-effect import: every table (documents, chunks, chat) registers on
+# Base.metadata, so schema creation and truncation always see the full set.
+import app.models
 from app.api.deps import SessionDep, get_document_service
 from app.core.database import Base, get_db
 from app.llm.embeddings import EmbeddingProvider

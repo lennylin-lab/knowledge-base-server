@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Literal
+from uuid import UUID
 
 from pydantic import BaseModel, Field
 
@@ -13,17 +14,29 @@ SearchMode = Literal["hybrid", "bm25"]
 
 
 class ChatRequest(BaseModel):
-    """One stateless chat turn: a question plus retrieval sizing."""
+    """One chat turn: a question plus retrieval sizing.
+
+    `session_id` absent starts a new persisted session (title derived from
+    the question); present continues that session (404 when it does not
+    exist). A service wired without persistence ignores it entirely.
+    """
 
     question: str = Field(min_length=1, description="Natural-language question")
     limit: int = Field(default=8, ge=1, le=20, description="Max chunks per retrieval")
+    session_id: UUID | None = Field(
+        default=None, description="Session to continue; absent starts a new one"
+    )
 
 
 class RunStartedEvent(BaseModel):
-    """First event of every run; `mode` is the configured retrieval mode."""
+    """First event of every run; `mode` is the configured retrieval mode.
+
+    `session_id` is the persisted conversation (None in stateless mode).
+    """
 
     run_id: str
     mode: SearchMode
+    session_id: UUID | None = None
 
 
 class SourcesEvent(BaseModel):
@@ -48,6 +61,7 @@ class DoneEvent(BaseModel):
     outcome: Literal["success"]
     tool_calls: int
     latency_ms: float
+    session_id: UUID | None = None
 
 
 class ErrorEvent(BaseModel):

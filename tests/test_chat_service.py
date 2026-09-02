@@ -1,23 +1,39 @@
-"""Chat service stream semantics (offline): event order, sources, failures.
+"""Chat service stream semantics: event order, sources, failures, sessions.
 
 The model is always a scripted FunctionModel and the retriever a stub — no
 live LLM, no infrastructure. Provider failures are scripted with the openai
 SDK's own exception types so the service's error mapping is exercised for
-real.
+real. Session-persistence tests run against the disposable test database
+(`db`-marked) with the service wired to the per-test session factory — the
+production lifetime pattern.
 """
 
 from __future__ import annotations
 
+from uuid import UUID, uuid4
+
 import httpx
 import openai
+import pytest
 import structlog
+from pydantic_ai.messages import (
+    ModelMessage,
+    ModelRequest,
+    ModelResponse,
+    TextPart,
+    UserPromptPart,
+)
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from structlog.testing import capture_logs
 
 from app.agents.qa import SourceCollector
-from app.core.exceptions import SearchIndexError
+from app.core.exceptions import NotFoundError, SearchIndexError
 from app.mcp.manager import McpToolInfo, McpToolResult
 from app.mcp.tools import build_agent_tools
+from app.models.chat import ChatMessage, MessageRole
 from app.rag.retriever import RetrievedChunk, SearchOutcome
+from app.repositories.chat import ChatMessageRepository, ChatSessionRepository
 from app.schemas.chat import (
     AnswerDeltaEvent,
     DoneEvent,
@@ -26,6 +42,7 @@ from app.schemas.chat import (
     SourcesEvent,
 )
 from app.services.chat import ChatService
+from app.services.session import derive_title
 from fakes import (
     FakeMcpManager,
     StubRetriever,
@@ -48,8 +65,10 @@ def _make_retriever(item: RetrievedChunk | None = None) -> StubRetriever:
     )
 
 
-async def _collect(service: ChatService, question: str, *, limit: int = 8) -> list[object]:
-    return [event async for event in service.ask(question, limit=limit)]
+async def _collect(
+    service: ChatService, question: str, *, limit: int = 8, session_id: UUID | None = None
+) -> list[object]:
+    return [event async for event in service.ask(question, limit=limit, session_id=session_id)]
 
 
 def _names(events: list[object]) -> list[str]:
@@ -429,3 +448,266 @@ async def test_collector_counts_retrieval_and_external_calls_together() -> None:
 
     assert collector.tool_calls == 3
     assert collector.total_hits == 0  # external calls contribute no KB hits
+
+
+# --- session persistence (disposable test DB; scripted model throughout) ---
+
+
+def _persisted_service(
+    factory: async_sessionmaker[AsyncSession],
+    model=None,
+    *,
+    budget: int = 8000,
+) -> ChatService:
+    """ChatService wired exactly like production: stub retriever, scripted
+    model, one DB session per ask() via the injected factory."""
+    return ChatService(
+        StubRetriever(),
+        model if model is not None else scripted_chat_model(answer_parts=list(ANSWER_PARTS)),
+        mode="hybrid",
+        session_factory=factory,
+        history_char_budget=budget,
+    )
+
+
+async def _session_messages(
+    factory: async_sessionmaker[AsyncSession], session_id: UUID
+) -> list[ChatMessage]:
+    async with factory() as session:
+        return list(await ChatMessageRepository(session).list_for_session(session_id))
+
+
+def _user_prompts(messages: list[ModelMessage]) -> list[str]:
+    return [
+        part.content
+        for message in messages
+        if isinstance(message, ModelRequest)
+        for part in message.parts
+        if isinstance(part, UserPromptPart) and isinstance(part.content, str)
+    ]
+
+
+def _assistant_texts(messages: list[ModelMessage]) -> list[str]:
+    return [
+        part.content
+        for message in messages
+        if isinstance(message, ModelResponse)
+        for part in message.parts
+        if isinstance(part, TextPart)
+    ]
+
+
+@pytest.mark.db
+async def test_ask_without_session_id_creates_session_and_persists_the_turn(session_factory):
+    service = _persisted_service(session_factory)
+
+    events = await _collect(service, QUESTION)
+
+    run_started = events[0]
+    done = events[-1]
+    assert isinstance(run_started, RunStartedEvent)
+    assert isinstance(done, DoneEvent)
+    assert run_started.session_id == done.session_id
+    assert run_started.session_id is not None
+
+    async with session_factory() as session:
+        chat_session = await ChatSessionRepository(session).get_by_id(run_started.session_id)
+    assert chat_session is not None
+    assert chat_session.title == derive_title(QUESTION)
+
+    messages = await _session_messages(session_factory, run_started.session_id)
+    assert [(m.role, m.content) for m in messages] == [
+        (MessageRole.USER, QUESTION),
+        (MessageRole.ASSISTANT, "Zorblat is a test term used in fixtures [1]."),
+    ]
+    assert messages[0].run_id is None
+    assert messages[1].run_id == UUID(hex=run_started.run_id)
+
+
+@pytest.mark.db
+async def test_second_turn_sees_first_turn_as_message_history(session_factory):
+    first_histories: list[list[ModelMessage]] = []
+    service1 = _persisted_service(
+        session_factory,
+        scripted_chat_model(answer_parts=["First answer."], histories=first_histories),
+    )
+    events = await _collect(service1, "first question")
+    session_id = events[0].session_id
+    assert session_id is not None
+
+    second_histories: list[list[ModelMessage]] = []
+    service2 = _persisted_service(
+        session_factory,
+        scripted_chat_model(answer_parts=["Second answer."], histories=second_histories),
+    )
+    events2 = await _collect(service2, "second question", session_id=session_id)
+    assert events2[0].session_id == session_id
+
+    assert second_histories, "the model must have been called"
+    for messages in second_histories:
+        # History precedes the current prompt: [q1, a1, q2].
+        assert _user_prompts(messages)[:2] == ["first question", "second question"]
+        assert _assistant_texts(messages) == ["First answer."]
+
+    messages = await _session_messages(session_factory, session_id)
+    assert [(m.role, m.content) for m in messages] == [
+        (MessageRole.USER, "first question"),
+        (MessageRole.ASSISTANT, "First answer."),
+        (MessageRole.USER, "second question"),
+        (MessageRole.ASSISTANT, "Second answer."),
+    ]
+
+
+@pytest.mark.db
+async def test_failed_run_persists_user_message_only_and_session_continues(session_factory):
+    provider_down = openai.APIConnectionError(
+        request=httpx.Request("POST", "http://provider.test/v1/chat")
+    )
+    failing = _persisted_service(
+        session_factory, scripted_chat_model(answer_parts=["never"], fail_before_run=provider_down)
+    )
+    events = await _collect(failing, "doomed question")
+
+    assert [type(event).__name__ for event in events] == ["RunStartedEvent", "ErrorEvent"]
+    session_id = events[0].session_id
+    assert session_id is not None
+
+    # The honest record: the user message survived, no assistant message.
+    messages = await _session_messages(session_factory, session_id)
+    assert [(m.role, m.content) for m in messages] == [(MessageRole.USER, "doomed question")]
+
+    # And the session stays continuable; the unanswered question does not
+    # leak into the next turn's history as an orphan half-turn.
+    histories: list[list[ModelMessage]] = []
+    recovered = _persisted_service(
+        session_factory, scripted_chat_model(answer_parts=["Recovered."], histories=histories)
+    )
+    events2 = await _collect(recovered, "try again", session_id=session_id)
+    assert isinstance(events2[-1], DoneEvent)
+    assert all(_user_prompts(messages) == ["try again"] for messages in histories)
+    messages = await _session_messages(session_factory, session_id)
+    assert len(messages) == 3  # doomed user + retry user + recovered assistant
+
+
+@pytest.mark.db
+async def test_history_budget_drops_oldest_complete_turns(session_factory):
+    # Each scripted turn costs exactly 4 chars ("u1"+"a1", "u2"+"a2").
+    service1 = _persisted_service(session_factory, scripted_chat_model(answer_parts=["a1"]))
+    events = await _collect(service1, "u1")
+    session_id = events[0].session_id
+    assert session_id is not None
+    service2 = _persisted_service(session_factory, scripted_chat_model(answer_parts=["a2"]))
+    await _collect(service2, "u2", session_id=session_id)
+
+    # Budget 4 fits only the newest turn: turn 3 sees [u2, a2], never u1.
+    histories: list[list[ModelMessage]] = []
+    service3 = _persisted_service(
+        session_factory,
+        scripted_chat_model(answer_parts=["a3"], histories=histories),
+        budget=4,
+    )
+    await _collect(service3, "u3", session_id=session_id)
+
+    assert histories
+    for messages in histories:
+        assert _user_prompts(messages) == ["u2", "u3"]
+        assert _assistant_texts(messages) == ["a2"]
+
+
+@pytest.mark.db
+async def test_history_read_limit_drops_older_turns_even_under_budget(session_factory, monkeypatch):
+    # The 200-message read bound (HISTORY_READ_LIMIT) is a deliberate floor:
+    # a session that outgrows it loses its oldest turns from history even
+    # when the char budget would fit them — the read, not the budget, limits
+    # first. Shrunk to 2 here so one session (two turns) crosses it.
+    monkeypatch.setattr("app.services.chat.HISTORY_READ_LIMIT", 2)
+    service1 = _persisted_service(session_factory, scripted_chat_model(answer_parts=["a1"]))
+    events = await _collect(service1, "u1")
+    session_id = events[0].session_id
+    assert session_id is not None
+    service2 = _persisted_service(session_factory, scripted_chat_model(answer_parts=["a2"]))
+    await _collect(service2, "u2", session_id=session_id)
+
+    # Default budget fits both turns; the read cap returns only the newest
+    # two messages ([a2, u2]) — turn 1 was never read, so never assembled.
+    histories: list[list[ModelMessage]] = []
+    service3 = _persisted_service(
+        session_factory, scripted_chat_model(answer_parts=["a3"], histories=histories)
+    )
+    await _collect(service3, "u3", session_id=session_id)
+
+    assert histories
+    for messages in histories:
+        assert _user_prompts(messages) == ["u2", "u3"]
+        assert _assistant_texts(messages) == ["a2"]
+
+
+@pytest.mark.db
+async def test_done_time_persist_failure_yields_terminal_error_and_user_only_record(
+    session_factory, monkeypatch
+):
+    # Pins the persist-inside-the-try contract: a failure while storing the
+    # assistant message at done time must surface as the terminal `error`
+    # event (never escape the generator after streaming started) and leave
+    # the honest user-only record.
+    async def boom(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("disk full at persist time")
+
+    service = _persisted_service(session_factory)
+    monkeypatch.setattr(service, "_persist_assistant_message", boom)
+    events = await _collect(service, QUESTION)
+
+    # The answer streamed first; the terminal event is the error — nothing
+    # escaped the generator mid-stream.
+    assert isinstance(events[0], RunStartedEvent)
+    assert any(isinstance(event, AnswerDeltaEvent) for event in events)
+    assert isinstance(events[-1], ErrorEvent)
+    session_id = events[0].session_id
+    assert session_id is not None
+    messages = await _session_messages(session_factory, session_id)
+    assert [(m.role, m.content) for m in messages] == [(MessageRole.USER, QUESTION)]
+
+
+@pytest.mark.db
+async def test_ask_with_unknown_session_id_raises_not_found_before_any_event(session_factory):
+    service = _persisted_service(session_factory)
+
+    with pytest.raises(NotFoundError):
+        await _collect(service, QUESTION, session_id=uuid4())
+
+
+@pytest.mark.db
+async def test_ask_with_soft_deleted_session_id_raises_not_found(session_factory):
+    service = _persisted_service(session_factory)
+    events = await _collect(service, QUESTION)
+    session_id = events[0].session_id
+    assert session_id is not None
+
+    async with session_factory() as session:
+        repo = ChatSessionRepository(session)
+        chat_session = await repo.get_by_id(session_id)
+        assert chat_session is not None
+        await repo.soft_delete(chat_session)
+        await session.commit()
+
+    with pytest.raises(NotFoundError):
+        await _collect(service, QUESTION, session_id=session_id)
+
+
+@pytest.mark.db
+async def test_stateless_service_performs_no_db_writes(session_factory, db_engine):
+    # The hard regression: a service constructed WITHOUT a session factory
+    # (every pre-session construction, including the whole pre-existing
+    # suite) never touches the chat tables.
+    service = ChatService(StubRetriever(), scripted_chat_model(answer_parts=["ok"]), mode="bm25")
+
+    events = await _collect(service, QUESTION)
+
+    assert isinstance(events[0], RunStartedEvent)
+    assert events[0].session_id is None
+    assert isinstance(events[-1], DoneEvent)
+    assert events[-1].session_id is None
+    async with db_engine.connect() as conn:
+        sessions = (await conn.execute(text("SELECT count(*) FROM chat_sessions"))).scalar_one()
+        messages = (await conn.execute(text("SELECT count(*) FROM chat_messages"))).scalar_one()
+    assert (sessions, messages) == (0, 0)

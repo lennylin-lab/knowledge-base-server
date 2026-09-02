@@ -251,6 +251,7 @@ def scripted_chat_model(
     fail_after_parts: int = 0,
     tool_results: list[str] | None = None,
     prompts: list[str] | None = None,
+    histories: list[list[ModelMessage]] | None = None,
     tool_name: str = "search_knowledge",
     tool_args: Sequence[dict[str, Any]] | None = None,
 ) -> FunctionModel:
@@ -277,6 +278,10 @@ def scripted_chat_model(
     (the same text repeats per request within one run, so its length doubles
     as the model-request count) — the observable for what the orchestrator
     actually put in the prompt.
+
+    `histories`, when given, records the FULL message list of each model
+    request — the observable for multi-turn assertions (prior turns arriving
+    as `message_history` appear here ahead of the current prompt).
     """
     queries = list(tool_calls)
     parts = list(answer_parts)
@@ -287,6 +292,8 @@ def scripted_chat_model(
             raise fail_before_run
         if prompts is not None:
             prompts.append(_first_user_prompt(messages))
+        if histories is not None:
+            histories.append(list(messages))
         if tool_results is not None:
             fresh = [
                 str(part.content)

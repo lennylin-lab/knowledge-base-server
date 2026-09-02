@@ -98,7 +98,10 @@ Key points:
 - **Services drive agents, never the reverse.** A service picks the agent,
   builds its run context, and registers extra tools as closures — that is how
   service capabilities reach an agent without `agents/` importing `services/`
-  (prevents import cycles).
+  (prevents import cycles). Intra-`services/` imports of **pure domain
+  helpers** are allowed (`services/chat.py` ← `derive_title` from
+  `services/session.py`): the matrix constrains cross-layer deps, not
+  same-layer reuse — keep it acyclic and pure.
 - **`llm/` is a pure provider layer**: model instances, embedding clients,
   retries/timeouts. It knows nothing about documents or knowledge. All model
   names, `base_url`, API keys come from `Settings` — nothing hardcoded.

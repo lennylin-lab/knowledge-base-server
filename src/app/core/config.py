@@ -35,6 +35,10 @@ class Settings(BaseSettings):
     CHAT_BASE_URL: str = "https://api.openai.com/v1"
     CHAT_API_KEY: SecretStr = SecretStr("")
     CHAT_MODEL: str = "gpt-4o-mini"
+    # Multi-turn history window: total characters of complete turns (newest
+    # first) sent to the agent as `message_history` — chars, not tokens, are
+    # the MVP proxy (PRD out-of-scope: token-accurate budgeting).
+    CHAT_HISTORY_CHAR_BUDGET: int = 8000
 
     # --- MCP extension ---
     # Path to a Claude-Desktop-style `{"mcpServers": {...}}` file; relative
