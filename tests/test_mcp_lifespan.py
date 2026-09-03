@@ -16,6 +16,7 @@ import app.main as main_module
 from app.core.config import get_settings
 from app.main import create_app
 from app.mcp.manager import McpManager, get_mcp_manager
+from fakes import hermetic_settings
 
 
 class LifecycleSpy:
@@ -92,9 +93,8 @@ async def test_chat_service_builds_without_extra_tools_when_manager_not_running(
 
     import app.api.deps as deps_module
     from app.api.deps import build_chat_service
-    from app.core.config import Settings
 
     monkeypatch.setattr(deps_module, "get_mcp_manager", lambda: McpManager({}))
-    service = build_chat_service(Settings(CHAT_API_KEY=SecretStr("test-key")))
+    service = build_chat_service(hermetic_settings(CHAT_API_KEY=SecretStr("test-key")))
 
     assert service is not None

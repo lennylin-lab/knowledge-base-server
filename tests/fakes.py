@@ -7,7 +7,7 @@ import json
 import math
 import random
 from collections.abc import Sequence
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import UUID
 
 from pydantic_ai.messages import (
@@ -24,6 +24,9 @@ from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
 from app.mcp.manager import McpToolResult
 from app.models.document_chunk import EMBEDDING_DIM
 from app.rag.retriever import ChunkKey, RetrievedChunk, SearchOutcome
+
+if TYPE_CHECKING:
+    from app.core.config import Settings
 
 
 def basis_vector(index: int, dim: int = EMBEDDING_DIM) -> list[float]:
@@ -399,3 +402,17 @@ def scripted_association_model(
         )
 
     return FunctionModel(function, model_name="scripted-association")
+
+
+def hermetic_settings(**overrides: object) -> Settings:
+    """Settings constructed WITHOUT the ambient `.env` file.
+
+    Explicit test constructions must not merge the developer's real
+    `.env` values (e.g. a populated KB_EMBEDDING_API_KEY flipping a
+    "chat-key-only" wiring test from bm25 to hybrid). Only the
+    `live_llm` smoke tests construct Settings WITH the env file on
+    purpose.
+    """
+    from app.core.config import Settings
+
+    return Settings(_env_file=None, **overrides)  # type: ignore[arg-type]

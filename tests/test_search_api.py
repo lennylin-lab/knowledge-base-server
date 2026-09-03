@@ -18,12 +18,11 @@ from app.api.deps import (
     embedding_provider_from_settings,
     get_search_service,
 )
-from app.core.config import Settings
 from app.core.exceptions import LLMProviderError
 from app.rag.retriever import Retriever
 from app.services.search import SearchService
 from corpus import KOTLIN_SECTION, neighbor_scripted_provider, seed_corpus
-from fakes import ScriptedEmbeddingProvider
+from fakes import ScriptedEmbeddingProvider, hermetic_settings
 
 ITEM_FIELDS = {
     "document_id",
@@ -223,13 +222,18 @@ async def test_limit_above_max_returns_422_envelope(client):
 
 
 async def test_embedding_provider_from_settings_returns_none_without_key():
-    assert embedding_provider_from_settings(Settings(EMBEDDING_API_KEY=SecretStr(""))) is None
-    assert embedding_provider_from_settings(Settings(EMBEDDING_API_KEY=SecretStr("k"))) is not None
+    assert (
+        embedding_provider_from_settings(hermetic_settings(EMBEDDING_API_KEY=SecretStr(""))) is None
+    )
+    assert (
+        embedding_provider_from_settings(hermetic_settings(EMBEDDING_API_KEY=SecretStr("k")))
+        is not None
+    )
 
 
 async def test_build_search_service_without_key_warns_vector_search_disabled():
     with capture_logs() as logs:
-        build_search_service(Settings(EMBEDDING_API_KEY=SecretStr("")))
+        build_search_service(hermetic_settings(EMBEDDING_API_KEY=SecretStr("")))
 
     degraded = [entry for entry in logs if entry["event"] == "vector_search_disabled"]
     assert len(degraded) == 1
@@ -238,6 +242,6 @@ async def test_build_search_service_without_key_warns_vector_search_disabled():
 
 async def test_build_search_service_with_key_does_not_warn():
     with capture_logs() as logs:
-        build_search_service(Settings(EMBEDDING_API_KEY=SecretStr("test-key")))
+        build_search_service(hermetic_settings(EMBEDDING_API_KEY=SecretStr("test-key")))
 
     assert not [entry for entry in logs if entry["event"] == "vector_search_disabled"]

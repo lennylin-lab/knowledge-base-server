@@ -17,9 +17,8 @@ from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.api.deps import build_summarize_service, get_summarize_service
-from app.core.config import Settings
 from app.services.agents import SummarizeService
-from fakes import scripted_summarize_model
+from fakes import hermetic_settings, scripted_summarize_model
 
 # Stands in for Settings.CHAT_MODEL at wiring time; deps.py passes that
 # setting into the service, and the response must echo it back.
@@ -126,7 +125,7 @@ async def test_unconfigured_summary_returns_503_envelope_before_any_llm_call(app
     # The real constructor, not a stub: the key check must fire here. It
     # raises chat's error on purpose — one no-LLM-fallback gate, one code.
     app.dependency_overrides[get_summarize_service] = lambda: build_summarize_service(
-        Settings(CHAT_API_KEY=SecretStr(""))
+        hermetic_settings(CHAT_API_KEY=SecretStr(""))
     )
     transport = ASGITransport(app=app)
 
@@ -142,6 +141,6 @@ async def test_unconfigured_summary_returns_503_envelope_before_any_llm_call(app
 
 
 async def test_build_summarize_service_with_key_returns_service():
-    service = build_summarize_service(Settings(CHAT_API_KEY=SecretStr("test-key")))
+    service = build_summarize_service(hermetic_settings(CHAT_API_KEY=SecretStr("test-key")))
 
     assert isinstance(service, SummarizeService)

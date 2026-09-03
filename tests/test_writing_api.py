@@ -19,11 +19,10 @@ from httpx import ASGITransport, AsyncClient
 from pydantic import SecretStr
 
 from app.api.deps import build_writing_service, get_writing_service
-from app.core.config import Settings
 from app.rag.retriever import SearchOutcome
 from app.schemas.writing import DRAFT_MAX_CHARS
 from app.services.agents import WritingService
-from fakes import StubRetriever, parse_sse, retrieved_chunk, scripted_chat_model
+from fakes import StubRetriever, hermetic_settings, parse_sse, retrieved_chunk, scripted_chat_model
 
 DRAFT = "# Draft heading\n\nSome draft body about zorblat."
 
@@ -192,7 +191,7 @@ async def test_out_of_range_limit_returns_422_envelope(writing_client, limit):
 
 async def test_unconfigured_writing_returns_503_envelope_before_any_stream(app):
     app.dependency_overrides[get_writing_service] = lambda: build_writing_service(
-        Settings(CHAT_API_KEY=SecretStr(""))
+        hermetic_settings(CHAT_API_KEY=SecretStr(""))
     )
     transport = ASGITransport(app=app)
 
@@ -211,7 +210,7 @@ async def test_invalid_body_on_unconfigured_writing_still_returns_503(app):
     # Pins the documented ordering (see `build_chat_service`): the no-key
     # gate wins over request-schema errors, like any auth-style dependency.
     app.dependency_overrides[get_writing_service] = lambda: build_writing_service(
-        Settings(CHAT_API_KEY=SecretStr(""))
+        hermetic_settings(CHAT_API_KEY=SecretStr(""))
     )
     transport = ASGITransport(app=app)
 
@@ -224,7 +223,7 @@ async def test_invalid_body_on_unconfigured_writing_still_returns_503(app):
 
 
 async def test_build_writing_service_with_key_returns_service():
-    service = build_writing_service(Settings(CHAT_API_KEY=SecretStr("test-key")))
+    service = build_writing_service(hermetic_settings(CHAT_API_KEY=SecretStr("test-key")))
 
     assert isinstance(service, WritingService)
 
@@ -234,9 +233,9 @@ async def test_build_writing_service_mode_tracks_the_embedding_wiring():
     # (the documented deviation from chat's fixed hybrid): hybrid only when an
     # embedding key exists, BM25-only otherwise. `_mode` is read directly —
     # the constructor wires a real model, so the stream cannot run offline.
-    bm25_only = build_writing_service(Settings(CHAT_API_KEY=SecretStr("k")))
+    bm25_only = build_writing_service(hermetic_settings(CHAT_API_KEY=SecretStr("k")))
     hybrid = build_writing_service(
-        Settings(CHAT_API_KEY=SecretStr("k"), EMBEDDING_API_KEY=SecretStr("e"))
+        hermetic_settings(CHAT_API_KEY=SecretStr("k"), EMBEDDING_API_KEY=SecretStr("e"))
     )
 
     assert bm25_only._mode == "bm25"

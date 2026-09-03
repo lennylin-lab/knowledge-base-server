@@ -19,10 +19,9 @@ from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.api.deps import build_association_service, get_association_service
-from app.core.config import Settings
 from app.repositories.document_chunk import DocumentChunkRepository
 from app.services.agents import AssociationService
-from fakes import basis_vector, scripted_association_model
+from fakes import basis_vector, hermetic_settings, scripted_association_model
 
 MODEL_NAME = "test-chat-model"
 MISSING_ID = "00000000-0000-0000-0000-000000000000"
@@ -140,7 +139,7 @@ async def test_unconfigured_associations_returns_503_envelope_before_any_llm_cal
     # The real constructor, not a stub: the key check must fire here. It
     # raises chat's error on purpose — one no-LLM-fallback gate, one code.
     app.dependency_overrides[get_association_service] = lambda: build_association_service(
-        Settings(CHAT_API_KEY=SecretStr(""))
+        hermetic_settings(CHAT_API_KEY=SecretStr(""))
     )
     transport = ASGITransport(app=app)
 
@@ -156,6 +155,6 @@ async def test_unconfigured_associations_returns_503_envelope_before_any_llm_cal
 
 
 async def test_build_association_service_with_key_returns_service():
-    service = build_association_service(Settings(CHAT_API_KEY=SecretStr("test-key")))
+    service = build_association_service(hermetic_settings(CHAT_API_KEY=SecretStr("test-key")))
 
     assert isinstance(service, AssociationService)

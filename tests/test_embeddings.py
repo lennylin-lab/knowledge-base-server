@@ -17,7 +17,7 @@ from app.core.config import Settings
 from app.core.exceptions import LLMProviderError, LLMRateLimitedError
 from app.llm.embeddings import EmbeddingProvider, OpenAIEmbeddingProvider
 from app.llm.models import get_chat_model
-from fakes import FakeEmbeddingProvider
+from fakes import FakeEmbeddingProvider, hermetic_settings
 
 
 def _status_error(exc_type: type[openai.APIStatusError], status: int) -> openai.APIStatusError:
@@ -192,7 +192,7 @@ async def test_provider_rejects_unexpected_vector_dimension():
 
 
 def test_from_settings_wires_client_configuration():
-    settings = Settings(
+    settings = hermetic_settings(
         EMBEDDING_BASE_URL="http://provider.test/v1",
         EMBEDDING_API_KEY="sk-test",
         EMBEDDING_MODEL="embed-x",
@@ -207,7 +207,7 @@ def test_from_settings_wires_client_configuration():
 def test_layers_read_their_own_provider_variables():
     # Pin the config isolation: the embedding leg is built from EMBEDDING_*,
     # the chat leg from CHAT_* — changing one side never touches the other.
-    settings = Settings(
+    settings = hermetic_settings(
         EMBEDDING_BASE_URL="http://embed.test/v1",
         EMBEDDING_API_KEY="embed-key",
         EMBEDDING_MODEL="embed-x",

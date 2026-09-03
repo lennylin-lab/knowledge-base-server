@@ -22,11 +22,10 @@ from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.api.deps import build_chat_service, get_chat_service
-from app.core.config import Settings
 from app.core.database import get_db
 from app.rag.retriever import SearchOutcome
 from app.services.chat import ChatService
-from fakes import StubRetriever, parse_sse, retrieved_chunk, scripted_chat_model
+from fakes import StubRetriever, hermetic_settings, parse_sse, retrieved_chunk, scripted_chat_model
 
 QUESTION = "What do the notes say about zorblat?"
 
@@ -149,7 +148,7 @@ async def test_provider_failure_mid_stream_emits_terminal_error_event(app):
 async def test_unconfigured_chat_returns_503_envelope_before_any_stream(app):
     # The real constructor, not a stub: the key check must fire here.
     app.dependency_overrides[get_chat_service] = lambda: build_chat_service(
-        Settings(CHAT_API_KEY=SecretStr(""))
+        hermetic_settings(CHAT_API_KEY=SecretStr(""))
     )
     transport = ASGITransport(app=app)
 
@@ -170,7 +169,7 @@ async def test_invalid_body_on_unconfigured_chat_still_returns_503(app):
     # contract as any auth-style dependency. The 422 contract holds whenever
     # the service IS constructible (see the stubbed tests below).
     app.dependency_overrides[get_chat_service] = lambda: build_chat_service(
-        Settings(CHAT_API_KEY=SecretStr(""))
+        hermetic_settings(CHAT_API_KEY=SecretStr(""))
     )
     transport = ASGITransport(app=app)
 
@@ -183,7 +182,7 @@ async def test_invalid_body_on_unconfigured_chat_still_returns_503(app):
 
 
 async def test_build_chat_service_with_key_returns_hybrid_service():
-    service = build_chat_service(Settings(CHAT_API_KEY=SecretStr("test-key")))
+    service = build_chat_service(hermetic_settings(CHAT_API_KEY=SecretStr("test-key")))
 
     assert isinstance(service, ChatService)
 
@@ -194,9 +193,9 @@ def test_build_chat_service_mode_tracks_the_embedding_wiring():
     # must report that truthfully (chat previously pinned hybrid).
     # `_mode` is read directly — the constructor wires a real model, so
     # the stream cannot run offline.
-    bm25_only = build_chat_service(Settings(CHAT_API_KEY=SecretStr("k")))
+    bm25_only = build_chat_service(hermetic_settings(CHAT_API_KEY=SecretStr("k")))
     hybrid = build_chat_service(
-        Settings(CHAT_API_KEY=SecretStr("k"), EMBEDDING_API_KEY=SecretStr("e"))
+        hermetic_settings(CHAT_API_KEY=SecretStr("k"), EMBEDDING_API_KEY=SecretStr("e"))
     )
 
     assert bm25_only._mode == "bm25"
