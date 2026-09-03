@@ -16,6 +16,7 @@ from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
+from app.utils.ids import uuid7
 
 
 class MessageRole(StrEnum):
@@ -34,7 +35,7 @@ class ChatSession(Base):
         Index("ix_chat_sessions_updated_at_id", text("updated_at DESC, id DESC")),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid7)
     title: Mapped[str] = mapped_column(Text, nullable=False, default="New chat")
     # Reserved for multi-user: schema is ready, auth is not (project convention).
     owner_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
@@ -59,7 +60,7 @@ class ChatMessage(Base):
         Index("ix_chat_messages_session_created", "session_id", "created_at"),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid7)
     session_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("chat_sessions.id", ondelete="CASCADE"), nullable=False
     )

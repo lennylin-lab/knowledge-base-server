@@ -12,6 +12,7 @@ from sqlalchemy.dialects.postgresql import ARRAY, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
+from app.utils.ids import uuid7
 
 
 class IndexStatus(StrEnum):
@@ -37,7 +38,7 @@ class Document(Base):
         Index("ix_documents_created_at_id", text("created_at DESC, id DESC")),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid7)
     title: Mapped[str] = mapped_column(Text, nullable=False, default="Untitled")
     content: Mapped[str] = mapped_column(Text, nullable=False)
     tags: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False, server_default="{}")
