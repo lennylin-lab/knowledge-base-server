@@ -9,6 +9,7 @@ of them. `arq.worker.run_worker` itself needs Redis and lives under the
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -34,7 +35,7 @@ from app.rag.worker import (
     run_index_job,
 )
 from app.repositories.document import DocumentRepository
-from app.schemas.document import DocumentCreate
+from app.schemas.document import DocumentCreate, DocumentUpdate
 from app.services.document import DocumentService
 from fakes import FakeEmbeddingProvider, RecordingEsStore, StubEsClient, hermetic_settings
 
@@ -75,6 +76,7 @@ async def run_job(
     doc_id: UUID,
     *,
     job_try: int,
+    expected_updated_at: datetime | None = None,
 ) -> None:
     """`run_index_job` against a real (double-backed) pipeline core."""
     await run_index_job(
@@ -82,6 +84,7 @@ async def run_job(
         job_try=job_try,
         max_tries=MAX_TRIES,
         retry_min_delay_s=MIN_DELAY_S,
+        expected_updated_at=expected_updated_at,
         runner=pipeline.process_document_raising,
         session_factory=session_factory,
     )
@@ -244,6 +247,48 @@ async def test_successful_run_marks_document_done(
     assert len(started) == 1 and started[0]["job_try"] == 1
 
 
+@pytest.mark.db
+async def test_retry_after_newer_edit_skips_instead_of_reindexing(
+    session_factory: SessionMaker, fake_embedding_provider: FakeEmbeddingProvider
+) -> None:
+    """The guard rides along on retries: an attempt whose document has since
+    been edited skips (the newer save's job owns it) instead of re-indexing
+    an obsolete version."""
+    async with session_factory() as session:
+        created = await DocumentService(session).create_document(
+            DocumentCreate(content="# A\n\ntext a")
+        )
+    doc_id, enqueued_version = created.id, created.updated_at
+
+    fake_embedding_provider.error = LLMRateLimitedError("slow down")
+    pipeline = make_pipeline(session_factory, fake_embedding_provider)
+    with pytest.raises(Retry):
+        await run_job(
+            pipeline, session_factory, doc_id, job_try=1, expected_updated_at=enqueued_version
+        )
+
+    # The document is edited while the retry waits — the queued version is stale.
+    async with session_factory() as session:
+        await DocumentService(session).update_document(doc_id, DocumentUpdate(title="edited"))
+    fake_embedding_provider.error = None
+    fake_embedding_provider.calls.clear()  # attempt 1 errored mid-embed already
+
+    with capture_logs() as logs:
+        await run_job(
+            pipeline, session_factory, doc_id, job_try=2, expected_updated_at=enqueued_version
+        )
+
+    assert fake_embedding_provider.calls == []  # zero embed work on the retry
+    assert await status_of(session_factory, doc_id) is IndexStatus.PENDING
+    assert events(logs, "index_job_retry") == []  # a skip is not a retry-worthy failure
+    skipped = events(logs, "index_job_skipped_stale")
+    assert len(skipped) == 1
+    assert skipped[0]["document_id"] == str(doc_id)
+    finished = events(logs, "index_job_finished")
+    assert len(finished) == 1
+    assert finished[0]["outcome"] == "skipped"
+
+
 # --- index_document: the thin arq adapter (str payload, ctx job_try) ---
 
 
@@ -262,8 +307,12 @@ async def test_index_document_reads_job_try_from_ctx_and_module_seams(
     session_factory: SessionMaker, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     doc_id = await seed_document(session_factory)
+    seen_versions: list[datetime | None] = []
 
-    async def flaky_runner(doc_id: UUID) -> IndexStatus | None:
+    async def flaky_runner(
+        doc_id: UUID, expected_updated_at: datetime | None
+    ) -> IndexStatus | None:
+        seen_versions.append(expected_updated_at)
         raise LLMProviderError("provider down")
 
     monkeypatch.setattr(worker_module, "run_indexing_raw", flaky_runner)
@@ -284,6 +333,52 @@ async def test_index_document_reads_job_try_from_ctx_and_module_seams(
     # ctx job_try at the budget's end -> settle without raising.
     await index_document({"job_try": MAX_TRIES}, str(doc_id))
     assert await status_of(session_factory, doc_id) is IndexStatus.FAILED
+
+    # Legacy payloads (no timestamp) degrade to a guard-free run.
+    assert seen_versions == [None, None]
+
+
+@pytest.mark.db
+@pytest.mark.parametrize(
+    "bad_stamp",
+    [
+        "not-a-timestamp",  # unparseable string
+        "2026-09-04T12:00:00",  # timezone-naive ISO: could never match PG's aware value
+        123,  # non-string (JSON payloads can carry any type)
+    ],
+)
+async def test_unusable_timestamp_payload_degrades_to_no_guard(
+    session_factory: SessionMaker, monkeypatch: pytest.MonkeyPatch, bad_stamp: object
+) -> None:
+    """A timestamp that cannot act as a version disables the guard — the job
+    still runs (never crashes on a bad payload). Naive stamps in particular
+    must NOT silently skip every job: PG emits tz-aware values, so a naive
+    one can never match and degrading is the honest reading."""
+    doc_id = await seed_document(session_factory)
+    pipeline = make_pipeline(session_factory, FakeEmbeddingProvider())
+    monkeypatch.setattr(worker_module, "run_indexing_raw", pipeline.process_document_raising)
+    monkeypatch.setattr(worker_module, "SessionFactory", session_factory)
+    monkeypatch.setattr(
+        worker_module,
+        "get_settings",
+        lambda: hermetic_settings(
+            INDEX_JOB_MAX_TRIES=MAX_TRIES, INDEX_JOB_RETRY_MIN_DELAY_S=MIN_DELAY_S
+        ),
+    )
+
+    # The non-string case deliberately violates the typed signature: JSON
+    # payloads are untyped at runtime and the worker must survive that.
+    with capture_logs() as logs:
+        await index_document({"job_try": 1}, str(doc_id), bad_stamp)
+
+    assert await status_of(session_factory, doc_id) is IndexStatus.DONE
+    degraded = events(logs, "index_job_invalid_expected_updated_at")
+    assert len(degraded) == 1
+    assert degraded[0]["log_level"] == "warning"
+    assert degraded[0]["document_id"] == str(doc_id)
+    finished = events(logs, "index_job_finished")
+    assert len(finished) == 1
+    assert finished[0]["outcome"] == "done"
 
 
 def test_index_document_task_name_is_stable() -> None:

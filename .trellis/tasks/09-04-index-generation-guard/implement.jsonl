@@ -1,0 +1,5 @@
+{"file": ".trellis/spec/backend/directory-structure.md", "type": "file", "reason": "enqueuer callable pattern (deps.py sole adapter site), rag/ layering, agent-run/deps state conventions n/a"}
+{"file": ".trellis/spec/backend/error-handling.md", "type": "file", "reason": "background entries never raise to users; ARQ Retry boundary; poison-guard precedent"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "type": "file", "reason": "index_job_* event vocabulary — the new index_job_skipped_stale follows it (info level, document_id, no content)"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "type": "file", "reason": "offline-first fakes for pipeline doubles, live_redis marker, review checklist"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "type": "file", "reason": "server-generated updated_at semantics (onupdate), tz-aware comparison, no schema change expected"}

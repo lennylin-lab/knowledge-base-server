@@ -164,6 +164,9 @@ propagate into the streaming task.
 Background pipeline (indexing/embedding) never raises to users: failures are
 caught at the job boundary, logged with full context, and the document's
 `index_status` flips to `failed` — user-facing APIs expose that status.
+Job-level no-ops are not errors either: a stale generation (newer save
+already indexed or pending) or a missing document returns `None`/skips
+with an info log, never raises, and never touches `index_status`.
 
 Canonical service pattern:
 

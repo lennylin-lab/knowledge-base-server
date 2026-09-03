@@ -122,11 +122,12 @@ Key points:
   client per run and closes it — never a client per request.
 - **Framework callbacks are injected as plain callables.** Services stay
   framework-free by depending on a callable type they own (e.g.
-  `ReindexEnqueuer = Callable[[UUID], None]` in `services/document.py`);
-  the FastAPI adapter bridging it to `BackgroundTasks` lives in
-  `api/deps.py` — the **only** module allowed to import `BackgroundTasks`.
-  Reference implementation: document create/update → `deps.py` enqueuer →
-  `rag/indexer.run_indexing`.
+  `ReindexEnqueuer = Callable[[UUID, datetime], None]` in
+  `services/document.py` — id + the commit-time `updated_at` version
+  stamp for the indexing generation guard); the FastAPI adapter bridging
+  it to `BackgroundTasks` lives in `api/deps.py` — the **only** module
+  allowed to import `BackgroundTasks`. Reference implementation:
+  document create/update → `deps.py` enqueuer → `rag/indexer.run_indexing`.
 - **Prompt templates** (`agents/prompts/`) are versioned assets — changing a
   prompt is a reviewable code change, not a runtime config tweak.
 - **SSE endpoints streaming the chat event vocabulary** (writing, later

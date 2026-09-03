@@ -7,6 +7,7 @@ end-to-end API test below (db + es).
 
 from __future__ import annotations
 
+from datetime import datetime
 from uuid import UUID, uuid4
 
 import pytest
@@ -31,6 +32,29 @@ pytestmark = pytest.mark.db
 # Sections >= target (800) so each becomes its own chunk deterministically.
 TWO_SECTIONS = f"# One\n\n{'a' * 900}\n\n# Two\n\n{'b' * 900}"
 ONE_SECTION = f"# Only\n\n{'c' * 900}"
+THREE_SECTION = f"# Third\n\n{'d' * 900}"
+
+
+# (doc_id, version) pairs as the real service enqueuer emits them.
+type EnqueuedJob = tuple[UUID, datetime]
+
+
+async def seed_enqueued(
+    session_factory: async_sessionmaker[AsyncSession],
+    captured: list[EnqueuedJob],
+    *updates: str,
+) -> UUID:
+    """Create (+ optional content updates) through the REAL service enqueue
+    path, capturing the (doc_id, updated_at) pairs exactly as the enqueuer
+    receives them — a burst of saves, drained in order by the caller."""
+    async with session_factory() as session:
+        service = DocumentService(
+            session, enqueuer=lambda doc_id, updated_at: captured.append((doc_id, updated_at))
+        )
+        created = await service.create_document(DocumentCreate(content=TWO_SECTIONS))
+        for content in updates:
+            await service.update_document(created.id, DocumentUpdate(content=content))
+        return created.id
 
 
 def make_pipeline(
@@ -209,6 +233,70 @@ async def test_soft_deleted_document_is_skipped(session_factory, fake_embedding_
         assert document.index_status is IndexStatus.PENDING  # untouched
 
 
+# --- generation guard: stale jobs skip, matching jobs run ---
+
+
+async def test_stale_version_skips_before_any_work_and_leaves_status_pending(
+    session_factory, fake_embedding_provider
+):
+    es_store = RecordingEsStore()
+    pipeline = make_pipeline(session_factory, fake_embedding_provider, es_store)
+    captured: list[EnqueuedJob] = []
+    doc_id = await seed_enqueued(session_factory, captured, ONE_SECTION)
+    stale_doc_id, stale_version = captured[0]  # the create-time job
+
+    with capture_logs() as logs:
+        result = await pipeline.process_document(stale_doc_id, stale_version)
+
+    assert result is None
+    # Zero work: no chunking cost (embedding), no store writes at all.
+    assert fake_embedding_provider.calls == []
+    assert es_store.ensure_calls == []
+    assert es_store.replace_calls == []
+    assert await chunk_rows(session_factory, doc_id) == []
+    # Untouched: the newer save's job owns the document (pending for it).
+    assert await index_status_of(session_factory, doc_id) is IndexStatus.PENDING
+
+    skipped = [entry for entry in logs if entry["event"] == "index_job_skipped_stale"]
+    assert len(skipped) == 1
+    assert skipped[0]["log_level"] == "info"
+    assert skipped[0]["document_id"] == str(doc_id)
+
+
+async def test_matching_version_runs_the_full_pipeline(session_factory, fake_embedding_provider):
+    es_store = RecordingEsStore()
+    pipeline = make_pipeline(session_factory, fake_embedding_provider, es_store)
+    captured: list[EnqueuedJob] = []
+    doc_id = await seed_enqueued(session_factory, captured)
+
+    result = await pipeline.process_document(*captured[0])  # version still current
+
+    assert result is IndexStatus.DONE
+    assert await index_status_of(session_factory, doc_id) is IndexStatus.DONE
+    assert len(fake_embedding_provider.calls) == 1
+    assert len(es_store.replace_calls) == 1
+
+
+async def test_burst_of_saves_indexes_only_the_latest_versions_job(
+    session_factory, fake_embedding_provider
+):
+    es_store = RecordingEsStore()
+    pipeline = make_pipeline(session_factory, fake_embedding_provider, es_store)
+    captured: list[EnqueuedJob] = []
+    doc_id = await seed_enqueued(session_factory, captured, ONE_SECTION, THREE_SECTION)
+    assert len(captured) == 3  # one job per save: create + two updates
+
+    # Queue drain, in order: superseded jobs must skip themselves.
+    outcomes = [await pipeline.process_document(*enqueued) for enqueued in captured]
+    assert outcomes == [None, None, IndexStatus.DONE]  # only the newest job works
+
+    assert len(fake_embedding_provider.calls) == 1  # one embed pass, not three
+    assert len(es_store.replace_calls) == 1
+    chunks = await chunk_rows(session_factory, doc_id)
+    assert [chunk.content for chunk in chunks] == [THREE_SECTION]
+    assert await index_status_of(session_factory, doc_id) is IndexStatus.DONE
+
+
 # --- end-to-end: API write -> BackgroundTasks -> pipeline (real ES) ---
 
 
@@ -235,8 +323,8 @@ async def indexing_client(
         es_index=es_index_name,
     )
 
-    async def run(doc_id: UUID) -> None:
-        await pipeline.process_document(doc_id)
+    async def run(doc_id: UUID, expected_updated_at: datetime | None) -> None:
+        await pipeline.process_document(doc_id, expected_updated_at)
 
     monkeypatch.setattr("app.api.deps.run_indexing", run)
     transport = ASGITransport(app=app)

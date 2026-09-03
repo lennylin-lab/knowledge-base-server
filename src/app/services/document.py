@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import datetime
 from uuid import UUID
 
 import frontmatter
@@ -25,8 +26,11 @@ from app.utils.cursor import decode_id_cursor, encode_id_cursor
 logger = structlog.get_logger(__name__)
 
 # The service stays framework-free: how indexing gets scheduled (FastAPI
-# BackgroundTasks, a queue, ...) is the injecting caller's concern.
-ReindexEnqueuer = Callable[[UUID], None]
+# BackgroundTasks, a queue, ...) is the injecting caller's concern. The
+# enqueued `updated_at` is the document version observed at commit time —
+# the indexing pipeline's generation guard uses it to skip jobs that a
+# newer save has already superseded (see `rag/indexer.py`).
+ReindexEnqueuer = Callable[[UUID, datetime], None]
 
 
 def _parse_front_matter(content: str, request_title: str | None) -> tuple[str, list[str]]:
@@ -69,10 +73,15 @@ class DocumentService:
         self._repo = DocumentRepository(session)
         self._enqueuer = enqueuer
 
-    def _enqueue_indexing(self, doc_id: UUID) -> None:
-        """Schedule re-indexing; `None` enqueuer (default) is a no-op."""
+    def _enqueue_indexing(self, doc_id: UUID, updated_at: datetime) -> None:
+        """Schedule re-indexing; `None` enqueuer (default) is a no-op.
+
+        `updated_at` is the version stamp of the just-committed write (loaded
+        back from the server by the repository's post-flush refresh) — the
+        pipeline's stale-job guard compares against it.
+        """
         if self._enqueuer is not None:
-            self._enqueuer(doc_id)
+            self._enqueuer(doc_id, updated_at)
 
     async def create_document(self, payload: DocumentCreate) -> DocumentRead:
         """Persist a new document derived from its front matter."""
@@ -82,7 +91,7 @@ class DocumentService:
         await self._session.commit()
         logger.info("document_created", document_id=str(document.id), title=document.title)
         # After commit only — a rolled-back write must never be indexed.
-        self._enqueue_indexing(document.id)
+        self._enqueue_indexing(document.id, document.updated_at)
         return DocumentRead.model_validate(document)
 
     async def get_document(self, doc_id: UUID) -> DocumentReadDetail:
@@ -136,7 +145,7 @@ class DocumentService:
             document_id=str(document.id),
             title=document.title,
         )
-        self._enqueue_indexing(document.id)
+        self._enqueue_indexing(document.id, document.updated_at)
         return DocumentRead.model_validate(document)
 
     async def delete_document(self, doc_id: UUID) -> None:

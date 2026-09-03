@@ -92,6 +92,8 @@ async def run_reindex(
 
         counts = {"processed": 0, "done": 0, "failed": 0, "skipped": 0}
         for doc_id in document_ids:
+            # No generation guard here: the sweep reads current state by
+            # definition, so there is no enqueue-time version to match.
             outcome = await pipeline.process_document(doc_id)
             counts["processed"] += 1
             if outcome is None:

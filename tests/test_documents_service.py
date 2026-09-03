@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.exceptions import NotFoundError, ValidationError
 from app.models.document import Document, IndexStatus
 from app.schemas.document import DocumentCreate, DocumentUpdate
-from app.services.document import DocumentService
+from app.services.document import DocumentService, ReindexEnqueuer
 
 pytestmark = pytest.mark.db
 
@@ -225,29 +225,37 @@ async def test_delete_missing_document_raises_not_found(db_session):
 # --- indexing enqueue wiring (services stay framework-free) ---
 
 
-async def test_create_enqueues_indexing_once_after_commit(db_session):
-    captured: list[UUID] = []
-    service = DocumentService(db_session, enqueuer=captured.append)
+def capture_enqueues(captured: list[tuple[UUID, datetime]]) -> ReindexEnqueuer:
+    """An enqueuer recording (doc_id, version) pairs — the ReindexEnqueuer shape."""
+    return lambda doc_id, updated_at: captured.append((doc_id, updated_at))
+
+
+async def test_create_enqueues_id_and_version_once_after_commit(db_session):
+    captured: list[tuple[UUID, datetime]] = []
+    service = DocumentService(db_session, enqueuer=capture_enqueues(captured))
 
     created = await service.create_document(DocumentCreate(content="body"))
 
-    assert captured == [created.id]
+    # The version stamp is the committed write's updated_at (the value the
+    # pipeline's generation guard compares against).
+    assert captured == [(created.id, created.updated_at)]
 
 
-async def test_update_enqueues_indexing_once_after_commit(db_session):
-    captured: list[UUID] = []
-    service = DocumentService(db_session, enqueuer=captured.append)
+async def test_update_enqueues_id_and_version_once_after_commit(db_session):
+    captured: list[tuple[UUID, datetime]] = []
+    service = DocumentService(db_session, enqueuer=capture_enqueues(captured))
     created = await service.create_document(DocumentCreate(content="body"))
     captured.clear()
 
-    await service.update_document(created.id, DocumentUpdate(title="touch"))
+    updated = await service.update_document(created.id, DocumentUpdate(title="touch"))
 
-    assert captured == [created.id]
+    assert captured == [(created.id, updated.updated_at)]
+    assert captured[0][1] != created.updated_at  # a new write bumps the version
 
 
 async def test_failed_write_does_not_enqueue(db_session):
-    captured: list[UUID] = []
-    service = DocumentService(db_session, enqueuer=captured.append)
+    captured: list[tuple[UUID, datetime]] = []
+    service = DocumentService(db_session, enqueuer=capture_enqueues(captured))
 
     with pytest.raises(ValidationError):
         await service.create_document(DocumentCreate(content="---\ntags: notalist\n---\n"))
@@ -267,8 +275,8 @@ async def test_omitted_enqueuer_is_a_noop(db_session):
 
 
 async def test_delete_does_not_enqueue(db_session):
-    captured: list[UUID] = []
-    service = DocumentService(db_session, enqueuer=captured.append)
+    captured: list[tuple[UUID, datetime]] = []
+    service = DocumentService(db_session, enqueuer=capture_enqueues(captured))
     created = await service.create_document(DocumentCreate(content="body"))
     captured.clear()
 

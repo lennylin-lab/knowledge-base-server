@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
@@ -27,6 +28,9 @@ from app.repositories.document import DocumentRepository
 from fakes import hermetic_settings
 
 REDIS_URL = "redis://localhost:6379/0"
+
+# A stand-in for the commit-time version stamp the service hands over.
+ENQUEUED_AT = datetime(2026, 9, 4, 12, 0, 0, tzinfo=UTC)
 
 
 class StubArqPool:
@@ -78,13 +82,14 @@ def test_empty_redis_url_keeps_the_background_tasks_path(monkeypatch: pytest.Mon
     enqueuer = deps.make_index_enqueuer(background_tasks)
 
     doc_id = UUID(int=42)
-    enqueuer(doc_id)
+    enqueuer(doc_id, ENQUEUED_AT)
     # Exactly today's scheduling semantics: one background task invoking
-    # run_indexing with the doc id.
+    # run_indexing with the doc id — plus the version stamp the pipeline's
+    # generation guard compares against.
     assert len(background_tasks.tasks) == 1
     task = background_tasks.tasks[0]
     assert task.func is deps.run_indexing
-    assert task.args == (doc_id,)
+    assert task.args == (doc_id, ENQUEUED_AT)
     assert task.kwargs == {}
     assert deps._shared_arq_pool is None
 
@@ -100,10 +105,11 @@ async def test_configured_redis_url_enqueues_on_the_shared_pool(
     doc_id = UUID(int=7)
 
     with capture_logs() as logs:
-        enqueuer(doc_id)
+        enqueuer(doc_id, ENQUEUED_AT)
         await drain_enqueues()
 
-    assert stub.jobs == [("index_document", (str(doc_id),))]
+    # The payload carries the version stamp as an ISO string (JSON-safe).
+    assert stub.jobs == [("index_document", (str(doc_id), ENQUEUED_AT.isoformat()))]
     enqueued = [entry for entry in logs if entry["event"] == "index_enqueued"]
     assert len(enqueued) == 1
     assert enqueued[0]["document_id"] == str(doc_id)
@@ -125,7 +131,7 @@ async def test_pool_is_built_lazily_and_shared_across_enqueuers(
     for _ in range(2):
         # Fresh enqueuer per request (get_document_service is per-request)...
         enqueuer = deps.make_index_enqueuer(BackgroundTasks())
-        enqueuer(UUID(int=1))
+        enqueuer(UUID(int=1), ENQUEUED_AT)
         await drain_enqueues()
 
     assert len(created) == 1  # ...but only ONE pool per process
@@ -141,7 +147,7 @@ async def test_enqueue_failure_degrades_to_a_warning(
     enqueuer = deps.make_index_enqueuer(BackgroundTasks())
 
     with capture_logs() as logs:
-        enqueuer(UUID(int=9))  # must not raise
+        enqueuer(UUID(int=9), ENQUEUED_AT)  # must not raise
         await drain_enqueues()
 
     failures = [entry for entry in logs if entry["event"] == "index_enqueue_failed"]
@@ -207,14 +213,22 @@ async def test_document_create_and_update_enqueue_arq_jobs(
         await drain_enqueues()
 
     assert [job[0] for job in stub.jobs] == ["index_document", "index_document"]
-    assert stub.jobs[0][1] == (doc_id,)  # str(doc_id) crosses the queue as JSON
-    assert stub.jobs[1][1] == (doc_id,)
+    # str(doc_id) crosses the queue as JSON, with the version stamp (ISO)
+    # alongside — the generation guard's payload.
+    assert stub.jobs[0][1][0] == doc_id
+    assert stub.jobs[1][1][0] == doc_id
+    create_version = datetime.fromisoformat(stub.jobs[0][1][1])
+    update_version = datetime.fromisoformat(stub.jobs[1][1][1])
 
     # The queue owns indexing now: the document itself stays pending.
     async with factory() as session:
         document = await DocumentRepository(session).get_by_id(UUID(doc_id))
         assert document is not None
         assert document.index_status is IndexStatus.PENDING
+        # The update job carries the document's CURRENT version; the create
+        # job carries the older one it observed at its own commit.
+        assert update_version == document.updated_at
+        assert create_version < update_version
     app.dependency_overrides.clear()
 
 

@@ -10,6 +10,8 @@ itself:
 - transient failure, final attempt  -> settle `index_status=failed`, complete
 - permanent failure                 -> settle `failed` immediately, no retry burn
 - missing/soft-deleted document     -> clean skip (`None` from the pipeline)
+- superseded document version       -> clean skip (the pipeline's generation
+  guard; the newer save's own job owns the document)
 
 The worker process never imports the FastAPI app factory; each job builds
 and closes its own pipeline clients (the `run_indexing` pattern).
@@ -19,6 +21,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Awaitable, Callable, Sequence
+from datetime import datetime
 from typing import Any, ClassVar
 from uuid import UUID
 
@@ -45,8 +48,9 @@ logger = structlog.get_logger(__name__)
 # in `WorkerSettings` uses the same constant, so the two ends cannot drift.
 INDEX_DOCUMENT_TASK = "index_document"
 
-# The raising pipeline core (`None` = missing-document skip).
-type IndexRunner = Callable[[UUID], Awaitable[IndexStatus | None]]
+# The raising pipeline core (`None` = missing-document / stale-version skip).
+# The datetime is the generation-guard version stamp (None disables it).
+type IndexRunner = Callable[[UUID, datetime | None], Awaitable[IndexStatus | None]]
 
 
 def is_transient_index_error(exc: BaseException) -> bool:
@@ -64,8 +68,17 @@ def is_transient_index_error(exc: BaseException) -> bool:
     return isinstance(exc, LLMProviderError) and not is_permanent_provider_error(exc)
 
 
-async def index_document(ctx: dict[str, Any], doc_id: str) -> None:
-    """ARQ task: index one document (`doc_id` is a str — JSON-safe payload)."""
+async def index_document(
+    ctx: dict[str, Any], doc_id: str, expected_updated_at: str | None = None
+) -> None:
+    """ARQ task: index one document (`doc_id` is a str — JSON-safe payload).
+
+    `expected_updated_at` (ISO string, JSON-safe) is the document version
+    observed at enqueue time; the pipeline's generation guard uses it to
+    skip jobs superseded by a newer save. An absent (legacy payload) or
+    unparseable value degrades to no guard — the job then runs exactly
+    like a CLI sweep instead of crashing.
+    """
     try:
         parsed_id = UUID(doc_id)
     except ValueError:
@@ -81,9 +94,36 @@ async def index_document(ctx: dict[str, Any], doc_id: str) -> None:
         job_try=int(ctx.get("job_try", 1)),
         max_tries=settings.INDEX_JOB_MAX_TRIES,
         retry_min_delay_s=settings.INDEX_JOB_RETRY_MIN_DELAY_S,
+        expected_updated_at=_coerce_expected_updated_at(doc_id, expected_updated_at),
         runner=run_indexing_raw,
         session_factory=SessionFactory,
     )
+
+
+def _coerce_expected_updated_at(doc_id: str, raw: object) -> datetime | None:
+    """Payload timestamp -> datetime; anything unusable degrades to `None`.
+
+    `None` disables the generation guard, so a legacy payload (enqueued
+    before the field existed), a malformed value, a non-string (JSON can
+    carry any type), or a timezone-naive stamp simply runs guard-free —
+    never a crash. The naive case matters: PG emits tz-aware `updated_at`
+    values, so a naive stamp could never match and would silently skip
+    EVERY job; degrading is the honest reading of such a payload.
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        logger.warning("index_job_invalid_expected_updated_at", document_id=doc_id)
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        logger.warning("index_job_invalid_expected_updated_at", document_id=doc_id)
+        return None
+    if parsed.tzinfo is None:
+        logger.warning("index_job_invalid_expected_updated_at", document_id=doc_id)
+        return None
+    return parsed
 
 
 async def run_index_job(
@@ -94,18 +134,22 @@ async def run_index_job(
     retry_min_delay_s: int,
     runner: IndexRunner,
     session_factory: async_sessionmaker[AsyncSession],
+    expected_updated_at: datetime | None = None,
 ) -> None:
     """Retry-deciding core of the task (`index_document` is the thin adapter).
 
     arq only ever runs a job with `job_try <= max_tries` — beyond that the
     pickup itself fails the job — so the final in-function attempt must
-    settle the document here rather than raise one more `Retry`.
+    settle the document here rather than raise one more `Retry`. The
+    version stamp rides along on every attempt, so a retry whose document
+    has since been edited skips (the newer save's job owns it) instead of
+    re-indexing an obsolete version.
     """
     started = time.perf_counter()
     log = logger.bind(document_id=str(doc_id), job_try=job_try)
     log.info("index_job_started")
     try:
-        outcome = await runner(doc_id)
+        outcome = await runner(doc_id, expected_updated_at)
     except Exception as exc:
         error_class = type(exc).__name__
         if is_transient_index_error(exc) and job_try < max_tries:

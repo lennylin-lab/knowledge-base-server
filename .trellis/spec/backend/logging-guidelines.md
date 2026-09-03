@@ -125,6 +125,10 @@ logger.exception("embedding_failed", document_id=str(doc_id))  # inside except
   `index_job_finished` (job_try, outcome, latency_ms),
   `index_job_poison` (invalid payload), `index_worker_started/stopped`.
   Retry backoff is `INDEX_JOB_RETRY_MIN_DELAY_S * 2**(job_try-1)`.
+  Generation guard: `index_job_skipped_stale` (info — a newer save
+  superseded this job, no work done) and
+  `index_job_invalid_expected_updated_at` (warning — unusable version
+  stamp, guard degraded off; real work beats silent always-skip).
 - **Token usage** is a metric, not a log line — but the per-call events above
   make aggregation possible.
 

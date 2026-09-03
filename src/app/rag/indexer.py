@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Sequence
+from datetime import datetime
 from typing import Protocol
 from uuid import UUID
 
@@ -72,19 +73,29 @@ class IndexingPipeline:
         self._ensure_index = ensure_index
         self._replace_chunks = replace_chunks
 
-    async def process_document(self, doc_id: UUID) -> IndexStatus | None:
-        """Index one document; `None` means it no longer exists (skip).
+    async def process_document(
+        self, doc_id: UUID, expected_updated_at: datetime | None = None
+    ) -> IndexStatus | None:
+        """Index one document; `None` means nothing was indexed (missing,
+        soft-deleted, or a stale version skipped by the generation guard).
+
+        `expected_updated_at` is the generation guard: the document version
+        observed when the job was enqueued. A mismatch (the document was
+        saved again since) skips the job without any work — see
+        `process_document_raising`.
 
         Every stage error flips the status to `failed` and is swallowed —
         this runs as a background task and must not propagate.
         """
         try:
-            return await self.process_document_raising(doc_id)
+            return await self.process_document_raising(doc_id, expected_updated_at)
         except Exception as exc:
             await self._mark_failed(doc_id, exc)
             return IndexStatus.FAILED
 
-    async def process_document_raising(self, doc_id: UUID) -> IndexStatus | None:
+    async def process_document_raising(
+        self, doc_id: UUID, expected_updated_at: datetime | None = None
+    ) -> IndexStatus | None:
         """The raising core of `process_document` (queue-mode entry).
 
         Stage errors PROPAGATE — typed provider/search errors, connection
@@ -99,6 +110,18 @@ class IndexingPipeline:
             if document is None:
                 # Background race after a delete: nothing to index.
                 log.info("document_index_skipped", reason="missing")
+                return None
+            if expected_updated_at is not None and document.updated_at != expected_updated_at:
+                # Generation guard. A rapid-save burst enqueues one job per
+                # save, but only the job matching the newest version has
+                # value. Both timestamps are tz-aware server-generated
+                # values (PG now()/onupdate — the enqueue-side one was read
+                # back from the server at commit time), so plain datetime
+                # equality IS the version comparison. Skip without touching
+                # index_status: the newer save's job owns the document now,
+                # and if that job was lost, the reset-to-pending status plus
+                # the CLI sweep is the safety net.
+                log.info("index_job_skipped_stale")
                 return None
             chunks = chunk_markdown(document.content)
             vectors = await self._embedding_provider.embed_texts(chunks)
@@ -165,11 +188,15 @@ def build_default_pipeline() -> IndexingPipeline:
     )
 
 
-async def run_indexing(doc_id: UUID) -> None:
-    """BackgroundTasks entry point after document create/update."""
+async def run_indexing(doc_id: UUID, expected_updated_at: datetime | None = None) -> None:
+    """BackgroundTasks entry point after document create/update.
+
+    `expected_updated_at` carries the document version observed at commit
+    time, enabling the pipeline's stale-job guard.
+    """
     pipeline = build_default_pipeline()
     try:
-        await pipeline.process_document(doc_id)
+        await pipeline.process_document(doc_id, expected_updated_at)
     except Exception:
         # process_document already swallows stage errors; this guards only
         # its own failure paths so the background task can never crash.
@@ -178,17 +205,22 @@ async def run_indexing(doc_id: UUID) -> None:
         await _aclose_quietly(pipeline, doc_id)
 
 
-async def run_indexing_raw(doc_id: UUID) -> IndexStatus | None:
+async def run_indexing_raw(
+    doc_id: UUID, expected_updated_at: datetime | None = None
+) -> IndexStatus | None:
     """Queue-mode entry point (raising): the pipeline core for the ARQ worker.
 
     Like `run_indexing`, one pipeline is built and closed per run; unlike it,
     stage errors propagate (typed provider/search/connection classes) so the
     worker can retry them — settling `failed` is the worker's decision, not
-    the pipeline's. `None` is the missing-document skip outcome.
+    the pipeline's. `None` is the missing-document / stale-version skip
+    outcome. `expected_updated_at` threads the generation guard through so
+    a retry whose document has since been edited skips instead of re-indexing
+    an obsolete version.
     """
     pipeline = build_default_pipeline()
     try:
-        return await pipeline.process_document_raising(doc_id)
+        return await pipeline.process_document_raising(doc_id, expected_updated_at)
     finally:
         await _aclose_quietly(pipeline, doc_id)
 

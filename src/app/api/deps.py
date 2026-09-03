@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 from functools import lru_cache
 from typing import Annotated, ClassVar
 from uuid import UUID
@@ -53,10 +54,14 @@ def make_index_enqueuer(background_tasks: BackgroundTasks) -> ReindexEnqueuer:
     Empty `REDIS_URL` (the default) keeps today's in-process BackgroundTasks
     path exactly — no Redis client is ever constructed. A configured URL
     routes enqueueing to the shared ARQ pool instead; BackgroundTasks then
-    carries nothing (it stays solely the fallback's transport).
+    carries nothing (it stays solely the fallback's transport). Both paths
+    carry the document's `updated_at` version stamp so the pipeline's
+    generation guard can skip superseded jobs.
     """
     if not get_settings().REDIS_URL:
-        return lambda doc_id: background_tasks.add_task(run_indexing, doc_id)
+        return lambda doc_id, updated_at: background_tasks.add_task(
+            run_indexing, doc_id, updated_at
+        )
     return _ArqEnqueuer()
 
 
@@ -98,15 +103,17 @@ class _ArqEnqueuer:
     # mid-flight; done-callbacks keep the set bounded.
     _inflight: ClassVar[set[asyncio.Task[None]]] = set()
 
-    def __call__(self, doc_id: UUID) -> None:
-        task = asyncio.create_task(self._enqueue(doc_id))
+    def __call__(self, doc_id: UUID, updated_at: datetime) -> None:
+        task = asyncio.create_task(self._enqueue(doc_id, updated_at))
         self._inflight.add(task)
         task.add_done_callback(self._inflight.discard)
 
-    async def _enqueue(self, doc_id: UUID) -> None:
+    async def _enqueue(self, doc_id: UUID, updated_at: datetime) -> None:
         try:
             pool = await _get_shared_arq_pool()
-            await pool.enqueue_job(INDEX_DOCUMENT_TASK, str(doc_id))
+            # The ISO version stamp rides in the payload (JSON-safe); the
+            # worker degrades unparseable/absent values to no guard.
+            await pool.enqueue_job(INDEX_DOCUMENT_TASK, str(doc_id), updated_at.isoformat())
             logger.info("index_enqueued", document_id=str(doc_id), mode="arq")
         except Exception as exc:
             logger.warning(
