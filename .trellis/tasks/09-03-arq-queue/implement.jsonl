@@ -1,0 +1,5 @@
+{"file": ".trellis/spec/backend/directory-structure.md", "type": "file", "reason": "enqueuer adapter seam precedent (deps.py is the sole composition bridge), rag/ allowed imports, infra-import convention (arq in rag/worker.py like provider SDKs in llm/)"}
+{"file": ".trellis/spec/backend/error-handling.md", "type": "file", "reason": "background-job boundary rules (never raise to users; enqueue degradation mirrors search degradation), AppError transient classes, gate-dependency ordering n/a here"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "type": "file", "reason": "index_job_* / index_enqueue_* event naming, error_class only never content, snake_case"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "type": "file", "reason": "offline-first testing (fakes for redis pool/ctx, live_redis marker mirroring live_mcp), .env.example completeness for new Settings, dependency-floor rule for arq, review checklist"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "type": "file", "reason": "no schema changes expected; session_factory pattern reuse in worker; confirm zero migration drift"}

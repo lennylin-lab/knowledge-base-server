@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "alembic>=1.13",
+    "arq>=0.28.0",
     "asyncpg>=0.29",
     "elasticsearch[async]>=8.14,<9",
     "fastapi>=0.115",
@@ -64,10 +65,11 @@ ignore_missing_imports = true
 testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
-addopts = "-m 'not live_llm and not live_mcp'"
+addopts = "-m 'not live_llm and not live_mcp and not live_redis'"
 markers = [
     "live_llm: tests that call a real LLM provider (excluded from the default run)",
     "live_mcp: tests that connect to real MCP servers from mcp.json (excluded from the default run)",
+    "live_redis: tests that connect to a real Redis for the ARQ queue round trip (excluded from the default run)",
     "db: tests that need the disposable PostgreSQL test database (auto-skip when PG is unreachable)",
     "es: tests that need the local Elasticsearch node (auto-skip when ES is unreachable)",
 ]

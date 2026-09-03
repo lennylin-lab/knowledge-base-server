@@ -11,6 +11,9 @@ Three fixture worlds live here:
 - `es`-marked tests — use `es_client` / `es_index_name`, backed by a unique
   disposable index per test on the configured Elasticsearch node, with the
   same probe-skip contract as `db`.
+- `live_redis`-marked tests — connect to a real Redis for the ARQ queue round
+  trip; deselected by default AND probe-skipped when Redis is unreachable,
+  so the default suite opens zero Redis connections.
 """
 
 from __future__ import annotations
@@ -27,6 +30,7 @@ import pytest
 from elasticsearch import AsyncElasticsearch
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from redis.asyncio import Redis
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import (
@@ -56,6 +60,7 @@ TEST_DATABASE_URL = os.environ.get(
     "KB_TEST_DATABASE_URL", "postgresql+asyncpg://kb:kb@localhost:5432/kb_test"
 )
 TEST_ELASTICSEARCH_URL = os.environ.get("KB_TEST_ELASTICSEARCH_URL", "http://localhost:9200")
+TEST_REDIS_URL = os.environ.get("KB_TEST_REDIS_URL", "redis://localhost:6379")
 
 
 def _as_asyncpg_dsn(sqlalchemy_url: str, *, database: str | None = None) -> str:
@@ -121,6 +126,35 @@ def pytest_runtest_setup(item: pytest.Item) -> None:
         pytest.skip("PG not reachable")
     if item.get_closest_marker("es") is not None and not _es_reachable():
         pytest.skip("Elasticsearch not reachable")
+    # Probe runs only for live_redis-marked items (default run deselects them),
+    # so the offline suite never opens a Redis connection.
+    if item.get_closest_marker("live_redis") is not None and not _redis_reachable():
+        pytest.skip("Redis not reachable")
+
+
+async def _redis_probe() -> None:
+    client = Redis.from_url(TEST_REDIS_URL, socket_connect_timeout=1.0)
+    try:
+        await client.ping()
+    finally:
+        await client.aclose()
+
+
+def _redis_reachable() -> bool:
+    """1s reachability probe against the Redis node; memoized per session."""
+    global _redis_reachable_flag
+    if _redis_reachable_flag is None:
+        try:
+            asyncio.run(_redis_probe())
+            _redis_reachable_flag = True
+        except Exception:
+            # Any failure class (connection refused, timeout, auth, ...) means
+            # unreachable for probe purposes.
+            _redis_reachable_flag = False
+    return _redis_reachable_flag
+
+
+_redis_reachable_flag: bool | None = None
 
 
 async def _create_test_database() -> None:

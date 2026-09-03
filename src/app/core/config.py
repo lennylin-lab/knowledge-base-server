@@ -52,6 +52,17 @@ class Settings(BaseSettings):
     # paths resolve against the working directory. Missing file = no servers.
     MCP_CONFIG_PATH: str = "mcp.json"
 
+    # --- indexing queue (ARQ + Redis) ---
+    # Empty (default) = indexing runs as in-process background tasks after
+    # each write; local development stays zero-dependency. Set to the compose
+    # Redis (redis://localhost:6379) and run `python -m app.cli worker` to
+    # route indexing through the ARQ task queue with automatic retries.
+    REDIS_URL: str = ""
+    # Queue-level retry policy for indexing jobs: attempts per job, and the
+    # delay before the first retry (doubling each attempt: 5s, 10s, 20s ...).
+    INDEX_JOB_MAX_TRIES: int = 3
+    INDEX_JOB_RETRY_MIN_DELAY_S: int = 5
+
     # --- observability ---
     LOG_LEVEL: str = "INFO"
     LOG_FORMAT: str = "console"  # "console" | "json"

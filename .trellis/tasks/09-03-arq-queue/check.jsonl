@@ -1,0 +1,5 @@
+{"file": ".trellis/spec/backend/directory-structure.md", "type": "file", "reason": "verify enqueuer adapter stays in deps.py (sole composition bridge), rag/worker.py import surface, no api imports in rag"}
+{"file": ".trellis/spec/backend/error-handling.md", "type": "file", "reason": "verify write path never 5xx on enqueue failure, retry boundary moved to ARQ, BackgroundTasks swallow semantics unchanged"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "type": "file", "reason": "verify index_job/index_enqueue event fields, no content, error_class only"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "type": "file", "reason": "gates green, no Redis in default suite, live_redis deselected, .env.example complete, dependency floor matches imported arq API"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "type": "file", "reason": "confirm no schema/migration drift; idempotent replace semantics tolerate duplicate job runs"}

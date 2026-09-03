@@ -99,7 +99,11 @@ that reproduces the bug first.
   nothing below `llm/` may import provider SDKs, so this boundary is stable.
 - Tests that must hit a real provider are marked `@pytest.mark.live_llm`
   and **excluded by default** (`-m "not live_llm"` in pyproject); they are
-  for manual/nightly verification.
+  for manual/nightly verification. Same rule for real infrastructure:
+  `live_mcp` (real MCP server) and `live_redis` (real queue round trip,
+  probe-skip when unreachable) follow the identical pattern — the default
+  suite constructs zero live connections to providers, MCP servers, or
+  Redis.
 - **Elasticsearch**: query builders are pure functions tested without a
   server; client integration tests use testcontainers and are skippable
   when Docker is unavailable (`ES_INTEGRATION=1` gate).

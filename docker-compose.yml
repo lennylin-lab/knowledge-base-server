@@ -31,6 +31,21 @@ services:
       timeout: 5s
       retries: 12
 
+  # Task-queue mode for indexing (opt-in): set KB_REDIS_URL=redis://localhost:6379
+  # and run `python -m app.cli worker`. Nothing depends on this service — with
+  # the default empty KB_REDIS_URL the app indexes via in-process background
+  # tasks. Restart/supervision policy is the deployment's job; add
+  # `restart: unless-stopped` here if you want compose to supervise the worker.
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
 volumes:
   pgdata:
   esdata:

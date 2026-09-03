@@ -1,8 +1,11 @@
 """Indexing pipeline: chunk -> embed -> pgvector + Elasticsearch -> status.
 
-`index_status == done` means BOTH stores are populated and consistent; any
-stage failure flips it to `failed` (the document stays retriable via the CLI).
-Runs as a background task and must never raise into a response.
+`index_status == done` means BOTH stores are populated and consistent. Two
+entry shapes share one core: `process_document` / `run_indexing` swallow
+stage failures (BackgroundTasks mode — must never raise into a response),
+while `process_document_raising` / `run_indexing_raw` propagate them so a
+queue worker can classify retry-worthy failures (see `rag/worker.py`). Both
+failure paths leave the document retriable via the CLI sweep.
 """
 
 from __future__ import annotations
@@ -75,45 +78,55 @@ class IndexingPipeline:
         Every stage error flips the status to `failed` and is swallowed —
         this runs as a background task and must not propagate.
         """
-        started = time.perf_counter()
-        log = logger.bind(document_id=str(doc_id))
         try:
-            async with self._session_factory() as session:
-                document = await DocumentRepository(session).get_by_id(doc_id)
-                if document is None:
-                    # Background race after a delete: nothing to index.
-                    log.info("document_index_skipped", reason="missing")
-                    return None
-                chunks = chunk_markdown(document.content)
-                vectors = await self._embedding_provider.embed_texts(chunks)
-                # Chunks are staging: commit them, status untouched — a later
-                # stage failure must still mark the document `failed`.
-                await DocumentChunkRepository(session).replace_for_document(
-                    document.id, chunks, vectors
-                )
-                await session.commit()
-                title, tags = document.title, document.tags
-            await self._ensure_index(self._es_client, self._es_index)
-            await self._replace_chunks(
-                self._es_client,
-                index=self._es_index,
-                document_id=document.id,
-                title=title,
-                tags=tags,
-                chunks=chunks,
-            )
-            async with self._session_factory() as session:
-                await DocumentRepository(session).set_index_status(document.id, IndexStatus.DONE)
-                await session.commit()
-            log.info(
-                "document_indexed",
-                chunk_count=len(chunks),
-                duration_ms=round((time.perf_counter() - started) * 1000, 2),
-            )
-            return IndexStatus.DONE
+            return await self.process_document_raising(doc_id)
         except Exception as exc:
             await self._mark_failed(doc_id, exc)
             return IndexStatus.FAILED
+
+    async def process_document_raising(self, doc_id: UUID) -> IndexStatus | None:
+        """The raising core of `process_document` (queue-mode entry).
+
+        Stage errors PROPAGATE — typed provider/search errors, connection
+        failures — so a queue worker can classify them for retry; the caller
+        owns settling `index_status=failed`. A missing/soft-deleted document
+        is still a clean skip (`None`), and success still sets `done` here.
+        """
+        started = time.perf_counter()
+        log = logger.bind(document_id=str(doc_id))
+        async with self._session_factory() as session:
+            document = await DocumentRepository(session).get_by_id(doc_id)
+            if document is None:
+                # Background race after a delete: nothing to index.
+                log.info("document_index_skipped", reason="missing")
+                return None
+            chunks = chunk_markdown(document.content)
+            vectors = await self._embedding_provider.embed_texts(chunks)
+            # Chunks are staging: commit them, status untouched — a later
+            # stage failure must still mark the document `failed`.
+            await DocumentChunkRepository(session).replace_for_document(
+                document.id, chunks, vectors
+            )
+            await session.commit()
+            title, tags = document.title, document.tags
+        await self._ensure_index(self._es_client, self._es_index)
+        await self._replace_chunks(
+            self._es_client,
+            index=self._es_index,
+            document_id=document.id,
+            title=title,
+            tags=tags,
+            chunks=chunks,
+        )
+        async with self._session_factory() as session:
+            await DocumentRepository(session).set_index_status(document.id, IndexStatus.DONE)
+            await session.commit()
+        log.info(
+            "document_indexed",
+            chunk_count=len(chunks),
+            duration_ms=round((time.perf_counter() - started) * 1000, 2),
+        )
+        return IndexStatus.DONE
 
     async def _mark_failed(self, doc_id: UUID, exc: Exception) -> None:
         """Flip to `failed` in a small follow-up transaction; never raise."""
@@ -162,8 +175,28 @@ async def run_indexing(doc_id: UUID) -> None:
         # its own failure paths so the background task can never crash.
         logger.exception("indexing_crashed", document_id=str(doc_id))
     finally:
-        try:
-            await pipeline.aclose()
-        except Exception:
-            # A failing close (e.g. dead ES transport) must not raise either.
-            logger.exception("indexing_close_failed", document_id=str(doc_id))
+        await _aclose_quietly(pipeline, doc_id)
+
+
+async def run_indexing_raw(doc_id: UUID) -> IndexStatus | None:
+    """Queue-mode entry point (raising): the pipeline core for the ARQ worker.
+
+    Like `run_indexing`, one pipeline is built and closed per run; unlike it,
+    stage errors propagate (typed provider/search/connection classes) so the
+    worker can retry them — settling `failed` is the worker's decision, not
+    the pipeline's. `None` is the missing-document skip outcome.
+    """
+    pipeline = build_default_pipeline()
+    try:
+        return await pipeline.process_document_raising(doc_id)
+    finally:
+        await _aclose_quietly(pipeline, doc_id)
+
+
+async def _aclose_quietly(pipeline: IndexingPipeline, doc_id: UUID) -> None:
+    """Close owned clients; a failing close (e.g. dead ES transport) must not
+    mask the pipeline's real outcome."""
+    try:
+        await pipeline.aclose()
+    except Exception:
+        logger.exception("indexing_close_failed", document_id=str(doc_id))

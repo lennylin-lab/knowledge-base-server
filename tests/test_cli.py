@@ -1,4 +1,5 @@
-"""CLI: reindex sweep semantics (counts, filters, limits) + argparse surface."""
+"""CLI: reindex sweep semantics (counts, filters, limits) + argparse surface
++ ARQ worker subcommand wiring (offline smoke)."""
 
 from __future__ import annotations
 
@@ -14,7 +15,7 @@ from app.rag.indexer import IndexingPipeline
 from app.repositories.document import DocumentRepository
 from app.schemas.document import DocumentCreate
 from app.services.document import DocumentService
-from fakes import RecordingEsStore, StubEsClient
+from fakes import RecordingEsStore, StubEsClient, hermetic_settings
 
 
 def make_test_pipeline(
@@ -168,3 +169,58 @@ def test_parser_rejects_done_status_and_non_positive_limit():
         cli._build_parser().parse_args(["reindex", "--limit", "0"])
     with pytest.raises(SystemExit):
         cli._build_parser().parse_args([])
+
+
+# --- worker subcommand (offline wiring smoke; no Redis connection) ---
+
+
+def test_parser_accepts_worker_subcommand():
+    args = cli._build_parser().parse_args(["worker"])
+
+    assert args.command == "worker"
+
+
+def test_worker_settings_wired_from_settings():
+    from app.rag.worker import INDEX_DOCUMENT_TASK, build_worker_settings
+
+    settings = hermetic_settings(REDIS_URL="redis://localhost:6379/0", INDEX_JOB_MAX_TRIES=7)
+    worker_settings = build_worker_settings(settings)
+
+    assert worker_settings.max_tries == 7
+    assert worker_settings.redis_settings.host == "localhost"
+    assert worker_settings.redis_settings.port == 6379
+    # The registered function name is the literal the enqueuer sends
+    # (cross-checked in test_arq_worker.py) — drift strands jobs.
+    assert [f.name for f in worker_settings.functions] == [INDEX_DOCUMENT_TASK]
+    assert worker_settings.on_startup is not None
+    assert worker_settings.on_shutdown is not None
+
+
+def test_main_dispatches_worker_to_run_worker(monkeypatch):
+    recorded: dict[str, object] = {}
+
+    class SentinelWorkerSettings:
+        pass
+
+    monkeypatch.setattr(
+        cli, "get_settings", lambda: hermetic_settings(REDIS_URL="redis://localhost:6379/0")
+    )
+    monkeypatch.setattr(
+        "app.rag.worker.build_worker_settings", lambda settings: SentinelWorkerSettings
+    )
+
+    def fake_run_worker(settings_cls: object, **kwargs: object) -> None:
+        recorded["settings_cls"] = settings_cls
+
+    monkeypatch.setattr("arq.run_worker", fake_run_worker)
+
+    assert cli.main(["worker"]) == 0
+    assert recorded["settings_cls"] is SentinelWorkerSettings
+
+
+def test_main_refuses_worker_without_redis_url(monkeypatch):
+    # Queue mode is opt-in: a worker without KB_REDIS_URL would poll a
+    # default Redis that nothing enqueues to.
+    monkeypatch.setattr(cli, "get_settings", lambda: hermetic_settings())
+
+    assert cli.main(["worker"]) == 1

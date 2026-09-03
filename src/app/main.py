@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.deps import close_arq_pool
 from app.api.v1.router import api_v1_router
 from app.core.config import get_settings
 from app.core.exceptions import register_exception_handlers
@@ -16,11 +17,14 @@ from app.mcp.manager import get_mcp_manager
 
 
 @asynccontextmanager
-async def mcp_lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Start the MCP manager at startup, stop it at shutdown.
+async def app_lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """Startup/shutdown for process-lifetime components.
 
-    A no-op when no servers are configured: the manager is never started, so
-    behavior is byte-identical to an MCP-less deployment.
+    MCP manager: started/stopped when servers are configured (a no-op when
+    not, so an MCP-less deployment is byte-identical to before). Shared ARQ
+    pool: closed at shutdown when this process routed indexing through
+    Redis — also a no-op in BackgroundTasks mode, where the pool never gets
+    built.
     """
     manager = get_mcp_manager()
     if manager.configured:
@@ -30,6 +34,7 @@ async def mcp_lifespan(app: FastAPI) -> AsyncIterator[None]:
     finally:
         if manager.configured:
             await manager.stop()
+        await close_arq_pool()
 
 
 def create_app() -> FastAPI:
@@ -37,7 +42,7 @@ def create_app() -> FastAPI:
     settings = get_settings()
     configure_logging(settings.LOG_LEVEL, settings.LOG_FORMAT)
 
-    app = FastAPI(title="knowledge-base-server", version="0.1.0", lifespan=mcp_lifespan)
+    app = FastAPI(title="knowledge-base-server", version="0.1.0", lifespan=app_lifespan)
     app.add_middleware(RequestIdMiddleware)
     if settings.CORS_ORIGINS:
         # Dev-only convenience: no origins configured = no CORS at all.

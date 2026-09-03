@@ -117,6 +117,14 @@ logger.exception("embedding_failed", document_id=str(doc_id))  # inside except
   `chat_message_persisted` (session_id, role, content_length — **never
   content**: stored messages are Q&A pairs, the most sensitive payload
   in the system).
+- **Index queue (ARQ)** — api scope: `index_enqueued` (document_id,
+  mode) / `index_enqueue_failed` (document_id, error_class — write is
+  already committed; the doc stays pending for the CLI sweep). Worker
+  scope: `index_job_started` (document_id, job_try),
+  `index_job_retry` (job_try, error_class, defer_ms),
+  `index_job_finished` (job_try, outcome, latency_ms),
+  `index_job_poison` (invalid payload), `index_worker_started/stopped`.
+  Retry backoff is `INDEX_JOB_RETRY_MIN_DELAY_S * 2**(job_try-1)`.
 - **Token usage** is a metric, not a log line — but the per-call events above
   make aggregation possible.
 

@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 from functools import lru_cache
-from typing import Annotated
+from typing import Annotated, ClassVar
+from uuid import UUID
 
 import structlog
+from arq import create_pool
+from arq.connections import ArqRedis, RedisSettings
 from fastapi import BackgroundTasks, Depends
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -18,10 +22,11 @@ from app.mcp.manager import get_mcp_manager
 from app.mcp.tools import build_agent_tools
 from app.rag.indexer import run_indexing
 from app.rag.retriever import Retriever
+from app.rag.worker import INDEX_DOCUMENT_TASK
 from app.search.es import get_shared_es_client
 from app.services.agents import AssociationService, SummarizeService, WritingService
 from app.services.chat import ChatService
-from app.services.document import DocumentService
+from app.services.document import DocumentService, ReindexEnqueuer
 from app.services.search import SearchService
 from app.services.session import ChatSessionService
 
@@ -36,10 +41,79 @@ def get_document_service(session: SessionDep, background_tasks: BackgroundTasks)
     The FastAPI adapter for the write-path indexing trigger: the service only
     sees an injected enqueuer; this is the sole place BackgroundTasks appears.
     """
-    return DocumentService(
-        session,
-        enqueuer=lambda doc_id: background_tasks.add_task(run_indexing, doc_id),
-    )
+    return DocumentService(session, enqueuer=make_index_enqueuer(background_tasks))
+
+
+# --- indexing enqueue transport (BackgroundTasks | ARQ) ---
+
+
+def make_index_enqueuer(background_tasks: BackgroundTasks) -> ReindexEnqueuer:
+    """Pick the indexing transport once, at service construction.
+
+    Empty `REDIS_URL` (the default) keeps today's in-process BackgroundTasks
+    path exactly — no Redis client is ever constructed. A configured URL
+    routes enqueueing to the shared ARQ pool instead; BackgroundTasks then
+    carries nothing (it stays solely the fallback's transport).
+    """
+    if not get_settings().REDIS_URL:
+        return lambda doc_id: background_tasks.add_task(run_indexing, doc_id)
+    return _ArqEnqueuer()
+
+
+_shared_arq_pool: ArqRedis | None = None
+
+
+async def _get_shared_arq_pool() -> ArqRedis:
+    """The one ARQ pool per process, built lazily on first enqueue (the
+    `get_shared_es_client` pattern): enqueuers are constructed per request
+    but must never open a pool per request. Tests pre-set the module global
+    to stub the pool."""
+    global _shared_arq_pool
+    if _shared_arq_pool is None:
+        _shared_arq_pool = await create_pool(RedisSettings.from_dsn(get_settings().REDIS_URL))
+    return _shared_arq_pool
+
+
+async def close_arq_pool() -> None:
+    """App-shutdown hook: close the shared pool if this process built one
+    (a no-op in BackgroundTasks mode — the pool never exists)."""
+    global _shared_arq_pool
+    if _shared_arq_pool is not None:
+        await _shared_arq_pool.aclose(close_connection_pool=True)
+        _shared_arq_pool = None
+
+
+class _ArqEnqueuer:
+    """Enqueues indexing jobs on the shared ARQ pool.
+
+    `__call__` keeps the sync `ReindexEnqueuer` shape the service expects;
+    the async enqueue runs as a fire-and-forget task on the request's event
+    loop. A Redis problem at enqueue time degrades loudly but safely: the
+    write itself is already committed, so `index_enqueue_failed` is warned,
+    the document stays `pending`, and the CLI reindex sweep finishes it —
+    the CRUD response never 5xx-es over a queue hiccup.
+    """
+
+    # A live reference per fire-and-forget task, or the GC may collect it
+    # mid-flight; done-callbacks keep the set bounded.
+    _inflight: ClassVar[set[asyncio.Task[None]]] = set()
+
+    def __call__(self, doc_id: UUID) -> None:
+        task = asyncio.create_task(self._enqueue(doc_id))
+        self._inflight.add(task)
+        task.add_done_callback(self._inflight.discard)
+
+    async def _enqueue(self, doc_id: UUID) -> None:
+        try:
+            pool = await _get_shared_arq_pool()
+            await pool.enqueue_job(INDEX_DOCUMENT_TASK, str(doc_id))
+            logger.info("index_enqueued", document_id=str(doc_id), mode="arq")
+        except Exception as exc:
+            logger.warning(
+                "index_enqueue_failed",
+                document_id=str(doc_id),
+                error_class=type(exc).__name__,
+            )
 
 
 DocumentServiceDep = Annotated[DocumentService, Depends(get_document_service)]

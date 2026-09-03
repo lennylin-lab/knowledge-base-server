@@ -56,6 +56,7 @@ knowledge-base-server/
 │   ├── rag/                  # retrieval-augmented generation pipeline
 │   │   ├── chunker.py        # markdown-aware chunking
 │   │   ├── indexer.py        # doc -> chunks -> embeddings -> stores
+│   │   ├── worker.py         # ARQ task fn + WorkerSettings (queue mode)
 │   │   └── retriever.py      # ES BM25 + pgvector, RRF fusion
 │   ├── mcp/                  # MCP extension mechanism
 │   │   ├── manager.py        # server lifecycle (stdio/HTTP), tool discovery
@@ -88,7 +89,7 @@ knowledge-base-server/
 | Router | `api/` | `services/`, `schemas/`, `api/deps.py` | `models/`, `repositories/`, `agents/`, SQLAlchemy |
 | Service | `services/` | `repositories/`, `models/`, `schemas/`, `agents/`, `rag/`, `core/` | `api/`, FastAPI objects (`Request`, `Response`) |
 | Agent | `agents/` | `llm/`, `rag/`, `mcp/`, `schemas/`, `core/` | `api/`, `services/`, FastAPI objects |
-| RAG | `rag/` | `models/`, `repositories/`, `search/`, `llm/`, `core/` | `api/`, `services/`, `agents/` |
+| RAG | `rag/` | `models/`, `repositories/`, `search/`, `llm/`, `core/`, `arq` (queue infra in `rag/worker.py` only) | `api/`, `services/`, `agents/` |
 | MCP | `mcp/` | `core/`, `schemas/`, `pydantic-ai` (tool wrapping in `mcp/tools.py` only) | `api/`, `services/`, `agents/`, `models/`, FastAPI |
 | LLM | `llm/` | `core/` | everything domain (`services/`, `agents/`, `rag/`, …) |
 | Repository | `repositories/` | `models/`, `core/database.py` | `services/`, `api/`, `agents/`, Pydantic schemas |

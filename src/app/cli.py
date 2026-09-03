@@ -1,8 +1,10 @@
-"""Operations CLI: `python -m app.cli reindex`.
+"""Operations CLI: `python -m app.cli reindex | worker`.
 
-Compensation path for the background indexing pipeline — sweeps documents
-still `pending`/`failed` (retry-after-failure and backfill). Per-document
-failures do not fail the batch: the summary carries the counts.
+`reindex` is the compensation path for the indexing pipeline — sweeps
+documents still `pending`/`failed` (retry-after-failure and backfill; it
+drains leftovers of BOTH enqueue modes). Per-document failures do not fail
+the batch: the summary carries the counts. `worker` runs the ARQ indexing
+worker (requires `KB_REDIS_URL`; blocks until Ctrl-C).
 """
 
 from __future__ import annotations
@@ -50,6 +52,10 @@ def _build_parser() -> argparse.ArgumentParser:
         type=_positive_int,
         default=50,
         help="Bound one run to N documents (default: 50).",
+    )
+    subcommands.add_parser(
+        "worker",
+        help="Run the ARQ indexing worker (requires KB_REDIS_URL; blocks).",
     )
     return parser
 
@@ -120,6 +126,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "reindex":
         statuses = [IndexStatus(value) for value in (args.status or _DEFAULT_STATUSES)]
         asyncio.run(run_reindex(statuses=statuses, limit=args.limit))
+    elif args.command == "worker":
+        if not settings.REDIS_URL:
+            # Queue mode is opt-in; running a worker without it would silently
+            # point at a default Redis that nothing enqueues to.
+            logger.error("worker_requires_redis_url")
+            return 1
+        # Lazy imports: the reindex path stays free of worker/arq imports, and
+        # the worker process never imports the FastAPI app factory.
+        from arq import run_worker
+
+        from app.rag.worker import build_worker_settings
+
+        run_worker(build_worker_settings(settings))
     return 0
 
 
