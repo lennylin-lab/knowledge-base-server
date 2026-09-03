@@ -23,6 +23,13 @@ class Settings(BaseSettings):
     ELASTICSEARCH_URL: str = "http://localhost:9200"
     ES_INDEX: str = "kb_documents"
 
+    # --- http / CORS ---
+    # Allowed CORS origins for browser clients; empty disables CORS entirely
+    # (the production default). Local development: ["*"] or explicit origins,
+    # e.g. ["http://localhost:5173"]. Credentials are never allowed, so the
+    # "*" wildcard stays legal.
+    CORS_ORIGINS: list[str] = []
+
     # --- LLM providers (OpenAI-compatible) ---
     # Embedding and chat are independently configurable: each layer reads only
     # its own base_url/api key, so the two may point at different providers.
