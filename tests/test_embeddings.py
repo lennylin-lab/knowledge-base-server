@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import httpx
 import openai
 import pytest
+from openai import Omit
 
 from app.core.config import Settings
 from app.core.exceptions import LLMProviderError, LLMRateLimitedError
@@ -33,8 +34,22 @@ class StubEmbeddings:
         self.error = error
         self.calls: list[dict[str, object]] = []
 
-    async def create(self, *, model: str, input: list[str]) -> object:
-        self.calls.append({"model": model, "input": input})
+    async def create(
+        self,
+        *,
+        model: str,
+        input: list[str],
+        encoding_format: str = "float",
+        dimensions: object = None,
+    ) -> object:
+        self.calls.append(
+            {
+                "model": model,
+                "input": input,
+                "encoding_format": encoding_format,
+                "dimensions": dimensions,
+            }
+        )
         if self.error is not None:
             raise self.error
         return self.result
@@ -92,7 +107,13 @@ async def test_provider_returns_vectors_in_input_order():
     vectors = await provider.embed_texts(["a", "b", "c"])
 
     assert vectors == [[0.1], [0.2], [0.3]]
-    assert stub.calls == [{"model": "embed-x", "input": ["a", "b", "c"]}]
+    call = stub.calls[0]
+    assert call["model"] == "embed-x"
+    assert call["input"] == ["a", "b", "c"]
+    # float must be explicit (SDK default base64 breaks OpenRouter/Nvidia);
+    # dimensions stays omitted when no width is configured.
+    assert call["encoding_format"] == "float"
+    assert isinstance(call["dimensions"], Omit)
 
 
 async def test_provider_empty_batch_skips_the_client():
@@ -139,6 +160,37 @@ async def test_provider_rejects_mismatched_vector_count():
     assert exc_info.value.details == {"expected": 2, "received": 1}
 
 
+async def test_provider_passes_configured_dimensions():
+    stub = StubEmbeddings(result=_response([[0.1, 0.2]]))
+    provider = OpenAIEmbeddingProvider(
+        base_url="http://provider.test/v1",
+        api_key="test-key",
+        model="embed-x",
+        dimensions=2,
+        client=SimpleNamespace(embeddings=stub),
+    )
+
+    await provider.embed_texts(["a"])
+
+    assert stub.calls[0]["dimensions"] == 2
+
+
+async def test_provider_rejects_unexpected_vector_dimension():
+    stub = StubEmbeddings(result=_response([[0.1, 0.2, 0.3]]))
+    provider = OpenAIEmbeddingProvider(
+        base_url="http://provider.test/v1",
+        api_key="test-key",
+        model="embed-x",
+        dimensions=2,
+        client=SimpleNamespace(embeddings=stub),
+    )
+
+    with pytest.raises(LLMProviderError) as exc_info:
+        await provider.embed_texts(["a"])
+
+    assert exc_info.value.details == {"expected": 2, "received": 3}
+
+
 def test_from_settings_wires_client_configuration():
     settings = Settings(
         EMBEDDING_BASE_URL="http://provider.test/v1",
@@ -149,6 +201,7 @@ def test_from_settings_wires_client_configuration():
     provider = OpenAIEmbeddingProvider.from_settings(settings)
 
     assert provider._model == "embed-x"
+    assert provider._dimensions == 1536
 
 
 def test_layers_read_their_own_provider_variables():
@@ -194,7 +247,7 @@ async def test_provider_aclose_closes_the_sdk_client():
 
 
 @pytest.mark.live_llm
-async def test_live_provider_returns_full_dimension_vectors():
+async def test_live_provider_returns_configured_dimension_vectors():
     provider = OpenAIEmbeddingProvider.from_settings(Settings())
     vectors = await provider.embed_texts(["hello world"])
 

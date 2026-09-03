@@ -29,6 +29,9 @@ def get_chat_model(settings: Settings) -> Model:
         api_key=settings.CHAT_API_KEY.get_secret_value(),
         timeout=_REQUEST_TIMEOUT,
         max_retries=_MAX_RETRIES,
+        # The SDK's "OpenAI/Python x.y" UA is blocked by some relay providers'
+        # WAFs (403 "Your request was blocked"); send a neutral one instead.
+        default_headers={"User-Agent": "knowledge-base-server"},
     )
     return OpenAIChatModel(
         settings.CHAT_MODEL,

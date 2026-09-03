@@ -11,7 +11,7 @@ from typing import Protocol, runtime_checkable
 
 import openai
 import structlog
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, Omit
 
 from app.core.config import Settings
 from app.core.exceptions import LLMProviderError, LLMRateLimitedError
@@ -35,11 +35,13 @@ class OpenAIEmbeddingProvider:
         base_url: str,
         api_key: str,
         model: str,
+        dimensions: int | None = None,
         timeout: float = 60.0,
         max_retries: int = 2,
         client: AsyncOpenAI | None = None,
     ) -> None:
         self._model = model
+        self._dimensions = dimensions
         # Injection seam for tests; production always builds its own client so
         # retries/timeouts are configured in exactly one place.
         self._client = client or AsyncOpenAI(
@@ -56,6 +58,7 @@ class OpenAIEmbeddingProvider:
             base_url=settings.EMBEDDING_BASE_URL,
             api_key=settings.EMBEDDING_API_KEY.get_secret_value(),
             model=settings.EMBEDDING_MODEL,
+            dimensions=settings.EMBEDDING_DIM,
         )
 
     async def embed_texts(self, texts: list[str]) -> list[list[float]]:
@@ -64,7 +67,15 @@ class OpenAIEmbeddingProvider:
             return []
         started = time.perf_counter()
         try:
-            response = await self._client.embeddings.create(model=self._model, input=list(texts))
+            response = await self._client.embeddings.create(
+                model=self._model,
+                input=list(texts),
+                # encoding_format must be explicit: the SDK defaults to "base64",
+                # which OpenRouter-backed Nvidia embedding models reject with a 400.
+                encoding_format="float",
+                # Omit() keeps the parameter absent unless a width is configured.
+                dimensions=self._dimensions if self._dimensions is not None else Omit(),
+            )
         except openai.RateLimitError as exc:
             raise LLMRateLimitedError("Embedding provider rate limit exceeded") from exc
         except openai.APIError as exc:
@@ -76,6 +87,16 @@ class OpenAIEmbeddingProvider:
             raise LLMProviderError(
                 "Embedding provider returned a mismatched number of vectors",
                 details={"expected": len(texts), "received": len(vectors)},
+            )
+        if self._dimensions is not None and any(
+            len(vector) != self._dimensions for vector in vectors
+        ):
+            # Without this the failure surfaces later as an opaque pgvector
+            # insert/query error against the fixed-width embedding column.
+            received = len(next(v for v in vectors if len(v) != self._dimensions))
+            raise LLMProviderError(
+                "Embedding provider returned a vector with an unexpected dimension",
+                details={"expected": self._dimensions, "received": received},
             )
         logger.info(
             "embeddings_completed",
