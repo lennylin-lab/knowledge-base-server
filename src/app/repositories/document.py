@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import datetime
 from typing import NamedTuple
 from uuid import UUID
 
-from sqlalchemy import any_, func, literal, select, tuple_, update
+from sqlalchemy import any_, func, literal, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.document import Document, IndexStatus
@@ -43,27 +42,23 @@ class DocumentRepository:
     async def list_page(
         self,
         *,
-        cursor: tuple[datetime, UUID] | None = None,
+        cursor: UUID | None = None,
         limit: int = 20,
         tag: str | None = None,
     ) -> Sequence[Document]:
-        """Keyset-paginated listing in `created_at DESC, id DESC` order.
+        """Keyset-paginated listing in `id DESC` order (newest first).
 
-        Fetches `limit + 1` rows so the caller can tell whether another page
-        exists without a separate count query.
+        UUIDv7 ids encode creation time, so id order *is* creation order and
+        the primary-key index serves the sort (backward scan) — no composite
+        cursor index needed. Fetches `limit + 1` rows so the caller can tell
+        whether another page exists without a separate count query.
         """
         stmt = select(Document).where(Document.deleted_at.is_(None))
         if tag is not None:
             stmt = stmt.where(literal(tag) == any_(Document.tags))
         if cursor is not None:
-            # Row-value comparison: PG compares (created_at, id) lexicographically,
-            # which is exactly the keyset predicate for the DESC, DESC ordering.
-            # Plain scalars in tuple_ are runtime-supported (auto-literalized);
-            # the stubs only type expressions.
-            stmt = stmt.where(
-                tuple_(Document.created_at, Document.id) < tuple_(*cursor)  # type: ignore[arg-type]
-            )
-        stmt = stmt.order_by(Document.created_at.desc(), Document.id.desc()).limit(limit + 1)
+            stmt = stmt.where(Document.id < cursor)
+        stmt = stmt.order_by(Document.id.desc()).limit(limit + 1)
         return (await self._session.execute(stmt)).scalars().all()
 
     async def update(self, document: Document) -> Document:
@@ -91,7 +86,7 @@ class DocumentRepository:
         stmt = (
             select(Document)
             .where(Document.index_status.in_(list(statuses)), Document.deleted_at.is_(None))
-            .order_by(Document.created_at.asc(), Document.id.asc())
+            .order_by(Document.id.asc())
             .limit(limit)
         )
         return (await self._session.execute(stmt)).scalars().all()
@@ -117,7 +112,7 @@ class DocumentRepository:
                 Document.id != exclude_id,
                 Document.tags.overlap(list(tags)),
             )
-            .order_by(Document.created_at.desc(), Document.id.desc())
+            .order_by(Document.id.desc())
             .limit(limit)
         )
         source_tags = set(tags)

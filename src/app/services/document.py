@@ -20,7 +20,7 @@ from app.schemas.document import (
     DocumentReadDetail,
     DocumentUpdate,
 )
-from app.utils.cursor import decode_cursor, encode_cursor
+from app.utils.cursor import decode_id_cursor, encode_id_cursor
 
 logger = structlog.get_logger(__name__)
 
@@ -98,7 +98,7 @@ class DocumentService:
         tag: str | None = None,
     ) -> DocumentPage:
         """Keyset-paginated listing, optionally filtered by tag membership."""
-        decoded = decode_cursor(cursor) if cursor is not None else None
+        decoded = decode_id_cursor(cursor) if cursor is not None else None
         normalized_tag = tag.strip().lower() if tag else None
         rows = await self._repo.list_page(cursor=decoded, limit=limit, tag=normalized_tag)
 
@@ -106,7 +106,7 @@ class DocumentService:
         if len(rows) > limit:
             rows = rows[:limit]
             last = rows[-1]
-            next_cursor = encode_cursor(last.created_at, last.id)
+            next_cursor = encode_id_cursor(last.id)
 
         return DocumentPage(
             items=[DocumentRead.model_validate(row) for row in rows],

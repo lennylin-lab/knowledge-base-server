@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime
 from enum import StrEnum
 
-from sqlalchemy import DateTime, Index, Text, func, text
+from sqlalchemy import DateTime, Index, Text, func
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.dialects.postgresql import ARRAY, UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -33,9 +33,9 @@ class Document(Base):
     __tablename__ = "documents"
     __table_args__ = (
         # Tag membership filter (?tag=) — GIN over the array.
+        # Listing needs no extra index: UUIDv7 ids order by creation time, so
+        # the keyset `ORDER BY id DESC` rides the primary-key index.
         Index("ix_documents_tags", "tags", postgresql_using="gin"),
-        # Keyset pagination cursor support: ORDER BY created_at DESC, id DESC.
-        Index("ix_documents_created_at_id", text("created_at DESC, id DESC")),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid7)
