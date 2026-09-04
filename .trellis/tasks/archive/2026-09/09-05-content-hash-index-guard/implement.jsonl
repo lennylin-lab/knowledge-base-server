@@ -1,0 +1,4 @@
+{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python3 .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend layering and binding conventions (uv, repos-only SQL, service owns transactions)"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "Model column style, Alembic migration rules (real downgrade, autogen traps), pgvector/ES replace context"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "Where service/repository/migration changes belong; layering matrix"}
