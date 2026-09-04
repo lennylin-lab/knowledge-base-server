@@ -135,6 +135,20 @@ Rules:
 - Embeddable tables keep an indexing status column on the parent
   (`documents.index_status`: `pending | done | failed`) so the background
   pipeline is observable and retryable.
+- **Duplicate-index guard: `documents.content_hash`** (learned 2026-09-05,
+  content-hash task). SHA-256 hex digest of the raw `content` (front matter
+  included), computed by the service layer — the pipeline never hashes. The
+  service reindexes (status reset + enqueue) iff something index-relevant
+  changed OR `index_status != done` (re-saving a failed/pending document is
+  the retry path). Skipping requires ALL of: hash equal (a NULL hash —
+  pre-backfill row — counts as changed), resolved title equal (title feeds
+  the search index; tags are a pure function of content, so the hash covers
+  them), and status `done`. Wrong: resetting status on every save "to be
+  safe" — that re-embeds byte-identical documents (embedding API cost) for a
+  zero-delta index. Canonical implementation: `services/document.py`
+  (`_content_hash`, `update_document`); one-off backfills may use pgcrypto
+  `digest()` (present in the `pgvector/pgvector:pg16` image), created
+  `IF NOT EXISTS` in the migration and never dropped on downgrade.
 
 ## Query Patterns
 

@@ -114,6 +114,20 @@ that reproduces the bug first.
 - **RRF fusion and chunking** are pure logic — exhaustive unit tests, no
   infrastructure.
 
+> **Warning (learned 2026-09-05, content-hash task): the default suite can
+> silently require Redis via the dev `.env`.** The "zero live connections"
+> rule above has one hole: when `.env` sets `KB_REDIS_URL`,
+> `make_index_enqueuer` (`api/deps.py`) wires the ARQ transport app-wide, so
+> the `@pytest.mark.es` e2e indexer tests (`tests/test_indexer.py`) enqueue
+> through ARQ and fail on their status assertions when Redis is down —
+> indistinguishable from a product bug. Verdict procedure for "is this
+> failure mine?": run the failing tests in a HEAD worktree
+> (`git worktree add /tmp/x HEAD`) with the same env — an identical failure
+> there means pre-existing/environmental; never `git stash` on a moving
+> tree. Follow-up candidate: the `indexing_client` fixture should pin
+> BackgroundTasks mode (or probe-skip) so e2e tests never depend on the
+> queue transport.
+
 ## Review Checklist (apply before requesting/merging)
 
 1. `uv run ruff check . && uv run ruff format --check .` clean.
