@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Sequence
 from datetime import datetime
 from uuid import UUID
 
@@ -33,6 +33,20 @@ logger = structlog.get_logger(__name__)
 ReindexEnqueuer = Callable[[UUID, datetime], None]
 
 
+def _normalize_tags(raw_tags: Iterable[str]) -> list[str]:
+    """Trim, lowercase, drop empties, and de-duplicate (order preserved).
+
+    Shared by stored tags (front matter) and query filters so both sides of
+    a tag comparison are normalized identically.
+    """
+    tags: list[str] = []
+    for raw_tag in raw_tags:
+        normalized = raw_tag.strip().lower()
+        if normalized and normalized not in tags:
+            tags.append(normalized)
+    return tags
+
+
 def _parse_front_matter(content: str, request_title: str | None) -> tuple[str, list[str]]:
     """Derive (title, tags) from front matter in `content`.
 
@@ -56,13 +70,7 @@ def _parse_front_matter(content: str, request_title: str | None) -> tuple[str, l
             "Invalid front matter: 'tags' must be a list of strings",
             details={"field": "tags"},
         )
-    tags: list[str] = []
-    for raw_tag in raw_tags:
-        normalized = raw_tag.strip().lower()
-        if normalized and normalized not in tags:
-            tags.append(normalized)
-
-    return resolved_title, tags
+    return resolved_title, _normalize_tags(raw_tags)
 
 
 class DocumentService:
@@ -104,12 +112,18 @@ class DocumentService:
         *,
         cursor: str | None = None,
         limit: int = 20,
-        tag: str | None = None,
+        tags: Sequence[str] | None = None,
     ) -> DocumentPage:
-        """Keyset-paginated listing, optionally filtered by tag membership."""
+        """Keyset-paginated listing, optionally filtered by tag membership.
+
+        Multiple tags AND together: a document is listed only when it carries
+        every requested tag. Requested tags go through the same normalization
+        as stored tags (trim, lowercase, dedupe); an empty/absent filter
+        lists everything.
+        """
         decoded = decode_id_cursor(cursor) if cursor is not None else None
-        normalized_tag = tag.strip().lower() if tag else None
-        rows = await self._repo.list_page(cursor=decoded, limit=limit, tag=normalized_tag)
+        normalized_tags = _normalize_tags(tags) if tags else None
+        rows = await self._repo.list_page(cursor=decoded, limit=limit, tags=normalized_tags)
 
         next_cursor: str | None = None
         if len(rows) > limit:

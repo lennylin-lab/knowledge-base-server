@@ -6,7 +6,7 @@ from collections.abc import Sequence
 from typing import NamedTuple
 from uuid import UUID
 
-from sqlalchemy import any_, func, literal, select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.document import Document, IndexStatus
@@ -44,18 +44,20 @@ class DocumentRepository:
         *,
         cursor: UUID | None = None,
         limit: int = 20,
-        tag: str | None = None,
+        tags: Sequence[str] | None = None,
     ) -> Sequence[Document]:
         """Keyset-paginated listing in `id DESC` order (newest first).
 
         UUIDv7 ids encode creation time, so id order *is* creation order and
         the primary-key index serves the sort (backward scan) — no composite
         cursor index needed. Fetches `limit + 1` rows so the caller can tell
-        whether another page exists without a separate count query.
+        whether another page exists without a separate count query. `tags`
+        is an AND: a row matches only if its array contains every requested
+        tag (`@>`, served by the GIN tag index).
         """
         stmt = select(Document).where(Document.deleted_at.is_(None))
-        if tag is not None:
-            stmt = stmt.where(literal(tag) == any_(Document.tags))
+        if tags:
+            stmt = stmt.where(Document.tags.contains(list(tags)))
         if cursor is not None:
             stmt = stmt.where(Document.id < cursor)
         stmt = stmt.order_by(Document.id.desc()).limit(limit + 1)

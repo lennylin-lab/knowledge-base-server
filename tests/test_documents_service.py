@@ -108,11 +108,28 @@ async def test_list_filters_by_normalized_tag(db_session):
     await service.create_document(DocumentCreate(content="---\ntags: [Python]\n---\n"))
     await service.create_document(DocumentCreate(content="untagged"))
 
-    exact = await service.list_documents(tag="python")
-    upper = await service.list_documents(tag=" PYTHON ")
+    exact = await service.list_documents(tags=["python"])
+    upper = await service.list_documents(tags=[" PYTHON "])
 
     assert [item.title for item in exact.items] == ["Untitled"]
     assert [item.title for item in upper.items] == ["Untitled"]
+
+
+async def test_list_requires_every_requested_tag(db_session):
+    service = make_service(db_session)
+    await service.create_document(
+        DocumentCreate(content="---\ntitle: Both\ntags: [Python, Async]\n---\n")
+    )
+    await service.create_document(DocumentCreate(content="---\ntitle: Solo\ntags: [python]\n---\n"))
+    await service.create_document(DocumentCreate(content="untagged"))
+
+    both = await service.list_documents(tags=["PYTHON", "async"])
+    deduped = await service.list_documents(tags=["PYTHON", " Async ", "python"])
+    unfiltered = await service.list_documents(tags=[])
+
+    assert [item.title for item in both.items] == ["Both"]
+    assert [item.title for item in deduped.items] == ["Both"]
+    assert len(unfiltered.items) == 3
 
 
 async def test_list_paginates_disjoint_pages_newest_first(db_session):

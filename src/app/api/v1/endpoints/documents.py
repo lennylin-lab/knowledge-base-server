@@ -31,10 +31,13 @@ async def list_documents(
     service: DocumentServiceDep,
     cursor: Annotated[str | None, Query(description="Keyset cursor from a previous page")] = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
-    tag: Annotated[str | None, Query(description="Filter by tag membership")] = None,
+    tag: Annotated[
+        list[str] | None,
+        Query(description="Filter by tag membership; repeat to require several tags (AND)"),
+    ] = None,
 ) -> DocumentPage:
     """List documents, newest first, keyset-paginated."""
-    return await service.list_documents(cursor=cursor, limit=limit, tag=tag)
+    return await service.list_documents(cursor=cursor, limit=limit, tags=tag)
 
 
 @router.get("/{document_id}", response_model=DocumentReadDetail)

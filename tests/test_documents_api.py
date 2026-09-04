@@ -99,6 +99,19 @@ async def test_list_documents_filters_by_tag(db_client):
     assert items[0]["title"] == "Contract Note"
 
 
+async def test_list_documents_filters_by_multiple_tags(db_client):
+    await db_client.post("/api/v1/documents", json={"content": FM_DOC})
+    await db_client.post("/api/v1/documents", json={"content": NO_FM_DOC})
+
+    both = await db_client.get("/api/v1/documents", params={"tag": ["api", "smoke"]})
+    missing = await db_client.get("/api/v1/documents", params={"tag": ["api", "other"]})
+
+    assert both.status_code == 200
+    assert [item["title"] for item in both.json()["items"]] == ["Contract Note"]
+    assert missing.status_code == 200
+    assert missing.json()["items"] == []
+
+
 async def test_list_documents_rejects_invalid_cursor_with_422(db_client):
     resp = await db_client.get("/api/v1/documents", params={"cursor": "garbage!"})
 
