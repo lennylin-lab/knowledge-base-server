@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import pytest
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import NotFoundError, ValidationError
@@ -30,6 +32,14 @@ async def create_raw(
     session.add(document)
     await session.flush()
     return document
+
+
+async def mark_done(session: AsyncSession, doc_id: UUID) -> None:
+    """Simulate the indexing pipeline having finished a document."""
+    document = await session.get(Document, doc_id)
+    assert document is not None
+    document.index_status = IndexStatus.DONE
+    await session.flush()
 
 
 async def test_create_extracts_title_and_tags_from_front_matter(db_session):
@@ -201,10 +211,7 @@ async def test_update_resets_index_status_to_pending(db_session):
     service = make_service(db_session)
     created = await service.create_document(DocumentCreate(content="body"))
     # Simulate the future pipeline having finished this document.
-    document = await db_session.get(Document, created.id)
-    assert document is not None
-    document.index_status = IndexStatus.DONE
-    await db_session.flush()
+    await mark_done(db_session, created.id)
 
     updated = await service.update_document(created.id, DocumentUpdate(title="touch"))
 
@@ -300,3 +307,147 @@ async def test_delete_does_not_enqueue(db_session):
     await service.delete_document(created.id)
 
     assert captured == []
+
+
+# --- content hash guard (skip duplicate reindexing) ---
+
+
+async def test_create_stores_sha256_content_hash(db_session):
+    service = make_service(db_session)
+    content = "---\ntitle: Hashed\n---\nbody"
+
+    created = await service.create_document(DocumentCreate(content=content))
+
+    document = await db_session.get(Document, created.id)
+    assert document is not None
+    assert document.content_hash == hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+async def test_update_identical_content_on_done_document_skips_reindex(db_session):
+    captured: list[tuple[UUID, datetime]] = []
+    service = DocumentService(db_session, enqueuer=capture_enqueues(captured))
+    content = "---\ntitle: Same\n---\nbody"
+    created = await service.create_document(DocumentCreate(content=content))
+    await mark_done(db_session, created.id)
+    captured.clear()
+
+    updated = await service.update_document(created.id, DocumentUpdate(content=content))
+
+    assert updated.index_status == IndexStatus.DONE
+    assert captured == []
+
+
+async def test_update_identical_content_on_failed_document_retries(db_session):
+    captured: list[tuple[UUID, datetime]] = []
+    service = DocumentService(db_session, enqueuer=capture_enqueues(captured))
+    content = "retry body"
+    created = await service.create_document(DocumentCreate(content=content))
+    document = await db_session.get(Document, created.id)
+    assert document is not None
+    document.index_status = IndexStatus.FAILED
+    await db_session.flush()
+    captured.clear()
+
+    updated = await service.update_document(created.id, DocumentUpdate(content=content))
+
+    assert updated.index_status == IndexStatus.PENDING
+    assert captured == [(created.id, updated.updated_at)]
+
+
+async def test_update_changed_content_stores_new_hash_and_enqueues(db_session):
+    captured: list[tuple[UUID, datetime]] = []
+    service = DocumentService(db_session, enqueuer=capture_enqueues(captured))
+    created = await service.create_document(DocumentCreate(content="old body"))
+    await mark_done(db_session, created.id)
+    captured.clear()
+    new_content = "new body"
+
+    updated = await service.update_document(created.id, DocumentUpdate(content=new_content))
+
+    assert updated.index_status == IndexStatus.PENDING
+    assert captured == [(created.id, updated.updated_at)]
+    document = await db_session.get(Document, created.id)
+    assert document is not None
+    assert document.content_hash == hashlib.sha256(new_content.encode("utf-8")).hexdigest()
+
+
+async def test_update_identical_content_with_new_title_reindexes(db_session):
+    captured: list[tuple[UUID, datetime]] = []
+    service = DocumentService(db_session, enqueuer=capture_enqueues(captured))
+    created = await service.create_document(DocumentCreate(content="plain body", title="Old"))
+    await mark_done(db_session, created.id)
+    captured.clear()
+
+    updated = await service.update_document(
+        created.id, DocumentUpdate(content="plain body", title="New")
+    )
+
+    assert updated.title == "New"
+    assert updated.index_status == IndexStatus.PENDING
+    assert captured == [(created.id, updated.updated_at)]
+
+
+async def test_title_only_same_title_skips_done_document(db_session):
+    captured: list[tuple[UUID, datetime]] = []
+    service = DocumentService(db_session, enqueuer=capture_enqueues(captured))
+    created = await service.create_document(DocumentCreate(content="---\ntitle: Same\n---\n"))
+    await mark_done(db_session, created.id)
+    captured.clear()
+
+    updated = await service.update_document(created.id, DocumentUpdate(title="Same"))
+
+    assert updated.index_status == IndexStatus.DONE
+    assert captured == []
+
+
+async def test_title_only_new_title_reindexes(db_session):
+    captured: list[tuple[UUID, datetime]] = []
+    service = DocumentService(db_session, enqueuer=capture_enqueues(captured))
+    created = await service.create_document(DocumentCreate(content="---\ntitle: Old\n---\n"))
+    await mark_done(db_session, created.id)
+    captured.clear()
+
+    updated = await service.update_document(created.id, DocumentUpdate(title="New"))
+
+    assert updated.title == "New"
+    assert updated.index_status == IndexStatus.PENDING
+    assert captured == [(created.id, updated.updated_at)]
+
+
+async def test_null_content_hash_is_treated_as_changed(db_session):
+    captured: list[tuple[UUID, datetime]] = []
+    service = DocumentService(db_session, enqueuer=capture_enqueues(captured))
+    content = "pre-backfill body"
+    created = await service.create_document(DocumentCreate(content=content))
+    # Simulate a row predating the hash backfill: status done, hash unknown.
+    document = await db_session.get(Document, created.id)
+    assert document is not None
+    document.index_status = IndexStatus.DONE
+    document.content_hash = None
+    await db_session.flush()
+    captured.clear()
+
+    updated = await service.update_document(created.id, DocumentUpdate(content=content))
+
+    assert updated.index_status == IndexStatus.PENDING
+    assert captured == [(created.id, updated.updated_at)]
+    document = await db_session.get(Document, created.id)
+    assert document is not None
+    assert document.content_hash == hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+async def test_skipped_update_does_not_bump_updated_at(db_session):
+    service = make_service(db_session)
+    content = "identical body"
+    created = await service.create_document(DocumentCreate(content=content))
+    # Force DONE via raw SQL: the ORM write path would bump updated_at
+    # (onupdate), which is exactly the version this test guards. Expire so
+    # the service re-reads the DONE status from the row.
+    await db_session.execute(
+        text("UPDATE documents SET index_status = 'done' WHERE id = :id"), {"id": created.id}
+    )
+    db_session.expire_all()
+
+    updated = await service.update_document(created.id, DocumentUpdate(content=content))
+
+    assert updated.updated_at == created.updated_at

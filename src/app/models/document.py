@@ -41,6 +41,10 @@ class Document(Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid7)
     title: Mapped[str] = mapped_column(Text, nullable=False, default="Untitled")
     content: Mapped[str] = mapped_column(Text, nullable=False)
+    # SHA-256 hex digest of `content` (front matter included); the service
+    # layer compares it to skip reindexing byte-identical saves. NULL means
+    # "unknown, treat as changed" — pre-backfill rows reindex once.
+    content_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
     tags: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False, server_default="{}")
     index_status: Mapped[IndexStatus] = mapped_column(
         # values_callable: persist the lowercase *values* ("pending"), not the

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Callable, Iterable, Sequence
 from datetime import datetime
 from uuid import UUID
@@ -29,8 +30,15 @@ logger = structlog.get_logger(__name__)
 # BackgroundTasks, a queue, ...) is the injecting caller's concern. The
 # enqueued `updated_at` is the document version observed at commit time —
 # the indexing pipeline's generation guard uses it to skip jobs that a
-# newer save has already superseded (see `rag/indexer.py`).
+# newer save has already superseded (see `rag/indexer.py`). Enqueues only
+# ever follow a real change: update_document's content-hash guard skips
+# byte-identical saves of already-indexed documents.
 ReindexEnqueuer = Callable[[UUID, datetime], None]
+
+
+def _content_hash(content: str) -> str:
+    """SHA-256 hex digest of the raw content (front matter included)."""
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
 def _normalize_tags(raw_tags: Iterable[str]) -> list[str]:
@@ -70,6 +78,7 @@ def _parse_front_matter(content: str, request_title: str | None) -> tuple[str, l
             "Invalid front matter: 'tags' must be a list of strings",
             details={"field": "tags"},
         )
+
     return resolved_title, _normalize_tags(raw_tags)
 
 
@@ -94,7 +103,12 @@ class DocumentService:
     async def create_document(self, payload: DocumentCreate) -> DocumentRead:
         """Persist a new document derived from its front matter."""
         title, tags = _parse_front_matter(payload.content, payload.title)
-        document = Document(title=title, content=payload.content, tags=tags)
+        document = Document(
+            title=title,
+            content=payload.content,
+            tags=tags,
+            content_hash=_content_hash(payload.content),
+        )
         document = await self._repo.create(document)
         await self._session.commit()
         logger.info("document_created", document_id=str(document.id), title=document.title)
@@ -139,27 +153,51 @@ class DocumentService:
     async def update_document(self, doc_id: UUID, payload: DocumentUpdate) -> DocumentRead:
         """Apply a partial update; content changes re-derive title and tags.
 
-        Any write resets `index_status` to PENDING — a changed document needs
-        re-indexing (title/tags feed the search index too, not just content).
+        A write reindexes (status reset to PENDING + enqueue) iff something
+        index-relevant changed OR the document is not DONE yet — re-saving a
+        pending/failed document is the retry path. The content-hash guard
+        skips byte-identical saves: content is unchanged when its SHA-256
+        matches the stored `content_hash` (a NULL hash — pre-backfill row —
+        counts as changed) AND the resolved title is unchanged (title feeds
+        the search index; tags are a pure function of content, so the hash
+        covers them) AND `index_status` is DONE.
         """
         document = await self._get_or_raise(doc_id)
+        reindex = True
+
         if payload.content is not None:
             title, tags = _parse_front_matter(payload.content, payload.title)
-            document.content = payload.content
-            document.title = title
-            document.tags = tags
+            new_hash = _content_hash(payload.content)
+            content_unchanged = document.content_hash == new_hash
+            title_unchanged = title == document.title
+            if content_unchanged and title_unchanged and document.index_status is IndexStatus.DONE:
+                reindex = False  # identical content and title on an indexed document
+            else:
+                document.content = payload.content
+                document.title = title
+                document.tags = tags
+                document.content_hash = new_hash
         elif payload.title is not None:
-            document.title = payload.title.strip() or "Untitled"
+            resolved_title = payload.title.strip() or "Untitled"
+            if resolved_title == document.title and document.index_status is IndexStatus.DONE:
+                reindex = False  # title-only touch that resolves to no change
+            else:
+                document.title = resolved_title
+        elif document.index_status is IndexStatus.DONE:
+            reindex = False  # empty payload cannot change an indexed document
 
-        document.index_status = IndexStatus.PENDING
+        if reindex:
+            document.index_status = IndexStatus.PENDING
         document = await self._repo.update(document)
         await self._session.commit()
         logger.info(
             "document_updated",
             document_id=str(document.id),
             title=document.title,
+            reindexed=reindex,
         )
-        self._enqueue_indexing(document.id, document.updated_at)
+        if reindex:
+            self._enqueue_indexing(document.id, document.updated_at)
         return DocumentRead.model_validate(document)
 
     async def delete_document(self, doc_id: UUID) -> None:
