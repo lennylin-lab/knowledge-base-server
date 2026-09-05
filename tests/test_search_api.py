@@ -21,8 +21,14 @@ from app.api.deps import (
 from app.core.exceptions import LLMProviderError
 from app.rag.retriever import Retriever
 from app.services.search import SearchService
-from corpus import KOTLIN_SECTION, neighbor_scripted_provider, seed_corpus
-from fakes import ScriptedEmbeddingProvider, hermetic_settings
+from corpus import (
+    KOTLIN_SECTION,
+    VECTOR_QUERY,
+    distant_scripted_provider,
+    neighbor_scripted_provider,
+    seed_corpus,
+)
+from fakes import GATES_OFF, ScriptedEmbeddingProvider, hermetic_settings
 
 ITEM_FIELDS = {
     "document_id",
@@ -33,6 +39,8 @@ ITEM_FIELDS = {
     "score",
     "es_rank",
     "vector_rank",
+    "es_score",
+    "vector_distance",
 }
 
 
@@ -62,13 +70,18 @@ def _override_search(world: SearchWorld, service: SearchService) -> None:
 
 @pytest.fixture
 async def search_client(hybrid_world: SearchWorld) -> AsyncIterator[AsyncClient]:
-    """ASGI client with the hybrid retriever wired onto test infra."""
+    """ASGI client with the hybrid retriever wired onto test infra.
+
+    Gates are disabled: these tests pin the pre-gates API contract (shape,
+    mode, ranks); gate behavior has its own tests below.
+    """
     service = SearchService(
         Retriever(
             session_factory=hybrid_world.session_factory,
             es_client=hybrid_world.es_client,
             embedding_provider=hybrid_world.provider,
             es_index=hybrid_world.es_index_name,
+            **GATES_OFF,
         )
     )
     _override_search(hybrid_world, service)
@@ -89,6 +102,34 @@ async def bm25_search_client(
             session_factory=session_factory,
             es_client=es_client,
             embedding_provider=None,
+            es_index=es_index_name,
+            **GATES_OFF,
+        )
+    )
+    app.dependency_overrides[get_search_service] = lambda: service
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        yield ac
+    app.dependency_overrides.clear()
+
+
+@pytest.fixture
+async def gated_search_client(
+    app, seed_indexed, session_factory, es_client, es_index_name
+) -> AsyncIterator[AsyncClient]:
+    """Retriever on constructor-default thresholds: every gate enabled.
+
+    The corpus is the distant-scripting world — both chunks share one
+    embedding while any unrelated query lands orthogonally (distance 1.0) —
+    so a weak query must come back EMPTY, not padded.
+    """
+    provider = distant_scripted_provider()
+    await seed_corpus(seed_indexed, provider)
+    service = SearchService(
+        Retriever(
+            session_factory=session_factory,
+            es_client=es_client,
+            embedding_provider=provider,
             es_index=es_index_name,
         )
     )
@@ -119,9 +160,33 @@ async def test_search_returns_200_with_hybrid_mode_and_full_hit_shape(search_cli
     assert top["score"] > 0
     assert top["es_rank"] == 1
     assert top["vector_rank"] == 1
+    assert top["es_score"] > 0  # the BM25 leg ranked it — its raw score surfaces
+    assert top["vector_distance"] is not None  # scripted neighbor: distance ~0
     assert items[1]["document_title"] == "Python Notes"
     assert items[1]["es_rank"] is None
     assert items[1]["vector_rank"] == 2
+    assert items[1]["es_score"] is None  # BM25 never ranked the python chunk
+    assert items[1]["vector_distance"] is not None
+
+
+@pytest.mark.db
+@pytest.mark.es
+async def test_search_returns_empty_items_for_unrelated_query_when_gates_enabled(
+    gated_search_client,
+):
+    with capture_logs() as logs:
+        resp = await gated_search_client.get("/api/v1/search", params={"q": VECTOR_QUERY})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["mode"] == "hybrid"
+    assert body["items"] == []  # empty beats noise, despite the default limit=10
+    executed = [entry for entry in logs if entry["event"] == "search_executed"]
+    assert len(executed) == 1
+    assert executed[0]["hit_count"] == 0
+    assert executed[0]["vector_gated"] == 2  # both KNN candidates beyond the ceiling
+    assert executed[0]["es_gated"] == 0
+    assert executed[0]["fused_gated"] == 0
 
 
 @pytest.mark.db

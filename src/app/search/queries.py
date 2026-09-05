@@ -13,13 +13,18 @@ from typing import Any
 _TITLE_BOOST = 2
 
 
-def bm25_chunk_query(q: str, *, size: int, tag: str | None = None) -> dict[str, Any]:
+def bm25_chunk_query(
+    q: str, *, size: int, tag: str | None = None, min_score: float = 0.0
+) -> dict[str, Any]:
     """Build the ES request for one BM25 leg.
 
     Multi-match over chunk text with a boosted title field, an optional
     `tags` keyword filter (a `filter` clause: applied without affecting BM25
     scoring), bounded `size`, and source retrieval disabled — ES is a ranking
-    index only, PG hydrates content (see `rag/retriever.py`).
+    index only, PG hydrates content (see `rag/retriever.py`). A positive
+    `min_score` prunes sub-threshold hits ES-side (the retriever re-checks
+    the same floor Python-side so gate behavior never depends on ES scoring
+    quirks); `0.0` (the default) omits it entirely.
     """
     boolean: dict[str, Any] = {
         "must": [
@@ -33,8 +38,11 @@ def bm25_chunk_query(q: str, *, size: int, tag: str | None = None) -> dict[str, 
     }
     if tag is not None:
         boolean["filter"] = [{"term": {"tags": tag}}]
-    return {
+    body: dict[str, Any] = {
         "size": size,
         "query": {"bool": boolean},
         "source": False,
     }
+    if min_score > 0:
+        body["min_score"] = min_score
+    return body

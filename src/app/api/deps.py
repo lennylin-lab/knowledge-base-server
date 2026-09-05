@@ -147,13 +147,21 @@ def embedding_provider_from_settings(settings: Settings) -> OpenAIEmbeddingProvi
 
 
 def _build_retriever(settings: Settings, provider: OpenAIEmbeddingProvider | None) -> Retriever:
-    """Shared retriever wiring for every retrieval-backed service."""
+    """Shared retriever wiring for every retrieval-backed service.
+
+    The relevance gate thresholds flow from Settings so operators can tune
+    (or disable — see the sentinels in `core/config.py`) without code changes;
+    every retrieval-backed consumer (search, chat agents) shares them.
+    """
     session_factory: async_sessionmaker[AsyncSession] = SessionFactory
     return Retriever(
         session_factory=session_factory,
         es_client=get_shared_es_client(),
         embedding_provider=provider,
         es_index=settings.ES_INDEX,
+        bm25_min_score=settings.SEARCH_BM25_MIN_SCORE,
+        vector_max_distance=settings.SEARCH_VECTOR_MAX_DISTANCE,
+        rrf_min_relative=settings.SEARCH_RRF_MIN_RELATIVE,
     )
 
 

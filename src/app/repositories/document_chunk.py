@@ -14,13 +14,18 @@ from app.models.document_chunk import DocumentChunk
 
 
 class ChunkRow(NamedTuple):
-    """A chunk hydrated with its live document's metadata (retrieval read model)."""
+    """A chunk hydrated with its live document's metadata (retrieval read model).
+
+    `distance` is the pgvector cosine distance and is set only by the vector
+    search read (`search_similar`); hydration reads leave it `None`.
+    """
 
     document_id: UUID
     chunk_index: int
     content: str
     document_title: str
     document_tags: list[str]
+    distance: float | None = None
 
 
 class NeighborDocumentRow(NamedTuple):
@@ -101,17 +106,22 @@ class DocumentChunkRepository:
     ) -> Sequence[ChunkRow]:
         """Vector leg: nearest chunks of live documents, hydrated inline.
 
-        Ordering delegates to pgvector cosine distance (HNSW-backed). The
-        optional tag filter mirrors the ES leg's term filter so fused ranks
-        are tag-consistent across both legs.
+        Ordering delegates to pgvector cosine distance (HNSW-backed); each row
+        carries that distance so the retriever's relevance gate can drop
+        matches beyond the configured ceiling. The optional tag filter mirrors
+        the ES leg's term filter so fused ranks are tag-consistent across both
+        legs.
         """
-        stmt = _LIVE_CHUNK_SELECT.order_by(
-            DocumentChunk.embedding.cosine_distance(embedding)
-        ).limit(limit)
+        distance = DocumentChunk.embedding.cosine_distance(embedding)
+        stmt = (
+            _LIVE_CHUNK_SELECT.add_columns(distance.label("distance"))
+            .order_by(distance)
+            .limit(limit)
+        )
         if tag is not None:
             stmt = stmt.where(literal(tag) == any_(Document.tags))
         rows = (await self._session.execute(stmt)).all()
-        return [_as_chunk_row(row) for row in rows]
+        return [_as_chunk_row(row, distance=row.distance) for row in rows]
 
     async def get_live_chunks(
         self, keys: Sequence[tuple[UUID, int]]
@@ -188,7 +198,7 @@ class DocumentChunkRepository:
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
 
-def _as_chunk_row(row: Row[Any]) -> ChunkRow:
+def _as_chunk_row(row: Row[Any], *, distance: float | None = None) -> ChunkRow:
     """Map one joined row onto the `ChunkRow` read model."""
     return ChunkRow(
         document_id=row.document_id,
@@ -196,4 +206,5 @@ def _as_chunk_row(row: Row[Any]) -> ChunkRow:
         content=row.content,
         document_title=row.document_title,
         document_tags=list(row.document_tags),
+        distance=distance,
     )

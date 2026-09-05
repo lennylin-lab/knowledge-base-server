@@ -12,7 +12,9 @@ class SearchHit(BaseModel):
     """One fused chunk hit with its owning document's metadata.
 
     `score` is the RRF fused score; per-leg ranks are 1-based and `None` when
-    that leg did not return the chunk.
+    that leg did not return the chunk. `es_score`/`vector_distance` carry the
+    raw per-leg relevance signal when that leg ranked the chunk (`None`
+    otherwise) so clients and tests can audit the retriever's relevance gates.
     """
 
     document_id: UUID
@@ -23,6 +25,8 @@ class SearchHit(BaseModel):
     score: float
     es_rank: int | None
     vector_rank: int | None
+    es_score: float | None = None
+    vector_distance: float | None = None
 
 
 class SearchResponse(BaseModel):

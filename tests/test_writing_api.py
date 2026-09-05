@@ -88,6 +88,8 @@ async def test_suggest_streams_sse_content_type_and_event_sequence(writing_clien
         "score",
         "es_rank",
         "vector_rank",
+        "es_score",
+        "vector_distance",
     }
 
     answer = "".join(data["text"] for name, data in events if name == "answer_delta")

@@ -47,6 +47,8 @@ def to_search_hit(chunk: RetrievedChunk) -> SearchHit:
         score=chunk.score,
         es_rank=chunk.es_rank,
         vector_rank=chunk.vector_rank,
+        es_score=chunk.es_score,
+        vector_distance=chunk.vector_distance,
     )
 
 

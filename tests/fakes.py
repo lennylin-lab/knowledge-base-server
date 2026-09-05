@@ -36,6 +36,16 @@ def basis_vector(index: int, dim: int = EMBEDDING_DIM) -> list[float]:
     return vector
 
 
+# Retriever constructor kwargs turning every relevance gate off (the
+# pre-gates behavior) for tests that exercise legacy retrieval semantics
+# rather than the gates themselves.
+GATES_OFF: dict[str, float] = {
+    "bm25_min_score": 0.0,
+    "vector_max_distance": 2.0,
+    "rrf_min_relative": 0.0,
+}
+
+
 class FakeEmbeddingProvider:
     """Deterministic offline stand-in: hash-seeded, unit-norm vectors.
 

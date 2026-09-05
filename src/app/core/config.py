@@ -63,6 +63,20 @@ class Settings(BaseSettings):
     INDEX_JOB_MAX_TRIES: int = 3
     INDEX_JOB_RETRY_MIN_DELAY_S: int = 5
 
+    # --- search relevance gates ---
+    # Quality gates inside the hybrid retriever (rag/retriever.py): weak matches
+    # are dropped instead of padding results — empty beats noise on small
+    # corpora. Defaults mirror the Retriever constructor constants; keep the
+    # two in sync (guarded by a unit test).
+    # BM25 leg: drop ES hits with `_score` below this; `0.0` disables.
+    SEARCH_BM25_MIN_SCORE: float = 1.0
+    # Vector leg: drop pgvector hits with cosine distance (range 0..2) above
+    # this; `2.0` (or anything greater) disables.
+    SEARCH_VECTOR_MAX_DISTANCE: float = 0.45
+    # Post-fusion: keep a hit only when its fused score is at least this
+    # fraction of the top hit's score; `0.0` disables.
+    SEARCH_RRF_MIN_RELATIVE: float = 0.35
+
     # --- observability ---
     LOG_LEVEL: str = "INFO"
     LOG_FORMAT: str = "console"  # "console" | "json"

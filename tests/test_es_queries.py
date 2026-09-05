@@ -45,3 +45,12 @@ def test_title_field_is_boosted_over_chunk_text():
 def test_size_is_passed_through_untouched():
     assert bm25_chunk_query("x", size=1)["size"] == 1
     assert bm25_chunk_query("x", size=50)["size"] == 50
+
+
+def test_min_score_enters_body_only_when_positive():
+    assert "min_score" not in bm25_chunk_query("x", size=1)
+    assert "min_score" not in bm25_chunk_query("x", size=1, min_score=0.0)
+
+    body = bm25_chunk_query("x", size=1, min_score=1.0)
+
+    assert body["min_score"] == 1.0

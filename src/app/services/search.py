@@ -23,6 +23,9 @@ class SearchService:
 
         The query text never reaches the logs — queries may contain sensitive
         phrasing, so the event carries `q_length` only (see logging spec).
+        The `*_gated` counters expose how many candidates each relevance gate
+        dropped (raw leg sizes minus survivors; the relative floor's drops
+        are `fused_gated`) — counts only, never query text.
         """
         started = time.perf_counter()
         normalized_tag = tag.strip().lower() if tag else None
@@ -39,6 +42,8 @@ class SearchService:
                     score=item.score,
                     es_rank=item.es_rank,
                     vector_rank=item.vector_rank,
+                    es_score=item.es_score,
+                    vector_distance=item.vector_distance,
                 )
                 for item in outcome.items
             ],
@@ -52,6 +57,9 @@ class SearchService:
             hit_count=len(response.items),
             es_hits=outcome.es_hits,
             vector_hits=outcome.vector_hits,
+            es_gated=outcome.es_gated,
+            vector_gated=outcome.vector_gated,
+            fused_gated=outcome.fused_gated,
             latency_ms=round((time.perf_counter() - started) * 1000, 2),
         )
         return response

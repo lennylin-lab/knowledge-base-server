@@ -34,6 +34,19 @@ def neighbor_scripted_provider() -> ScriptedEmbeddingProvider:
     return provider
 
 
+def distant_scripted_provider() -> ScriptedEmbeddingProvider:
+    """Both chunks share E0; every unmapped text (any unrelated query) gets E1.
+
+    The gate-test world: an unrelated query's embedding sits at cosine
+    distance 1.0 from both chunks, so the vector relevance gate drops the
+    whole leg — nothing may pad the results.
+    """
+    provider = ScriptedEmbeddingProvider(default=E1)
+    provider.vectors[KOTLIN_SECTION] = E0
+    provider.vectors[PYTHON_SECTION] = E0
+    return provider
+
+
 async def seed_corpus(
     seeder: Callable[[ScriptedEmbeddingProvider, str], Awaitable[UUID]],
     provider: ScriptedEmbeddingProvider,

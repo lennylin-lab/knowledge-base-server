@@ -91,6 +91,8 @@ async def test_chat_streams_sse_content_type_and_event_sequence(chat_client):
         "score",
         "es_rank",
         "vector_rank",
+        "es_score",
+        "vector_distance",
     }
 
     answer = "".join(data["text"] for name, data in events if name == "answer_delta")

@@ -4,6 +4,11 @@ Rank Fusion.
 ES returns ranked chunk keys only (source retrieval disabled); PostgreSQL is
 the single source of truth for visibility and content — hydration joins live
 documents, so soft-deleted (but still-indexed) chunks can never surface.
+
+Relevance gates keep weak matches from padding the results: each leg drops
+hits failing an absolute threshold before fusion (a BM25 `_score` floor, a
+cosine-distance ceiling), and the fused ranking applies a relative floor
+against the top hit — empty results beat noise on small corpora.
 """
 
 from __future__ import annotations
@@ -32,6 +37,13 @@ logger = structlog.get_logger(__name__)
 RRF_K = 60
 # Per-leg candidate pool entering fusion; also bounds the hydration IN-list.
 CANDIDATE_POOL = 50
+
+# Gate defaults, mirroring the Settings fields in core/config.py (a drift-guard
+# unit test keeps the two in sync). Wiring always injects the configured
+# values (api/deps.py); these cover direct construction (tests, tooling).
+DEFAULT_BM25_MIN_SCORE = 1.0
+DEFAULT_VECTOR_MAX_DISTANCE = 0.45
+DEFAULT_RRF_MIN_RELATIVE = 0.35
 
 SearchMode = Literal["hybrid", "bm25"]
 
@@ -94,9 +106,53 @@ def fuse_rrf(
     return sorted(hits, key=sort_key)
 
 
+def filter_es_hits(hits: Sequence[EsChunkHit], *, min_score: float) -> list[EsChunkHit]:
+    """BM25 gate: drop hits whose ES `_score` is below the absolute floor.
+
+    `min_score <= 0` disables the gate (every hit passes).
+    """
+    if min_score <= 0:
+        return list(hits)
+    return [hit for hit in hits if hit.score >= min_score]
+
+
+def filter_vector_rows(rows: Sequence[ChunkRow], *, max_distance: float) -> list[ChunkRow]:
+    """Vector gate: drop rows whose cosine distance exceeds the ceiling.
+
+    `max_distance >= 2.0` — cosine distance's maximum — disables the gate.
+    Rows without a measured distance pass: the gate judges distance, and
+    `search_similar` always measures one for the vector leg.
+    """
+    if max_distance >= 2.0:
+        return list(rows)
+    return [row for row in rows if row.distance is None or row.distance <= max_distance]
+
+
+def apply_relative_score_floor(hits: Sequence[FusedHit], *, min_relative: float) -> list[FusedHit]:
+    """Relative gate: keep hits scoring at least `min_relative` of the top hit.
+
+    `hits` must be RRF-ordered (score desc, as `fuse_rrf` returns); the top
+    hit always survives, so a lone result is never dropped. `min_relative <=
+    0` disables the gate; a non-positive top score keeps nothing — there is
+    no meaningful fraction of it.
+    """
+    if not hits or min_relative <= 0:
+        return list(hits)
+    top = hits[0].score
+    if top <= 0:
+        return []
+    cutoff = top * min_relative
+    return [hit for hit in hits if hit.score >= cutoff]
+
+
 @dataclass(frozen=True)
 class RetrievedChunk:
-    """A fused hit hydrated with chunk text and live-document metadata."""
+    """A fused hit hydrated with chunk text and live-document metadata.
+
+    `es_score`/`vector_distance` carry the raw per-leg signal when that leg
+    ranked the chunk (`None` otherwise) so callers and tests can audit the
+    relevance gates; `score` stays the RRF fused score.
+    """
 
     key: ChunkKey
     score: float
@@ -105,16 +161,27 @@ class RetrievedChunk:
     content: str
     document_title: str
     document_tags: list[str]
+    es_score: float | None = None
+    vector_distance: float | None = None
 
 
 @dataclass(frozen=True)
 class SearchOutcome:
-    """Retrieval result before schema mapping."""
+    """Retrieval result before schema mapping.
+
+    `es_hits`/`vector_hits` are the raw leg sizes before their gates; the
+    `*_gated` counters record how many candidates each gate dropped — the
+    audit trail for the `search_executed` event (which never carries query
+    text).
+    """
 
     mode: SearchMode
     items: list[RetrievedChunk]
     es_hits: int
     vector_hits: int
+    es_gated: int = 0
+    vector_gated: int = 0
+    fused_gated: int = 0
 
 
 @dataclass(frozen=True)
@@ -126,7 +193,12 @@ class _VectorLeg:
 
 
 class Retriever:
-    """Hybrid retrieval over one ES index and one PG database."""
+    """Hybrid retrieval over one ES index and one PG database.
+
+    The relevance thresholds arrive constructor-injected (Settings values via
+    `api/deps.py`); defaults cover direct construction and mirror the
+    Settings defaults.
+    """
 
     def __init__(
         self,
@@ -135,22 +207,34 @@ class Retriever:
         es_client: AsyncElasticsearch,
         embedding_provider: EmbeddingProvider | None,
         es_index: str,
+        bm25_min_score: float = DEFAULT_BM25_MIN_SCORE,
+        vector_max_distance: float = DEFAULT_VECTOR_MAX_DISTANCE,
+        rrf_min_relative: float = DEFAULT_RRF_MIN_RELATIVE,
     ) -> None:
         self._session_factory = session_factory
         self._es_client = es_client
         self._embedding_provider = embedding_provider
         self._es_index = es_index
+        self._bm25_min_score = bm25_min_score
+        self._vector_max_distance = vector_max_distance
+        self._rrf_min_relative = rrf_min_relative
 
     async def retrieve(
         self, query: str, *, limit: int = 10, tag: str | None = None
     ) -> SearchOutcome:
-        """Run both legs concurrently, fuse with RRF, hydrate the top hits.
+        """Run both legs concurrently, gate, fuse with RRF, hydrate the top hits.
 
         The tag filter applies to BOTH legs so fused ranks are tag-consistent.
         `mode` is `"hybrid"` when the vector leg ran, `"bm25"` when it could
         not (no provider configured, or the embed call failed mid-search).
+
+        Relevance gates sit between the legs and the response: an absolute
+        floor per leg (BM25 `_score`, cosine distance — applied only to legs
+        that actually ran), then a relative floor on the fused scores BEFORE
+        the `limit` slice so a weak tail never consumes slots. When nothing
+        survives, `items` is empty by design — empty beats noise.
         """
-        body = bm25_chunk_query(query, size=CANDIDATE_POOL, tag=tag)
+        body = bm25_chunk_query(query, size=CANDIDATE_POOL, tag=tag, min_score=self._bm25_min_score)
         es_result, vector_result = await asyncio.gather(
             search_chunks(self._es_client, index=self._es_index, body=body),
             self._vector_leg(query, tag=tag),
@@ -166,12 +250,23 @@ class Retriever:
         es_hits: list[EsChunkHit] = es_result
         vector_leg: _VectorLeg = vector_result
 
-        es_keys = [ChunkKey(hit.document_id, hit.chunk_index) for hit in es_hits]
-        vector_keys = [ChunkKey(row.document_id, row.chunk_index) for row in vector_leg.rows]
-        top = fuse_rrf(es_keys, vector_keys)[:limit]
+        # Absolute gates, one per leg (a leg that did not run has nothing to
+        # gate). ES already pruned at `min_score`; the Python-side re-check
+        # keeps the gate authoritative regardless of ES scoring quirks.
+        kept_es_hits = filter_es_hits(es_hits, min_score=self._bm25_min_score)
+        kept_vector_rows = filter_vector_rows(
+            vector_leg.rows, max_distance=self._vector_max_distance
+        )
+
+        es_keys = [ChunkKey(hit.document_id, hit.chunk_index) for hit in kept_es_hits]
+        vector_keys = [ChunkKey(row.document_id, row.chunk_index) for row in kept_vector_rows]
+        fused = fuse_rrf(es_keys, vector_keys)
+        floored = apply_relative_score_floor(fused, min_relative=self._rrf_min_relative)
+        top = floored[:limit]
+        es_scores = {ChunkKey(hit.document_id, hit.chunk_index): hit.score for hit in kept_es_hits}
 
         hydrated: dict[tuple[UUID, int], ChunkRow] = {
-            (row.document_id, row.chunk_index): row for row in vector_leg.rows
+            (row.document_id, row.chunk_index): row for row in kept_vector_rows
         }
         missing = [hit.key for hit in top if hit.key not in hydrated]
         if missing:
@@ -190,6 +285,8 @@ class Retriever:
                     score=hit.score,
                     es_rank=hit.es_rank,
                     vector_rank=hit.vector_rank,
+                    es_score=es_scores.get(hit.key),
+                    vector_distance=row.distance,
                     content=row.content,
                     document_title=row.document_title,
                     document_tags=row.document_tags,
@@ -201,6 +298,9 @@ class Retriever:
             items=items,
             es_hits=len(es_hits),
             vector_hits=len(vector_leg.rows),
+            es_gated=len(es_hits) - len(kept_es_hits),
+            vector_gated=len(vector_leg.rows) - len(kept_vector_rows),
+            fused_gated=len(fused) - len(floored),
         )
 
     async def _vector_leg(self, query: str, *, tag: str | None) -> _VectorLeg:
