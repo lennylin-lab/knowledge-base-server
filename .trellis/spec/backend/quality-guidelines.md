@@ -124,9 +124,11 @@ that reproduces the bug first.
 > failure mine?": run the failing tests in a HEAD worktree
 > (`git worktree add /tmp/x HEAD`) with the same env — an identical failure
 > there means pre-existing/environmental; never `git stash` on a moving
-> tree. Follow-up candidate: the `indexing_client` fixture should pin
-> BackgroundTasks mode (or probe-skip) so e2e tests never depend on the
-> queue transport.
+> tree. Fixed (2026-09-05): the `indexing_client` fixture pins the
+> BackgroundTasks transport by patching `app.api.deps.get_settings` to an
+> empty-`REDIS_URL` settings copy, so e2e tests never depend on the queue
+> transport. Any future fixture that exercises the real deps write path
+> needs the same pin.
 
 ## Review Checklist (apply before requesting/merging)
 
