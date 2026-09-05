@@ -1,0 +1,3 @@
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "Gates-in-rag contract entry (2026-09-05) — rescue helper must live in rag/retriever.py; Settings injection pattern via deps"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "ChunkRow distance projection shape the rescue gate consumes"}
+{"file": ".trellis/tasks/archive/2026-09/09-05-search-relevance-gates/design.md", "reason": "Baseline gate architecture being extended (leg gates, relative floor, defaults rationale)"}

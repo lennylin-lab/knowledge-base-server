@@ -1,0 +1,5 @@
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Offline AI test strategy vs live_llm-marked probe; verdict procedure for environmental failures"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "search_executed extension rules — vector_rescued counter, no query text"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Degradation paths must remain unchanged when rescue alters vector-leg admission"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "Verify rescue consumes repository distance projection without layering violations"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "Verify rescue logic stays in rag/retriever.py per the gates-in-rag contract"}
