@@ -43,8 +43,8 @@ packages = ["src/app"]
 target-version = "py312"
 line-length = 100
 src = ["src", "tests"]
-# Agent-harness scripts (.claude/.codex/.agents/...) are tooling, not project code.
-extend-exclude = [".claude", ".codex", ".agents", ".cursor", ".trellis"]
+# Agent-harness scripts (.claude/.codex/.agents/.zcode/...) are tooling, not project code.
+extend-exclude = [".claude", ".codex", ".agents", ".cursor", ".trellis", ".zcode"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
