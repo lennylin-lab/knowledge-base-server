@@ -27,3 +27,25 @@ Added documents.content_hash (sha256 hex, NULL=changed) with migration 0006 incl
 ### Status
 
 [OK] **Completed**
+
+
+## Session 2: Search relevance quality gates
+
+**Date**: 2026-09-05
+**Task**: Search relevance quality gates
+**Branch**: `main`
+
+### Summary
+
+Implemented BM25/vector/relative RRF relevance gates in rag/retriever.py (empty-over-noise), Settings thresholds KB_SEARCH_* with disable sentinels wired via deps into search+chat+writing, SearchHit es_score/vector_distance fields, search_executed gate counters; 14 offline gate unit tests + retriever/API gate integration tests; check verdict PASS, all 8 PRD ACs evidenced; spec contract captured in directory-structure.md and logging-guidelines.md.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `09e2c63` | (see git log) |
+| `fb77ee4` | (see git log) |
+
+### Status
+
+[OK] **Completed**
