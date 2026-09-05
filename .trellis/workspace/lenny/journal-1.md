@@ -49,3 +49,25 @@ Implemented BM25/vector/relative RRF relevance gates in rag/retriever.py (empty-
 ### Status
 
 [OK] **Completed**
+
+
+## Session 3: Short-query vector gate calibration
+
+**Date**: 2026-09-06
+**Task**: Short-query vector gate calibration
+**Branch**: `main`
+
+### Summary
+
+Two-tier head-rescue vector gate (rescue only when the 0.45 ceiling empties the leg; window min(leg_min+0.15, 0.85)) restores short-keyword semantic recall while rare-term legs stay ES-dominated; SEARCH_MAX_QUERY_LENGTH=256 single-point truncation removes the ES clause-limit 502 for long CJK queries; live_llm probe calibrated defaults against Qwen3-Embedding-4B (CJK heads 0.48-0.61 vs long-query 0.22); vector_rescued counter in search_executed; 383 tests green, check PASS.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `bba8dad` | (see git log) |
+| `77c8693` | (see git log) |
+
+### Status
+
+[OK] **Completed**
