@@ -119,7 +119,19 @@ Key points:
   of top fused score; `0.0` disables). Pipeline order: leg gates →
   `fuse_rrf` → relative floor (`apply_relative_score_floor`) → `[:limit]`;
   when nothing survives, return `items=[]` (empty over noise — never pad
-  to `limit`). `SearchHit` carries optional `es_score` / `vector_distance`
+  to `limit`). The vector gate is two-tier (2026-09-05): when the ceiling
+  empties the leg ONLY, a head-rescue tier admits rows within
+  `min(leg_min + SEARCH_VECTOR_RESCUE_MARGIN, SEARCH_VECTOR_RESCUE_MAX_DISTANCE)`
+  (defaults 0.15 / 0.85; `<= 0` on either disables rescue) — short-keyword
+  query embeddings sit systematically farther from long chunks than long
+  questions (measured: pure-CJK heads 0.48-0.61 vs long-query 0.22), and
+  the cap keeps rare-term legs silent; `tests/test_vector_distance_probe.py`
+  (`live_llm`, excluded from the default run) recalibrates the window.
+  `retrieve()` also truncates the query once at entry to
+  `SEARCH_MAX_QUERY_LENGTH` (default 256, `<= 0` disables) — the single
+  enforcement point for API and agent tools; standard-analyzer CJK yields
+  ~1 token per char, so uncapped queries overflow Lucene's 1024 clause
+  limit and 502 the ES leg. `SearchHit` carries optional `es_score` / `vector_distance`
   (None when that leg did not rank the chunk); `Retriever` thresholds are
   raw-leg absolute scores, never RRF rank-derived scores. Routers,
   services, and agents consume the gated retriever as-is — no re-filtering

@@ -100,11 +100,14 @@ logger.exception("embedding_failed", document_id=str(doc_id))  # inside except
   input, don't cargo-cult chat's field.
 - **Retrieval** — `search_executed` (service level, one per search) with
   `q_length` (**never the query text** — queries may contain sensitive
-  phrasing), `limit`, `tag`, `mode` (`hybrid`/`bm25`), `hit_count`,
-  `es_hits`, `vector_hits`, `latency_ms`, and the relevance-gate drop
+  phrasing; it stays the RAW caller-provided length even though the
+  retriever truncates internally), `limit`, `tag`, `mode`
+  (`hybrid`/`bm25`), `hit_count`,
+  `es_hits`, `vector_hits`, `latency_ms`, the relevance-gate drop
   counters `es_gated` / `vector_gated` / `fused_gated` (drops per gate
   stage; survivors are derivable as raw leg size − gated, so no
-  before/after pairs). Vector-leg problems are
+  before/after pairs), and `vector_rescued` (rows admitted only by the
+  head-rescue tier). Vector-leg problems are
   warnings, not errors: `vector_search_disabled` (no API key, once per
   process at wiring time) and `vector_search_degraded` (mid-search
   provider failure — `error_class` only, search continues BM25-only).
