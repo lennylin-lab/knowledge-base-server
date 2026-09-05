@@ -13,6 +13,7 @@ from uuid import uuid4
 import httpx
 import openai
 import pytest
+from pydantic_ai.exceptions import ModelHTTPError
 from pydantic_ai.messages import ModelMessage, ModelResponse
 from pydantic_ai.models.function import FunctionModel
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -199,6 +200,58 @@ async def test_rate_limit_failure_maps_to_llm_rate_limited(db_session, session_f
     failed = next(entry for entry in logs if entry["event"] == "agent_run_failed")
     assert failed["outcome"] == "rate_limited"
     assert failed["error_class"] == "RateLimitError"
+
+
+async def test_model_http_error_maps_to_llm_provider_error(db_session, session_factory):
+    """What the production model raises: pydantic-ai wraps provider HTTP
+    failures in ModelHTTPError, which must reach the taxonomy (not the
+    generic 500) — regression for the FunctionModel-only blind spot."""
+    created = await make_document(db_session, SHORT_DOC)
+
+    async def failing(messages: list[ModelMessage], info: object) -> ModelResponse:
+        raise ModelHTTPError(
+            status_code=503,
+            model_name="failing",
+            body={"message": "upstream exploded"},
+        )
+
+    service = SummarizeService(
+        FunctionModel(failing, model_name="failing"),
+        MODEL_NAME,
+        session_factory=session_factory,
+    )
+
+    with capture_logs() as logs, pytest.raises(LLMProviderError) as exc_info:
+        await service.summarize_document(created.id)
+
+    # Provider internals stay out of the response; they went to logs only.
+    assert "upstream exploded" not in exc_info.value.message
+    failed = next(entry for entry in logs if entry["event"] == "agent_run_failed")
+    assert failed["outcome"] == "llm_provider_error"
+    assert failed["error_class"] == "ModelHTTPError"
+    assert not any(entry["event"] == "agent_run_finished" for entry in logs)
+
+
+async def test_model_http_429_maps_to_llm_rate_limited(db_session, session_factory):
+    created = await make_document(db_session, SHORT_DOC)
+
+    async def failing(messages: list[ModelMessage], info: object) -> ModelResponse:
+        raise ModelHTTPError(status_code=429, model_name="failing", body=None)
+
+    service = SummarizeService(
+        FunctionModel(failing, model_name="failing"),
+        MODEL_NAME,
+        session_factory=session_factory,
+    )
+
+    with capture_logs() as logs, pytest.raises(LLMRateLimitedError) as exc_info:
+        await service.summarize_document(created.id)
+
+    # 429 must win over the generic provider-error branch, message stays generic.
+    assert exc_info.value.message == "LLM provider rate limit exceeded"
+    failed = next(entry for entry in logs if entry["event"] == "agent_run_failed")
+    assert failed["outcome"] == "rate_limited"
+    assert failed["error_class"] == "ModelHTTPError"
 
 
 async def test_front_matter_only_document_summarizes_raw_content_in_one_pass(

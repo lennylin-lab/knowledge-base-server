@@ -24,6 +24,7 @@ from uuid import UUID, uuid4
 
 import openai
 import structlog
+from pydantic_ai.exceptions import ModelAPIError, ModelHTTPError
 from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
@@ -335,14 +336,23 @@ def _drain(pending: list[list[SearchHit]]) -> list[list[SearchHit]]:
 def _as_app_error(exc: Exception) -> AppError:
     """Map a streaming failure onto the error taxonomy for the error event.
 
-    Provider SDK exceptions surface as-is from the agent run (error-handling
-    spec) and are wrapped here; `AppError` subclasses (e.g. `SearchIndexError`
+    Provider failures surface from the agent run wrapped in pydantic-ai's own
+    types (`ModelHTTPError` for HTTP >= 400, `ModelAPIError` for
+    connection/timeout — the production model never lets raw SDK exceptions
+    through) or, on paths that bypass pydantic-ai, as raw SDK exceptions;
+    both are wrapped here. `AppError` subclasses (e.g. `SearchIndexError`
     raised inside the retrieval tool) already carry the right code/message.
     Unknown exceptions get the generic internal error — details go to logs,
     never to the stream.
     """
     if isinstance(exc, AppError):
         return exc
+    if isinstance(exc, ModelHTTPError):
+        if exc.status_code == 429:
+            return LLMRateLimitedError("LLM provider rate limit exceeded")
+        return LLMProviderError("LLM provider request failed")
+    if isinstance(exc, ModelAPIError):
+        return LLMProviderError("LLM provider request failed")
     if isinstance(exc, openai.RateLimitError):
         return LLMRateLimitedError("LLM provider rate limit exceeded")
     if isinstance(exc, openai.APIError):

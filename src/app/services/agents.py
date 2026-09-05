@@ -19,6 +19,7 @@ from uuid import UUID, uuid4
 
 import openai
 import structlog
+from pydantic_ai.exceptions import ModelAPIError, ModelHTTPError
 from pydantic_ai.models import Model
 from pydantic_ai.tools import Tool
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -182,9 +183,21 @@ def _as_app_error(exc: Exception) -> AppError:
     Chat converts the mapping into a terminal SSE event because its stream is
     already open; sync endpoints re-raise instead so the shared handler
     returns the matching HTTP envelope. Details stay in logs either way.
+
+    The production model (OpenAIChatModel) wraps provider SDK failures in
+    pydantic-ai's own types before a service ever sees them: HTTP >= 400
+    becomes `ModelHTTPError`, connection/timeout becomes `ModelAPIError` —
+    so the taxonomy keys off the wrapped status, and the raw-SDK branches
+    below only serve paths that bypass pydantic-ai (FunctionModel tests).
     """
     if isinstance(exc, AppError):
         return exc
+    if isinstance(exc, ModelHTTPError):
+        if exc.status_code == 429:
+            return LLMRateLimitedError("LLM provider rate limit exceeded")
+        return LLMProviderError("LLM provider request failed")
+    if isinstance(exc, ModelAPIError):
+        return LLMProviderError("LLM provider request failed")
     if isinstance(exc, openai.RateLimitError):
         return LLMRateLimitedError("LLM provider rate limit exceeded")
     if isinstance(exc, openai.APIError):

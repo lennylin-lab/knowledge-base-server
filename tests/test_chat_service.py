@@ -16,6 +16,7 @@ import httpx
 import openai
 import pytest
 import structlog
+from pydantic_ai.exceptions import ModelHTTPError
 from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
@@ -245,6 +246,46 @@ async def test_provider_rate_limit_maps_to_rate_limited_error_event():
         scripted_chat_model(
             answer_parts=["never"],
             fail_during_answer=rate_limited,
+            fail_after_parts=0,
+        ),
+        mode="hybrid",
+    )
+
+    events = await _collect(service, QUESTION)
+
+    error = events[-1]
+    assert isinstance(error, ErrorEvent)
+    assert error.code == "rate_limited"
+
+
+async def test_model_http_error_maps_to_provider_error_event():
+    """What the production model raises: pydantic-ai wraps provider HTTP
+    failures in ModelHTTPError, which must reach the taxonomy (not the
+    generic internal error) — regression for the FunctionModel-only blind spot."""
+    service = ChatService(
+        StubRetriever(),
+        scripted_chat_model(
+            answer_parts=["never"],
+            fail_during_answer=ModelHTTPError(status_code=503, model_name="failing", body=None),
+            fail_after_parts=0,
+        ),
+        mode="hybrid",
+    )
+
+    events = await _collect(service, QUESTION)
+
+    error = events[-1]
+    assert isinstance(error, ErrorEvent)
+    assert error.code == "llm_provider_error"
+    assert not any(isinstance(event, DoneEvent) for event in events)
+
+
+async def test_model_http_429_maps_to_rate_limited_error_event():
+    service = ChatService(
+        StubRetriever(),
+        scripted_chat_model(
+            answer_parts=["never"],
+            fail_during_answer=ModelHTTPError(status_code=429, model_name="failing", body=None),
             fail_after_parts=0,
         ),
         mode="hybrid",
