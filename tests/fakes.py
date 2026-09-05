@@ -36,6 +36,19 @@ def basis_vector(index: int, dim: int = EMBEDDING_DIM) -> list[float]:
     return vector
 
 
+def vector_at_distance(base: list[float], other: list[float], distance: float) -> list[float]:
+    """Unit vector at exactly `distance` cosine from `base`, in the plane of
+    `base` and `other` (both unit-norm and orthogonal).
+
+    Lets scripted worlds place a query at a precise gate-relevant distance
+    from the corpus vectors without disturbing orthogonal defaults: the
+    result is `(1 - distance) * base + sqrt(1 - (1 - distance)**2) * other`.
+    """
+    cos = 1.0 - distance
+    sin = math.sqrt(max(0.0, 1.0 - cos * cos))
+    return [cos * b + sin * o for b, o in zip(base, other, strict=True)]
+
+
 # Retriever constructor kwargs turning every relevance gate off (the
 # pre-gates behavior) for tests that exercise legacy retrieval semantics
 # rather than the gates themselves.

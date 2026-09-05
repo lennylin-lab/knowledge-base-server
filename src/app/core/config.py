@@ -73,9 +73,25 @@ class Settings(BaseSettings):
     # Vector leg: drop pgvector hits with cosine distance (range 0..2) above
     # this; `2.0` (or anything greater) disables.
     SEARCH_VECTOR_MAX_DISTANCE: float = 0.45
+    # Vector leg head rescue: ONLY when the ceiling above empties the leg,
+    # rows within `min(leg_min + margin, rescue_max_distance)` are admitted to
+    # fusion. Short keyword queries sit systematically farther from long
+    # chunks than long natural-language queries, so the absolute ceiling can
+    # silence the whole leg; the rescue window (anchored to the leg's own
+    # minimum) restores that recall while the cap keeps a hard noise floor —
+    # a leg whose minimum distance exceeds it rescues nothing. Either value
+    # `<= 0` disables rescue entirely (exact single-tier behavior).
+    SEARCH_VECTOR_RESCUE_MARGIN: float = 0.15
+    SEARCH_VECTOR_RESCUE_MAX_DISTANCE: float = 0.85
     # Post-fusion: keep a hit only when its fused score is at least this
     # fraction of the top hit's score; `0.0` disables.
     SEARCH_RRF_MIN_RELATIVE: float = 0.35
+    # Query length cap: `retrieve()` truncates over-long queries to this many
+    # characters before any leg runs — the single enforcement point for the
+    # API and the agent tools (standard-analyzer CJK yields ~1 token per
+    # char, so a multi-thousand-char query overflows Lucene's clause limit
+    # and 502s the ES leg). `<= 0` disables.
+    SEARCH_MAX_QUERY_LENGTH: int = 256
 
     # --- observability ---
     LOG_LEVEL: str = "INFO"

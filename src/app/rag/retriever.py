@@ -8,7 +8,11 @@ documents, so soft-deleted (but still-indexed) chunks can never surface.
 Relevance gates keep weak matches from padding the results: each leg drops
 hits failing an absolute threshold before fusion (a BM25 `_score` floor, a
 cosine-distance ceiling), and the fused ranking applies a relative floor
-against the top hit — empty results beat noise on small corpora.
+against the top hit — empty results beat noise on small corpora. When the
+vector ceiling empties its leg, a rescue tier admits that leg's clustered
+head (short keyword queries sit systematically farther from long chunks, so
+the absolute ceiling alone would silence semantic recall exactly when it is
+needed); the rescue cap keeps genuinely unrelated legs silent.
 """
 
 from __future__ import annotations
@@ -43,7 +47,10 @@ CANDIDATE_POOL = 50
 # values (api/deps.py); these cover direct construction (tests, tooling).
 DEFAULT_BM25_MIN_SCORE = 1.0
 DEFAULT_VECTOR_MAX_DISTANCE = 0.45
+DEFAULT_VECTOR_RESCUE_MARGIN = 0.15
+DEFAULT_VECTOR_RESCUE_MAX_DISTANCE = 0.85
 DEFAULT_RRF_MIN_RELATIVE = 0.35
+DEFAULT_MAX_QUERY_LENGTH = 256
 
 SearchMode = Literal["hybrid", "bm25"]
 
@@ -128,6 +135,57 @@ def filter_vector_rows(rows: Sequence[ChunkRow], *, max_distance: float) -> list
     return [row for row in rows if row.distance is None or row.distance <= max_distance]
 
 
+def filter_vector_rows_with_rescue(
+    rows: Sequence[ChunkRow],
+    *,
+    max_distance: float,
+    rescue_margin: float,
+    rescue_max_distance: float,
+) -> tuple[list[ChunkRow], int]:
+    """Two-tier vector gate: the absolute ceiling plus a head-rescue tier.
+
+    The primary tier is `filter_vector_rows` exactly. Only when it empties
+    the leg (and rows exist) does the rescue tier admit rows within
+    `min(leg_min + rescue_margin, rescue_max_distance)` — the clustered head
+    of a leg shifted up wholesale — so short keyword queries keep semantic
+    recall without loosening the primary ceiling for everyone. The cap is
+    the noise floor: a leg whose minimum distance exceeds it rescues nothing
+    (rare-term keywords stay ES-dominated). `rescue_margin <= 0` or
+    `rescue_max_distance <= 0` disables rescue: behavior identical to the
+    single-tier gate. Returns the kept rows and how many were admitted ONLY
+    via the rescue tier (0 whenever the primary tier has survivors).
+    """
+    if max_distance >= 2.0:
+        return list(rows), 0
+    primary = [row for row in rows if row.distance is None or row.distance <= max_distance]
+    if primary or not rows:
+        return primary, 0
+    if rescue_margin <= 0 or rescue_max_distance <= 0:
+        return [], 0
+    # Every remaining row carries a measured distance: a None-distance row
+    # would have passed the primary tier fail-open and blocked this branch.
+    measured = [row.distance for row in rows if row.distance is not None]
+    if not measured:  # defensive; unreachable given the fail-open primary tier
+        return [], 0
+    window = min(min(measured) + rescue_margin, rescue_max_distance)
+    rescued = [row for row in rows if row.distance is not None and row.distance <= window]
+    return rescued, len(rescued)
+
+
+def truncate_query(query: str, *, max_length: int) -> str:
+    """Query length cap: the retriever's single enforcement point.
+
+    `max_length <= 0` disables the cap. Truncation — not rejection — is the
+    only behavior that can serve both the API and the agent tools, and the
+    bound keeps analyzed CJK queries far under Lucene's clause limit and
+    embedding providers' token limits. Callers logging `q_length` keep
+    seeing the raw caller-provided length; truncation is retriever-internal.
+    """
+    if 0 < max_length < len(query):
+        return query[:max_length]
+    return query
+
+
 def apply_relative_score_floor(hits: Sequence[FusedHit], *, min_relative: float) -> list[FusedHit]:
     """Relative gate: keep hits scoring at least `min_relative` of the top hit.
 
@@ -170,9 +228,9 @@ class SearchOutcome:
     """Retrieval result before schema mapping.
 
     `es_hits`/`vector_hits` are the raw leg sizes before their gates; the
-    `*_gated` counters record how many candidates each gate dropped — the
-    audit trail for the `search_executed` event (which never carries query
-    text).
+    `*_gated` counters record how many candidates each gate dropped, and
+    `vector_rescued` how many rows the rescue tier admitted — the audit
+    trail for the `search_executed` event (which never carries query text).
     """
 
     mode: SearchMode
@@ -182,6 +240,7 @@ class SearchOutcome:
     es_gated: int = 0
     vector_gated: int = 0
     fused_gated: int = 0
+    vector_rescued: int = 0
 
 
 @dataclass(frozen=True)
@@ -209,7 +268,10 @@ class Retriever:
         es_index: str,
         bm25_min_score: float = DEFAULT_BM25_MIN_SCORE,
         vector_max_distance: float = DEFAULT_VECTOR_MAX_DISTANCE,
+        vector_rescue_margin: float = DEFAULT_VECTOR_RESCUE_MARGIN,
+        vector_rescue_max_distance: float = DEFAULT_VECTOR_RESCUE_MAX_DISTANCE,
         rrf_min_relative: float = DEFAULT_RRF_MIN_RELATIVE,
+        max_query_length: int = DEFAULT_MAX_QUERY_LENGTH,
     ) -> None:
         self._session_factory = session_factory
         self._es_client = es_client
@@ -217,7 +279,10 @@ class Retriever:
         self._es_index = es_index
         self._bm25_min_score = bm25_min_score
         self._vector_max_distance = vector_max_distance
+        self._vector_rescue_margin = vector_rescue_margin
+        self._vector_rescue_max_distance = vector_rescue_max_distance
         self._rrf_min_relative = rrf_min_relative
+        self._max_query_length = max_query_length
 
     async def retrieve(
         self, query: str, *, limit: int = 10, tag: str | None = None
@@ -233,7 +298,15 @@ class Retriever:
         that actually ran), then a relative floor on the fused scores BEFORE
         the `limit` slice so a weak tail never consumes slots. When nothing
         survives, `items` is empty by design — empty beats noise.
+
+        The query length cap is enforced here, once, before any leg work: the
+        API and the agent tools share this single enforcement point, so an
+        over-long caller query reaches both legs as its truncated prefix
+        (standard-analyzer CJK turns a multi-thousand-char query into a
+        Lucene clause-limit failure). Callers logging `q_length` keep seeing
+        the raw caller-provided length — truncation is retriever-internal.
         """
+        query = truncate_query(query, max_length=self._max_query_length)
         body = bm25_chunk_query(query, size=CANDIDATE_POOL, tag=tag, min_score=self._bm25_min_score)
         es_result, vector_result = await asyncio.gather(
             search_chunks(self._es_client, index=self._es_index, body=body),
@@ -252,10 +325,16 @@ class Retriever:
 
         # Absolute gates, one per leg (a leg that did not run has nothing to
         # gate). ES already pruned at `min_score`; the Python-side re-check
-        # keeps the gate authoritative regardless of ES scoring quirks.
+        # keeps the gate authoritative regardless of ES scoring quirks. The
+        # vector gate is two-tier: rescue only ever fires when the ceiling
+        # empties the leg, so a living primary tier is bit-identical to the
+        # single-tier behavior.
         kept_es_hits = filter_es_hits(es_hits, min_score=self._bm25_min_score)
-        kept_vector_rows = filter_vector_rows(
-            vector_leg.rows, max_distance=self._vector_max_distance
+        kept_vector_rows, vector_rescued = filter_vector_rows_with_rescue(
+            vector_leg.rows,
+            max_distance=self._vector_max_distance,
+            rescue_margin=self._vector_rescue_margin,
+            rescue_max_distance=self._vector_rescue_max_distance,
         )
 
         es_keys = [ChunkKey(hit.document_id, hit.chunk_index) for hit in kept_es_hits]
@@ -301,6 +380,7 @@ class Retriever:
             es_gated=len(es_hits) - len(kept_es_hits),
             vector_gated=len(vector_leg.rows) - len(kept_vector_rows),
             fused_gated=len(fused) - len(floored),
+            vector_rescued=vector_rescued,
         )
 
     async def _vector_leg(self, query: str, *, tag: str | None) -> _VectorLeg:

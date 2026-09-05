@@ -161,7 +161,10 @@ def _build_retriever(settings: Settings, provider: OpenAIEmbeddingProvider | Non
         es_index=settings.ES_INDEX,
         bm25_min_score=settings.SEARCH_BM25_MIN_SCORE,
         vector_max_distance=settings.SEARCH_VECTOR_MAX_DISTANCE,
+        vector_rescue_margin=settings.SEARCH_VECTOR_RESCUE_MARGIN,
+        vector_rescue_max_distance=settings.SEARCH_VECTOR_RESCUE_MAX_DISTANCE,
         rrf_min_relative=settings.SEARCH_RRF_MIN_RELATIVE,
+        max_query_length=settings.SEARCH_MAX_QUERY_LENGTH,
     )
 
 

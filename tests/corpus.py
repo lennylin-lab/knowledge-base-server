@@ -11,10 +11,11 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from uuid import UUID
 
-from fakes import ScriptedEmbeddingProvider, basis_vector
+from fakes import ScriptedEmbeddingProvider, basis_vector, vector_at_distance
 
 E0 = basis_vector(0)
 E1 = basis_vector(1)
+E2 = basis_vector(2)
 
 KOTLIN_SECTION = f"# Kotlin notes\n\n{('zorblat ' * 130).strip()}"
 PYTHON_SECTION = f"# Python notes\n\n{('quibnard ' * 130).strip()}"
@@ -24,6 +25,32 @@ PYTHON_CONTENT = f"---\ntitle: Python Notes\ntags: [python]\n---\n\n{PYTHON_SECT
 # BM25-empty query whose scripted embedding equals the Kotlin chunk's —
 # isolates the vector leg.
 VECTOR_QUERY = "unrelated phrasing"
+
+# The rescue-gate world: a short-keyword query embedding sitting beyond the
+# primary ceiling (0.45) yet clustered near the chunks — the granularity
+# shift the head-rescue tier exists for.
+SHIFTED_QUERY = "short word"
+SHIFTED_DISTANCE = 0.55
+# A rare-term query whose embedding sits 0.9 from the chunks: beyond the
+# rescue cap (0.85), so the vector leg stays silenced — ES-dominated by design.
+RESCUE_PROOF_QUERY = "zorblat quibnard"
+RESCUE_PROOF_DISTANCE = 0.9
+
+
+def shifted_scripted_provider() -> ScriptedEmbeddingProvider:
+    """Both chunks share E0; `SHIFTED_QUERY` sits at cosine 0.55 from them
+    (E0/E2 plane, so orthogonal E1 defaults stay at distance 1.0).
+
+    The primary ceiling empties the whole leg but the head is clustered —
+    only the rescue tier can admit it. Unmapped texts land orthogonally:
+    nothing rescues, empty over noise still holds.
+    """
+    provider = ScriptedEmbeddingProvider(default=E1)
+    provider.vectors[KOTLIN_SECTION] = E0
+    provider.vectors[PYTHON_SECTION] = E0
+    provider.vectors[SHIFTED_QUERY] = vector_at_distance(E0, E2, SHIFTED_DISTANCE)
+    provider.vectors[RESCUE_PROOF_QUERY] = vector_at_distance(E0, E2, RESCUE_PROOF_DISTANCE)
+    return provider
 
 
 def neighbor_scripted_provider() -> ScriptedEmbeddingProvider:

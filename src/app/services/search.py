@@ -25,7 +25,8 @@ class SearchService:
         phrasing, so the event carries `q_length` only (see logging spec).
         The `*_gated` counters expose how many candidates each relevance gate
         dropped (raw leg sizes minus survivors; the relative floor's drops
-        are `fused_gated`) — counts only, never query text.
+        are `fused_gated`), and `vector_rescued` how many rows the rescue
+        tier admitted — counts only, never query text.
         """
         started = time.perf_counter()
         normalized_tag = tag.strip().lower() if tag else None
@@ -60,6 +61,7 @@ class SearchService:
             es_gated=outcome.es_gated,
             vector_gated=outcome.vector_gated,
             fused_gated=outcome.fused_gated,
+            vector_rescued=outcome.vector_rescued,
             latency_ms=round((time.perf_counter() - started) * 1000, 2),
         )
         return response

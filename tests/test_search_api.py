@@ -23,10 +23,12 @@ from app.rag.retriever import Retriever
 from app.services.search import SearchService
 from corpus import (
     KOTLIN_SECTION,
+    SHIFTED_QUERY,
     VECTOR_QUERY,
     distant_scripted_provider,
     neighbor_scripted_provider,
     seed_corpus,
+    shifted_scripted_provider,
 )
 from fakes import GATES_OFF, ScriptedEmbeddingProvider, hermetic_settings
 
@@ -185,8 +187,69 @@ async def test_search_returns_empty_items_for_unrelated_query_when_gates_enabled
     assert len(executed) == 1
     assert executed[0]["hit_count"] == 0
     assert executed[0]["vector_gated"] == 2  # both KNN candidates beyond the ceiling
+    assert executed[0]["vector_rescued"] == 0  # head at 1.0: the rescue cap holds
     assert executed[0]["es_gated"] == 0
     assert executed[0]["fused_gated"] == 0
+
+
+@pytest.fixture
+async def rescued_search_client(
+    app, seed_indexed, session_factory, es_client, es_index_name
+) -> AsyncIterator[AsyncClient]:
+    """Rescue-gate world: the vector leg shifted past the primary ceiling.
+
+    Both chunks share one embedding while `SHIFTED_QUERY` sits at cosine
+    0.55 — beyond the 0.45 ceiling, inside the rescue window — so only the
+    head-rescue tier can admit the leg.
+    """
+    provider = shifted_scripted_provider()
+    await seed_corpus(seed_indexed, provider)
+    service = SearchService(
+        Retriever(
+            session_factory=session_factory,
+            es_client=es_client,
+            embedding_provider=provider,
+            es_index=es_index_name,
+        )
+    )
+    app.dependency_overrides[get_search_service] = lambda: service
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        yield ac
+    app.dependency_overrides.clear()
+
+
+@pytest.mark.db
+@pytest.mark.es
+async def test_search_executed_reports_vector_rescued_on_rescue_path(
+    rescued_search_client,
+):
+    with capture_logs() as logs:
+        resp = await rescued_search_client.get("/api/v1/search", params={"q": SHIFTED_QUERY})
+
+    assert resp.status_code == 200
+    assert len(resp.json()["items"]) == 2
+    executed = [entry for entry in logs if entry["event"] == "search_executed"]
+    assert len(executed) == 1
+    assert executed[0]["vector_gated"] == 0  # rescue admitted the shifted head
+    assert executed[0]["vector_rescued"] == 2
+
+
+@pytest.mark.db
+@pytest.mark.es
+async def test_search_accepts_over_long_query_without_5xx(gated_search_client):
+    # Well past the cap, and only the 256-char truncated prefix carries a
+    # matchable term ("zorblat " * 32 = exactly 256 chars; the 3000 CJK chars
+    # after it are cut). Truncation happens at the retriever before any leg
+    # runs, so the ES leg sees 32 tokens — far under Lucene's clause limit —
+    # and answers with the matching document instead of a 502.
+    over_long_query = "zorblat " * 32 + "字" * 3000
+    resp = await gated_search_client.get("/api/v1/search", params={"q": over_long_query})
+
+    assert resp.status_code == 200
+    items = resp.json()["items"]
+    assert {item["document_title"] for item in items} == {"Kotlin Notes"}
+    assert all(item["es_score"] is not None for item in items)
 
 
 @pytest.mark.db

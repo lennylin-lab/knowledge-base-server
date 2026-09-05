@@ -1,7 +1,8 @@
 """Relevance gate units: pure helper behavior, offline (no db/es).
 
-Covers the post-fusion relative floor, the per-leg absolute gates, and the
-Settings/Retriever default drift guard.
+Covers the post-fusion relative floor, the per-leg absolute gates, the
+two-tier vector rescue gate, the query length cap, and the Settings/Retriever
+default drift guard.
 """
 
 from __future__ import annotations
@@ -10,13 +11,18 @@ from uuid import UUID
 
 from app.rag.retriever import (
     DEFAULT_BM25_MIN_SCORE,
+    DEFAULT_MAX_QUERY_LENGTH,
     DEFAULT_RRF_MIN_RELATIVE,
     DEFAULT_VECTOR_MAX_DISTANCE,
+    DEFAULT_VECTOR_RESCUE_MARGIN,
+    DEFAULT_VECTOR_RESCUE_MAX_DISTANCE,
     ChunkKey,
     FusedHit,
     apply_relative_score_floor,
     filter_es_hits,
     filter_vector_rows,
+    filter_vector_rows_with_rescue,
+    truncate_query,
 )
 from app.repositories.document_chunk import ChunkRow
 from app.search.es import EsChunkHit
@@ -127,6 +133,122 @@ def test_vector_gate_empty_input_passes_through():
     assert filter_vector_rows([], max_distance=0.45) == []
 
 
+# --- filter_vector_rows_with_rescue (two-tier vector gate) ---
+
+
+def test_rescue_gate_primary_survivors_skip_rescue():
+    rows = [_row(0.1), _row(0.9)]
+    kept, rescued = filter_vector_rows_with_rescue(
+        rows, max_distance=0.45, rescue_margin=0.15, rescue_max_distance=0.85
+    )
+
+    assert [row.distance for row in kept] == [0.1]
+    assert rescued == 0
+
+
+def test_rescue_gate_admits_clustered_head_when_primary_empties():
+    rows = [_row(0.50), _row(0.55), _row(0.80)]
+    kept, rescued = filter_vector_rows_with_rescue(
+        rows, max_distance=0.45, rescue_margin=0.15, rescue_max_distance=0.85
+    )
+
+    # Window = min(0.50 + 0.15, 0.85) = 0.65: the clustered head, not the tail.
+    assert [row.distance for row in kept] == [0.50, 0.55]
+    assert rescued == 2
+
+
+def test_rescue_gate_cap_binds_the_window():
+    rows = [_row(0.70), _row(0.71)]
+    kept, rescued = filter_vector_rows_with_rescue(
+        rows, max_distance=0.45, rescue_margin=0.15, rescue_max_distance=0.85
+    )
+
+    # Window = min(0.85, 0.85): both rows exactly at the cap survive.
+    assert [row.distance for row in kept] == [0.70, 0.71]
+    assert rescued == 2
+
+
+def test_rescue_gate_cap_keeps_high_leg_min_silent():
+    rows = [_row(0.90), _row(0.95)]
+    kept, rescued = filter_vector_rows_with_rescue(
+        rows, max_distance=0.45, rescue_margin=0.15, rescue_max_distance=0.85
+    )
+
+    # leg_min 0.90 puts the whole window above the cap: rare-term keywords
+    # stay ES-dominated.
+    assert kept == []
+    assert rescued == 0
+
+
+def test_rescue_gate_margin_sentinel_disables_rescue():
+    rows = [_row(0.50), _row(0.55)]
+    kept, rescued = filter_vector_rows_with_rescue(
+        rows, max_distance=0.45, rescue_margin=0.0, rescue_max_distance=0.85
+    )
+
+    assert kept == []
+    assert rescued == 0
+
+
+def test_rescue_gate_cap_sentinel_disables_rescue():
+    rows = [_row(0.50)]
+    kept, rescued = filter_vector_rows_with_rescue(
+        rows, max_distance=0.45, rescue_margin=0.15, rescue_max_distance=0.0
+    )
+
+    assert kept == []
+    assert rescued == 0
+
+
+def test_rescue_gate_row_without_distance_passes_primary():
+    rows = [_row(None), _row(0.9)]
+    kept, rescued = filter_vector_rows_with_rescue(
+        rows, max_distance=0.45, rescue_margin=0.15, rescue_max_distance=0.85
+    )
+
+    # The fail-open row survives the primary tier, so the rescue branch —
+    # which judges measured distances only — never runs.
+    assert [row.distance for row in kept] == [None]
+    assert rescued == 0
+
+
+def test_rescue_gate_full_ceiling_sentinel_disables_everything():
+    rows = [_row(1.5)]
+    kept, rescued = filter_vector_rows_with_rescue(
+        rows, max_distance=2.0, rescue_margin=0.15, rescue_max_distance=0.85
+    )
+
+    assert kept == rows
+    assert rescued == 0
+
+
+def test_rescue_gate_empty_input_passes_through():
+    assert filter_vector_rows_with_rescue(
+        [], max_distance=0.45, rescue_margin=0.15, rescue_max_distance=0.85
+    ) == ([], 0)
+
+
+# --- truncate_query (query length cap) ---
+
+
+def test_truncate_over_long_query_to_cap():
+    truncated = truncate_query("x" * 300, max_length=DEFAULT_MAX_QUERY_LENGTH)
+
+    assert truncated == "x" * DEFAULT_MAX_QUERY_LENGTH
+
+
+def test_truncate_leaves_query_at_exact_bound_untouched():
+    query = "字" * DEFAULT_MAX_QUERY_LENGTH
+
+    assert truncate_query(query, max_length=DEFAULT_MAX_QUERY_LENGTH) == query
+
+
+def test_truncate_disabled_sentinel_keeps_query_whole():
+    query = "x" * 1000
+
+    assert truncate_query(query, max_length=0) == query
+
+
 # --- Settings <-> Retriever default drift guard ---
 
 
@@ -135,4 +257,7 @@ def test_settings_gate_defaults_match_retriever_defaults():
 
     assert settings.SEARCH_BM25_MIN_SCORE == DEFAULT_BM25_MIN_SCORE
     assert settings.SEARCH_VECTOR_MAX_DISTANCE == DEFAULT_VECTOR_MAX_DISTANCE
+    assert settings.SEARCH_VECTOR_RESCUE_MARGIN == DEFAULT_VECTOR_RESCUE_MARGIN
+    assert settings.SEARCH_VECTOR_RESCUE_MAX_DISTANCE == DEFAULT_VECTOR_RESCUE_MAX_DISTANCE
     assert settings.SEARCH_RRF_MIN_RELATIVE == DEFAULT_RRF_MIN_RELATIVE
+    assert settings.SEARCH_MAX_QUERY_LENGTH == DEFAULT_MAX_QUERY_LENGTH

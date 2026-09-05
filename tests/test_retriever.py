@@ -16,17 +16,26 @@ from structlog.testing import capture_logs
 
 from app.core.exceptions import LLMProviderError, SearchIndexError
 from app.llm.embeddings import EmbeddingProvider
-from app.rag.retriever import DEFAULT_BM25_MIN_SCORE, DEFAULT_VECTOR_MAX_DISTANCE, Retriever
+from app.rag.retriever import (
+    DEFAULT_BM25_MIN_SCORE,
+    DEFAULT_MAX_QUERY_LENGTH,
+    DEFAULT_VECTOR_MAX_DISTANCE,
+    Retriever,
+)
 from app.services.document import DocumentService
 from corpus import (
     E0,
     E1,
     KOTLIN_SECTION,
     PYTHON_SECTION,
+    RESCUE_PROOF_QUERY,
+    SHIFTED_DISTANCE,
+    SHIFTED_QUERY,
     VECTOR_QUERY,
     distant_scripted_provider,
     neighbor_scripted_provider,
     seed_corpus,
+    shifted_scripted_provider,
 )
 from fakes import GATES_OFF, ScriptedEmbeddingProvider
 
@@ -298,3 +307,81 @@ async def test_gates_and_visibility_compose_to_empty(
     outcome = await retriever.retrieve(VECTOR_QUERY)
 
     assert outcome.items == []
+
+
+# --- head-rescue gate (short-query granularity shift) ---
+
+
+async def test_rescued_vector_head_restores_short_query_recall(
+    seed_indexed, session_factory, es_client, es_index_name
+):
+    await seed_corpus(seed_indexed, shifted_scripted_provider())
+    retriever = make_retriever(
+        session_factory, es_client, es_index_name, shifted_scripted_provider()
+    )
+
+    outcome = await retriever.retrieve(SHIFTED_QUERY)
+
+    assert outcome.mode == "hybrid"
+    assert outcome.es_hits == 0  # no term overlap: the vector leg decides alone
+    assert outcome.vector_hits == 2
+    assert outcome.vector_gated == 0  # the rescue tier admitted the shifted head
+    assert outcome.vector_rescued == 2
+    assert {item.document_title for item in outcome.items} == {
+        "Kotlin Notes",
+        "Python Notes",
+    }
+    # Admitted by rescue, NOT by the primary ceiling: every distance sits
+    # above the ceiling yet inside the rescue window (float32 pgvector
+    # storage rounds the scripted distance — compare approximately).
+    distances = [item.vector_distance for item in outcome.items]
+    assert all(distance == pytest.approx(SHIFTED_DISTANCE, abs=1e-3) for distance in distances)
+    assert all(distance > DEFAULT_VECTOR_MAX_DISTANCE for distance in distances)
+
+
+async def test_rescue_cap_keeps_rare_term_query_es_dominated(
+    seed_indexed, session_factory, es_client, es_index_name
+):
+    await seed_corpus(seed_indexed, shifted_scripted_provider())
+    retriever = make_retriever(
+        session_factory, es_client, es_index_name, shifted_scripted_provider()
+    )
+
+    outcome = await retriever.retrieve(RESCUE_PROOF_QUERY)
+
+    assert outcome.mode == "hybrid"
+    assert outcome.vector_gated == 2  # head at 0.9: beyond the rescue cap
+    assert outcome.vector_rescued == 0
+    assert {item.document_title for item in outcome.items} == {
+        "Kotlin Notes",
+        "Python Notes",
+    }
+    assert all(item.es_score is not None for item in outcome.items)  # ES decided alone
+
+
+async def test_unrelated_query_stays_empty_in_rescue_world(
+    seed_indexed, session_factory, es_client, es_index_name
+):
+    await seed_corpus(seed_indexed, shifted_scripted_provider())
+    retriever = make_retriever(
+        session_factory, es_client, es_index_name, shifted_scripted_provider()
+    )
+
+    outcome = await retriever.retrieve(VECTOR_QUERY)  # orthogonal: distance 1.0
+
+    assert outcome.vector_rescued == 0
+    assert outcome.items == []  # the rescue tier is not a noise leak
+
+
+async def test_over_long_query_reaches_legs_truncated(
+    seed_indexed, session_factory, es_client, es_index_name
+):
+    provider = neighbor_scripted_provider()
+    await seed_corpus(seed_indexed, provider)
+    retriever = make_retriever(session_factory, es_client, es_index_name, provider, **GATES_OFF)
+
+    await retriever.retrieve("x" * 300)
+
+    # The search-time embed call (the last one, after indexing's) carried the
+    # prefix only — the legs never saw the over-long query.
+    assert provider.calls[-1] == ["x" * DEFAULT_MAX_QUERY_LENGTH]
