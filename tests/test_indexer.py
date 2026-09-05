@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from structlog.testing import capture_logs
 
 from app.api.deps import get_db
+from app.core.config import get_settings
 from app.core.exceptions import LLMProviderError, SearchIndexError
 from app.models.document import Document, IndexStatus
 from app.models.document_chunk import EMBEDDING_DIM, DocumentChunk
@@ -308,7 +309,14 @@ async def indexing_client(
 
     Only `run_indexing` is patched (with the same call shape the deps lambda
     schedules); the FastAPI BackgroundTasks adapter itself runs for real.
+    The queue transport is pinned to BackgroundTasks: a dev `.env` with
+    `KB_REDIS_URL` must not silently route these e2e tests through ARQ (the
+    env trap recorded in quality-guidelines).
     """
+    monkeypatch.setattr(
+        "app.api.deps.get_settings",
+        lambda: get_settings().model_copy(update={"REDIS_URL": ""}),
+    )
     factory = async_sessionmaker(db_engine, expire_on_commit=False)
 
     async def override_get_db():
