@@ -109,6 +109,23 @@ Key points:
 - **`rag/` owns the retrieval pipeline**: chunking, embedding, hybrid search
   (ES BM25 + pgvector cosine), RRF fusion. `search/` and `repositories/` are
   its data-access backends.
+- **Retrieval quality gates live in `rag/retriever.py` only** (2026-09-05).
+  Three `Settings` thresholds, constructor-injected into `Retriever` from
+  `_build_retriever` in `api/deps.py` (shared by search, chat, and writing
+  wiring): `KB_SEARCH_BM25_MIN_SCORE` (default 1.0; `0.0` disables, also
+  omitted from the ES body when non-positive via `bm25_chunk_query`),
+  `KB_SEARCH_VECTOR_MAX_DISTANCE` (default 0.45 cosine distance ceiling;
+  `>= 2.0` disables), `KB_SEARCH_RRF_MIN_RELATIVE` (default 0.35 fraction
+  of top fused score; `0.0` disables). Pipeline order: leg gates →
+  `fuse_rrf` → relative floor (`apply_relative_score_floor`) → `[:limit]`;
+  when nothing survives, return `items=[]` (empty over noise — never pad
+  to `limit`). `SearchHit` carries optional `es_score` / `vector_distance`
+  (None when that leg did not rank the chunk); `Retriever` thresholds are
+  raw-leg absolute scores, never RRF rank-derived scores. Routers,
+  services, and agents consume the gated retriever as-is — no re-filtering
+  or re-thresholding outside `rag/`. Tests pinning legacy ungated behavior
+  use `GATES_OFF` from `tests/fakes.py`; a drift-guard unit test keeps
+  retriever constructor defaults in sync with `Settings`.
 - **`mcp/` owns external tool integration**: server connections
   (stdio + HTTP transports), tool discovery/registry, and wrapping MCP tools
   so agents can register them like local functions. Tool results are passed
