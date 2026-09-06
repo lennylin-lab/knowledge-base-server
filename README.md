@@ -52,36 +52,41 @@ curl -i http://localhost:8000/nope   # 404 with the standard error envelope
 
 Interactive docs: <http://localhost:8000/docs>.
 
-## Upgrading an existing installation to the IK analyzer
+## Re-indexing after a search-index change
 
-Installations created before the IK analyzer have their `kb_documents` index
-built with the default `standard` mapping (Chinese text indexed as single
-characters). After pulling this change, re-index once:
+Analyzer and mapping changes never apply to an existing index (Elasticsearch
+validates mappings, it does not re-analyze in place), and chunking changes
+alter both the ES documents and the embedding inputs. After pulling a change
+that touches any of these, re-index once:
 
 ```bash
-# 1. Fetch the plugin zip (skipped if already present from setup) and rebuild
-#    Elasticsearch with the IK plugin baked in
-curl -fL --retry 5 -o docker/elasticsearch/elasticsearch-analysis-ik-8.17.3.zip \
-  https://release.infinilabs.com/analysis-ik/stable/elasticsearch-analysis-ik-8.17.3.zip
-docker compose build elasticsearch
-docker compose up -d
-
-# 2. Drop the index created with the old mapping (recreated with the IK
-#    mapping during the sweep below)
+# 1. Drop the index created with the old settings + mapping (recreated with
+#    the current ones during the sweep below)
 curl -XDELETE localhost:9200/kb_documents
 
-# 3. Queue every already-indexed document for re-indexing
+# 2. Queue every already-indexed document for re-indexing
 docker compose exec postgres psql -U kb -d kb -c "UPDATE documents SET index_status = 'pending' WHERE index_status = 'done';"
 
-# 4. Sweep the queue (default limit 50 per run; repeat until `processed: 0`)
+# 3. Sweep the queue (default limit 50 per run; repeat until `processed: 0`)
 uv run python -m app.cli reindex
 
-# 5. Confirm the corpus is back
+# 4. Confirm the corpus is back
 curl -s localhost:9200/kb_documents/_count
 ```
 
 The sweep is idempotent (deterministic document ids), so re-running it is
-safe.
+safe. Instances of this migration so far:
+
+- **IK analyzer** (`09-06-es-ik-analyzer`): `title`/`chunk_text` switched from
+  `standard` to `ik_max_word`/`ik_smart`. Also required the one-time image
+  rebuild with the plugin baked in (Quickstart step 3).
+- **Code-aware chunking** (`09-06-code-aware-chunking`): fenced code blocks
+  stay intact, the index gains index `settings` with a `code` analyzer, a
+  `chunk_text.code` subfield, and a `heading_path` field; chunks now embed
+  `title + heading breadcrumb + text` (PG still stores the plain text — no
+  schema change). Both legs' inputs change, so a full reindex is required.
+  Afterward, recalibrate `KB_SEARCH_VECTOR_MAX_DISTANCE` with
+  `tests/test_vector_distance_probe.py` if retrieval quality shifts.
 
 ## Quality gates
 

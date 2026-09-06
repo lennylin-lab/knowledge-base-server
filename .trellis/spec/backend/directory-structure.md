@@ -109,6 +109,17 @@ Key points:
 - **`rag/` owns the retrieval pipeline**: chunking, embedding, hybrid search
   (ES BM25 + pgvector cosine), RRF fusion. `search/` and `repositories/` are
   its data-access backends.
+- **Chunking is fence-aware, not line-aware** (2026-09-06). `rag/chunker.py`
+  threads a fence state machine through every structural split: a `#` line
+  inside a ` ``` `/`~~~` fence is never a heading, in-fence content is
+  byte-preserved (packing must not insert separators inside fences), and an
+  oversized fence splits into pieces that each re-open and re-close their own
+  fence with the original info string (repair markers may overshoot
+  `max_size`). `chunk_markdown_structured` → `Chunk` (text + heading
+  breadcrumb) is the indexing input — breadcrumbs are retrieval signal, never
+  prepended to stored/embedded-alone text; `chunk_markdown` stays the
+  text-only wrapper for `services/agents.py`. Never decide structure with a
+  line-level test alone — `tests/test_chunker.py` pins the fence invariants.
 - **Retrieval quality gates live in `rag/retriever.py` only** (2026-09-05).
   Three `Settings` thresholds, constructor-injected into `Retriever` from
   `_build_retriever` in `api/deps.py` (shared by search, chat, and writing
@@ -124,7 +135,10 @@ Key points:
   `min(leg_min + SEARCH_VECTOR_RESCUE_MARGIN, SEARCH_VECTOR_RESCUE_MAX_DISTANCE)`
   (defaults 0.15 / 0.85; `<= 0` on either disables rescue) — short-keyword
   query embeddings sit systematically farther from long chunks than long
-  questions (measured: pure-CJK heads 0.48-0.61 vs long-query 0.22), and
+  questions (measured 2026-09-05: pure-CJK heads 0.48-0.61 vs long-query
+  0.22; re-measured 2026-09-06 after the breadcrumb-enriched embedding input
+  (`embedding_input`): pure-CJK heads 0.50-0.53, `redis` 0.46, long-query
+  0.31 — same band, defaults still cover it), and
   the cap keeps rare-term legs silent; `tests/test_vector_distance_probe.py`
   (`live_llm`, excluded from the default run) recalibrates the window.
   `retrieve()` also truncates the query once at entry to

@@ -1,8 +1,9 @@
 # Search Layer Guidelines
 
 > Elasticsearch contract for `knowledge-base-server`: image build, mapping,
-> analyzers, and index lifecycle. Established 2026-09-06 (task
-> `09-06-es-ik-analyzer`).
+> analyzers, index lifecycle. Established 2026-09-06 (task
+> `09-06-es-ik-analyzer`); code analyzer + heading breadcrumbs added same day
+> (task `09-06-code-aware-chunking`).
 
 ---
 
@@ -96,19 +97,57 @@
 
 ## Convention: Mapping is the only analyzer declaration site
 
-**What**: `title`/`chunk_text` are `{"type": "text", "analyzer":
-"ik_max_word", "search_analyzer": "ik_smart"}` in `search/es.py
-::_CHUNK_MAPPINGS`; `keyword`/`integer` fields stay analyzer-free.
+**What**: index `settings` (analysis config) and `mappings` live together in
+`search/es.py` — `_CHUNK_SETTINGS` declares the analyzers, `_CHUNK_MAPPINGS`
+binds them to fields. `title`/`chunk_text`/`heading_path` are `{"type":
+"text", "analyzer": "ik_max_word", "search_analyzer": "ik_smart"}`;
+`keyword`/`integer` fields stay analyzer-free; `ensure_index` passes
+`settings=` alongside `mappings=`. Queries (`search/queries.py`) name fields
+and boosts only — never an `analyzer` key.
 
-**Why**: fine-grained index-time segmentation maximizes recall; coarse
-query-time segmentation avoids query-term explosion. One declaration site
-keeps the "explicit mapping beats dynamic" invariant auditable.
+**Why (primary fields)**: fine-grained index-time segmentation maximizes
+recall; coarse query-time segmentation avoids query-term explosion. One
+declaration site keeps the "explicit mapping beats dynamic" invariant
+auditable.
+
+**Why (the `code` subfield — stopword incident, 2026-09-06)**: `analysis-ik`
+ships an English stopword list, measured against the live node:
+
+```
+ik_smart("how to use async_bulk with AsyncElasticsearch for a loop if not null")
+  -> [how, use, async_bulk, asyncelasticsearch, loop, null]
+  dropped: to, with, for, a, if, not
+```
+
+`if`/`for`/`not`/`with`/`in`/`is`/`or`/`as` are content words in a
+programming corpus — queries like "for 循环怎么写" or "if not None 判断" lose
+their most discriminative terms. IK also never splits identifiers
+(`ConnectionPool` stays one token, so `connection pool` can never match it).
+The escape hatch is a multi-field, NOT a replacement analyzer: `chunk_text`
+keeps IK (Chinese word segmentation is the corpus majority) and
+`chunk_text.code` analyzes with the index-settings `code` analyzer —
+whitespace tokenizer (no stopword list: keywords survive) +
+`word_delimiter_graph` (`preserve_original`, `split_on_case_change`,
+`catenate_words`, `split_on_numerics=False`) + `flatten_graph` + `lowercase`.
+One analyzer for index and search keeps the declaration single-site;
+`flatten_graph` is mandatory because index-time analyzers cannot emit token
+graphs. In `best_fields` a term matched by both `chunk_text` and its `code`
+subfield scores once (max, not sum) — the subfield adds recall only.
+
+**Heading breadcrumbs**: every ES chunk doc carries `heading_path` (the
+ancestor breadcrumb from `rag/chunker.py::Chunk`, IK-analyzed like `title`),
+boosted mildly in `bm25_chunk_query`. It is retrieval signal only: PG stores
+the plain chunk text and search returns that text unmodified as `content`;
+the vector leg embeds `title + heading_path + text` (`rag/indexer.py
+::embedding_input`) but nothing user-visible changes shape.
 
 > **Warning**: analyzer changes never apply to existing indexes (Elasticsearch
-> validates mappings, it does not re-analyze in place). The only migration is
-> drop index + reset `documents.index_status` to `'pending'` (PG enum
-> `index_status`, lowercase values) + `python -m app.cli reindex` — the CLI
-> deliberately offers no full-rebuild flag; ops composes primitives.
+> validates mappings, it does not re-analyze in place) — and chunking changes
+> alter embeddings too. The only migration is drop index + reset
+> `documents.index_status` to `'pending'` (PG enum `index_status`, lowercase
+> values) + `python -m app.cli reindex` — the CLI deliberately offers no
+> full-rebuild flag; ops composes primitives. The runbook (with the list of
+> migrations so far) lives in README.md.
 
 ---
 
