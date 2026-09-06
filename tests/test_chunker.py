@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from app.rag.chunker import chunk_markdown, strip_front_matter
+from app.rag.chunker import chunk_markdown, chunk_markdown_structured, strip_front_matter
 
 
 def test_empty_body_yields_no_chunks():
@@ -156,3 +156,116 @@ def test_strip_front_matter_variants():
     assert strip_front_matter("---\na: 1\n---") == ""
     # Whitespace tolerance around the fences.
     assert strip_front_matter("--- \na: 1\n --- \nbody") == "body"
+
+
+# --- fenced code blocks (regressions for the P0-A chunker defects) ---
+
+
+def test_hash_comment_inside_fence_is_not_a_heading():
+    # P0-A reproducer: `# 步骤 N` comments at column 0 match `^#{1,6} ` but are
+    # code content — the document's only section boundary is `## Redis …`.
+    lines = "\n".join(f"# 步骤 {i}" for i in range(30))
+    body = f"## Redis 缓存实践\n\n```python\n{lines}\nprint('done')\n```"
+
+    assert chunk_markdown(body) == [body]
+
+
+def test_fence_content_is_byte_preserved():
+    # The P0-A mutation: a misdetected comment used to be split into its own
+    # section and rejoined with the blank-line separator, inserting a blank
+    # line right after the opening fence.
+    body = "```yaml\n# Redis 服务配置\nredis:\n  host: localhost\n```"
+
+    assert chunk_markdown(body) == [body]
+
+
+def test_oversized_fence_splits_into_individually_valid_blocks():
+    lines = [f"line {i:03d} " + "x" * 60 for i in range(40)]
+    body = "```python\n" + "\n".join(lines) + "\n```"
+
+    chunks = chunk_markdown(body)
+
+    assert len(chunks) >= 2
+    for chunk in chunks:
+        # Every piece is independently valid Markdown: own opening fence with
+        # the original info string, own closing fence, no half-open fences.
+        assert chunk.startswith("```python")
+        assert chunk.endswith("```")
+        assert chunk.count("```") == 2
+        # Repair markers are added after packing, so a piece may overshoot
+        # max_size by one marker (10 chars for "```python\n").
+        assert len(chunk) <= 1600 + 16
+    joined = "\n".join(chunks)
+    for line in lines:
+        assert joined.count(line) == 1  # every code line survives exactly once
+
+
+def test_tilde_fence_and_long_backtick_fence_are_honored():
+    tilde_body = "~~~\n# not a heading\n``` neither is this a close\n~~~"
+    long_body = "````text\n```\n# inner heading-like\n```\n````"
+
+    assert chunk_markdown(tilde_body) == [tilde_body]
+    assert chunk_markdown(long_body) == [long_body]
+
+
+def test_short_closing_run_does_not_close_a_longer_fence():
+    body = "````markdown\n# heading-like text\n```\nstill inside\n````"
+
+    assert chunk_markdown(body) == [body]
+
+
+def test_unclosed_fence_runs_to_end_of_document():
+    body = "## Doc\n\n```python\nimport os\n# TODO: fix this\nprint(os)"
+
+    assert chunk_markdown(body) == [body]
+
+
+def test_heading_path_tracks_the_heading_stack():
+    sections = [
+        "intro " + "i" * 900,  # preamble: no heading yet
+        "# Top\n\n" + "a" * 900,
+        "## Sub\n\n" + "b" * 900,
+        "## Other\n\n" + "c" * 900,  # same level replaces the previous entry
+        "### Deep\n\n" + "d" * 900,
+        "# Back\n\n" + "e" * 900,  # level 1 resets the whole stack
+    ]
+    body = "\n\n".join(sections)
+
+    chunks = chunk_markdown_structured(body)
+
+    # Every section is >= target, so each lands in its own chunk.
+    assert [chunk.heading_path for chunk in chunks] == [
+        "",
+        "Top",
+        "Top > Sub",
+        "Top > Other",
+        "Top > Other > Deep",
+        "Back",
+    ]
+
+
+def test_heading_path_is_not_prepended_to_chunk_text():
+    body = f"# Parent\n\n{'a' * 900}\n\n## Child\n\n{'b' * 900}"
+
+    chunks = chunk_markdown_structured(body)
+
+    assert [chunk.text for chunk in chunks] == chunk_markdown(body)
+    assert chunks[0].heading_path == "Parent"
+    assert chunks[1].heading_path == "Parent > Child"
+    # The heading line travels inline (existing behavior); the breadcrumb is
+    # retrieval signal only and must not leak into the stored text.
+    assert chunks[1].text == f"## Child\n\n{'b' * 900}"
+    assert "Parent" not in chunks[1].text
+
+
+def test_heading_path_strips_closing_sequence_but_keeps_content_hashes():
+    # CommonMark: a trailing #-run preceded by whitespace is a closing
+    # sequence, not content; a # glued to a word is content (`## C#`).
+    # Both headings are level 2, so the second replaces the first in the stack.
+    body = f"## Done ##\n\n{'a' * 900}\n\n## C#\n\n{'b' * 900}"
+
+    chunks = chunk_markdown_structured(body)
+
+    assert [chunk.heading_path for chunk in chunks] == ["Done", "C#"]
+    # The stored text keeps the heading lines verbatim.
+    assert chunks[0].text.startswith("## Done ##")
