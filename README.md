@@ -27,7 +27,12 @@ uv sync
 # 2. Local settings
 cp .env.example .env   # adjust if needed; defaults match docker-compose.yml
 
-# 3. Start PostgreSQL (pgvector) + Elasticsearch
+# 3. Fetch the Elasticsearch IK analyzer plugin (version-locked to the ES
+#    version pinned in docker-compose.yml), then start PostgreSQL (pgvector)
+#    + Elasticsearch. The image is built locally; the plugin installs from
+#    the fetched zip (infini's download mirrors can throttle to KB/s).
+curl -fL --retry 5 -o docker/elasticsearch/elasticsearch-analysis-ik-8.17.3.zip \
+  https://release.infinilabs.com/analysis-ik/stable/elasticsearch-analysis-ik-8.17.3.zip
 docker compose up -d
 docker compose ps      # wait until both report healthy
 
@@ -46,6 +51,37 @@ curl -i http://localhost:8000/nope   # 404 with the standard error envelope
 ```
 
 Interactive docs: <http://localhost:8000/docs>.
+
+## Upgrading an existing installation to the IK analyzer
+
+Installations created before the IK analyzer have their `kb_documents` index
+built with the default `standard` mapping (Chinese text indexed as single
+characters). After pulling this change, re-index once:
+
+```bash
+# 1. Fetch the plugin zip (skipped if already present from setup) and rebuild
+#    Elasticsearch with the IK plugin baked in
+curl -fL --retry 5 -o docker/elasticsearch/elasticsearch-analysis-ik-8.17.3.zip \
+  https://release.infinilabs.com/analysis-ik/stable/elasticsearch-analysis-ik-8.17.3.zip
+docker compose build elasticsearch
+docker compose up -d
+
+# 2. Drop the index created with the old mapping (recreated with the IK
+#    mapping during the sweep below)
+curl -XDELETE localhost:9200/kb_documents
+
+# 3. Queue every already-indexed document for re-indexing
+docker compose exec postgres psql -U kb -d kb -c "UPDATE documents SET index_status = 'pending' WHERE index_status = 'done';"
+
+# 4. Sweep the queue (default limit 50 per run; repeat until `processed: 0`)
+uv run python -m app.cli reindex
+
+# 5. Confirm the corpus is back
+curl -s localhost:9200/kb_documents/_count
+```
+
+The sweep is idempotent (deterministic document ids), so re-running it is
+safe.
 
 ## Quality gates
 

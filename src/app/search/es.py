@@ -26,13 +26,16 @@ logger = structlog.get_logger(__name__)
 _ES_ERRORS = (ApiError, TransportError, BulkIndexError)
 
 # Explicit mapping beats dynamic: schema drift becomes visible, keyword fields
-# stay filterable, text fields stay analyzed.
+# stay filterable, text fields stay analyzed. Text fields use the IK analyzers
+# (analysis-ik plugin baked into the compose image): CJK needs word-level
+# segmentation — ik_max_word at index time (fine-grained, maximizes recall),
+# ik_smart at search time (coarse-grained, avoids query-term explosion).
 _CHUNK_MAPPINGS: dict[str, dict[str, dict[str, str]]] = {
     "properties": {
         "document_id": {"type": "keyword"},
-        "title": {"type": "text"},
+        "title": {"type": "text", "analyzer": "ik_max_word", "search_analyzer": "ik_smart"},
         "tags": {"type": "keyword"},
-        "chunk_text": {"type": "text"},
+        "chunk_text": {"type": "text", "analyzer": "ik_max_word", "search_analyzer": "ik_smart"},
         "chunk_index": {"type": "integer"},
     }
 }

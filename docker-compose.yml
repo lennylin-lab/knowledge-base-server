@@ -16,7 +16,11 @@ services:
       retries: 12
 
   elasticsearch:
-    image: docker.elastic.co/elasticsearch/elasticsearch:8.17.3
+    build:
+      context: ./docker/elasticsearch
+      args:
+        ES_VERSION: "8.17.3"
+    image: kb-elasticsearch:8.17.3-ik
     environment:
       discovery.type: single-node
       xpack.security.enabled: "false"
