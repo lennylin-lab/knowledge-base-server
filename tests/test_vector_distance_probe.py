@@ -16,6 +16,8 @@ import pytest
 
 from app.core.config import get_settings
 from app.llm.embeddings import OpenAIEmbeddingProvider
+from app.rag.chunker import Chunk
+from app.rag.indexer import embedding_input
 
 pytestmark = pytest.mark.live_llm
 
@@ -29,10 +31,30 @@ QUERIES = [
     "hybrid retrieval",
     "a longer natural-language question about distributed locks in redis",
 ]
+
+# Indexed chunks embed as `embedding_input(title, chunk)` — title + heading
+# breadcrumb + chunk text (rag/indexer.py). The probe reflects that wrapped
+# form so the measured distribution matches what the gates see after a
+# reindex. Queries are NOT enriched (no query-instruct prefix by design).
+_RAW_CHUNKS = [
+    (
+        "Redis 缓存实践",
+        "Redis 缓存实践 > 分布式锁",
+        "Redis 分布式锁的实现要点: SETNX、过期时间与看门狗续期。",
+    ),
+    (
+        "检索系统笔记",
+        "检索系统笔记 > 混合检索",
+        "pgvector 余弦距离与 Elasticsearch BM25 的 RRF 混合检索。",
+    ),
+    (
+        "Kotlin notes",
+        "Kotlin notes > coroutines",
+        f"Kotlin coroutine cancellation notes: {'structured concurrency ' * 20}",
+    ),
+]
 CHUNKS = [
-    "Redis 分布式锁的实现要点: SETNX、过期时间与看门狗续期。",
-    "pgvector 余弦距离与 Elasticsearch BM25 的 RRF 混合检索。",
-    f"Kotlin coroutine cancellation notes: {'structured concurrency ' * 20}",
+    embedding_input(title, Chunk(text=text, heading_path=path)) for title, path, text in _RAW_CHUNKS
 ]
 
 

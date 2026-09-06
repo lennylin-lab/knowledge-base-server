@@ -22,6 +22,7 @@ from app.core.exceptions import LLMProviderError
 from app.rag.retriever import Retriever
 from app.services.search import SearchService
 from corpus import (
+    KOTLIN_EMBED_TEXT,
     KOTLIN_SECTION,
     SHIFTED_QUERY,
     VECTOR_QUERY,
@@ -61,7 +62,7 @@ class SearchWorld:
 async def hybrid_world(app, seed_indexed, session_factory, es_client, es_index_name) -> SearchWorld:
     """Corpus seeded with a scripted provider; the BM25 query rides E0 too."""
     provider = neighbor_scripted_provider()
-    provider.vectors["zorblat"] = provider.vectors[KOTLIN_SECTION]
+    provider.vectors["zorblat"] = provider.vectors[KOTLIN_EMBED_TEXT]
     await seed_corpus(seed_indexed, provider)
     return SearchWorld(provider, app, session_factory, es_client, es_index_name)
 

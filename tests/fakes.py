@@ -23,6 +23,7 @@ from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
 
 from app.mcp.manager import McpToolResult
 from app.models.document_chunk import EMBEDDING_DIM
+from app.rag.chunker import Chunk
 from app.rag.retriever import ChunkKey, RetrievedChunk, SearchOutcome
 
 if TYPE_CHECKING:
@@ -128,7 +129,7 @@ class RecordingEsStore:
         document_id: UUID,
         title: str,
         tags: list[str],
-        chunks: list[str],
+        chunks: list[Chunk],
     ) -> None:
         self.replace_calls.append(
             {

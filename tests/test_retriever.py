@@ -26,8 +26,9 @@ from app.services.document import DocumentService
 from corpus import (
     E0,
     E1,
+    KOTLIN_EMBED_TEXT,
     KOTLIN_SECTION,
-    PYTHON_SECTION,
+    PYTHON_EMBED_TEXT,
     RESCUE_PROOF_QUERY,
     SHIFTED_DISTANCE,
     SHIFTED_QUERY,
@@ -154,8 +155,8 @@ async def test_tag_filter_narrows_both_legs(
     seed_indexed, session_factory, es_client, es_index_name
 ):
     provider = ScriptedEmbeddingProvider(default=E1)
-    provider.vectors[KOTLIN_SECTION] = E0
-    provider.vectors[PYTHON_SECTION] = E0
+    provider.vectors[KOTLIN_EMBED_TEXT] = E0
+    provider.vectors[PYTHON_EMBED_TEXT] = E0
     provider.vectors["notes"] = E0  # matches both chunks' embeddings
     await seed_corpus(seed_indexed, provider)
     retriever = make_retriever(session_factory, es_client, es_index_name, provider, **GATES_OFF)
@@ -175,8 +176,8 @@ async def test_tag_filter_narrows_both_legs(
 
 async def test_limit_trims_fused_results(seed_indexed, session_factory, es_client, es_index_name):
     provider = ScriptedEmbeddingProvider(default=E1)
-    provider.vectors[KOTLIN_SECTION] = E0
-    provider.vectors[PYTHON_SECTION] = E0
+    provider.vectors[KOTLIN_EMBED_TEXT] = E0
+    provider.vectors[PYTHON_EMBED_TEXT] = E0
     provider.vectors["notes"] = E0
     await seed_corpus(seed_indexed, provider)
     retriever = make_retriever(session_factory, es_client, es_index_name, provider, **GATES_OFF)

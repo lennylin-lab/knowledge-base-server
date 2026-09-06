@@ -16,7 +16,12 @@ def test_query_shape_without_tag():
                     {
                         "multi_match": {
                             "query": "zorblat notes",
-                            "fields": ["chunk_text", "title^2"],
+                            "fields": [
+                                "chunk_text",
+                                "chunk_text.code^1.5",
+                                "heading_path^1.5",
+                                "title^2",
+                            ],
                         }
                     }
                 ]
@@ -39,7 +44,19 @@ def test_query_with_tag_adds_keyword_filter_without_touching_must():
 def test_title_field_is_boosted_over_chunk_text():
     fields = bm25_chunk_query("x", size=1)["query"]["bool"]["must"][0]["multi_match"]["fields"]
 
-    assert fields == ["chunk_text", "title^2"]
+    boosts = {
+        field.split("^")[0]: float(field.split("^")[1]) if "^" in field else 1.0 for field in fields
+    }
+    assert boosts["title"] == max(boosts.values())
+
+
+def test_bm25_query_targets_code_subfield_and_heading_path():
+    # The code subfield adds recall for terms IK drops or never splits
+    # (stopwords, identifier parts); heading_path carries the breadcrumb into
+    # the BM25 leg. Both are mild boosts under the best_fields max.
+    fields = bm25_chunk_query("x", size=1)["query"]["bool"]["must"][0]["multi_match"]["fields"]
+
+    assert fields == ["chunk_text", "chunk_text.code^1.5", "heading_path^1.5", "title^2"]
 
 
 def test_size_is_passed_through_untouched():

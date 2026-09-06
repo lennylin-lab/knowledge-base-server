@@ -24,7 +24,7 @@ from app.core.config import get_settings
 from app.core.database import SessionFactory
 from app.llm.embeddings import EmbeddingProvider, OpenAIEmbeddingProvider
 from app.models.document import IndexStatus
-from app.rag.chunker import chunk_markdown
+from app.rag.chunker import Chunk, chunk_markdown_structured
 from app.repositories.document import DocumentRepository
 from app.repositories.document_chunk import DocumentChunkRepository
 from app.search.es import ensure_index, get_es_client, replace_document_chunks
@@ -49,8 +49,22 @@ class ReplaceChunksFn(Protocol):
         document_id: UUID,
         title: str,
         tags: Sequence[str],
-        chunks: Sequence[str],
+        chunks: Sequence[Chunk],
     ) -> None: ...
+
+
+def embedding_input(title: str, chunk: Chunk) -> str:
+    """Embedding text for one chunk: `title + heading_path + chunk text`.
+
+    The breadcrumb enriches the VECTOR only — PG stores `chunk.text` alone and
+    retrieval returns that unmodified text as `content` (no PG schema change:
+    the vector lives in the same row as the plain text, only its input
+    changes). Empty breadcrumbs collapse instead of leaving a blank line.
+    Tests script vector maps against this exact string (see tests/corpus.py).
+    """
+    if chunk.heading_path:
+        return f"{title}\n{chunk.heading_path}\n\n{chunk.text}"
+    return f"{title}\n\n{chunk.text}"
 
 
 class IndexingPipeline:
@@ -123,15 +137,19 @@ class IndexingPipeline:
                 # the CLI sweep is the safety net.
                 log.info("index_job_skipped_stale")
                 return None
-            chunks = chunk_markdown(document.content)
-            vectors = await self._embedding_provider.embed_texts(chunks)
+            title, tags = document.title, document.tags
+            chunks = chunk_markdown_structured(document.content)
+            # The embedding input carries title + breadcrumb context; PG still
+            # stores the plain chunk text (no schema change, only vector input).
+            vectors = await self._embedding_provider.embed_texts(
+                [embedding_input(title, chunk) for chunk in chunks]
+            )
             # Chunks are staging: commit them, status untouched — a later
             # stage failure must still mark the document `failed`.
             await DocumentChunkRepository(session).replace_for_document(
-                document.id, chunks, vectors
+                document.id, [chunk.text for chunk in chunks], vectors
             )
             await session.commit()
-            title, tags = document.title, document.tags
         await self._ensure_index(self._es_client, self._es_index)
         await self._replace_chunks(
             self._es_client,

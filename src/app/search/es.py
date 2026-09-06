@@ -18,6 +18,7 @@ from elasticsearch.helpers import BulkIndexError, async_bulk
 
 from app.core.config import Settings, get_settings
 from app.core.exceptions import SearchIndexError
+from app.rag.chunker import Chunk
 
 logger = structlog.get_logger(__name__)
 
@@ -25,17 +26,55 @@ logger = structlog.get_logger(__name__)
 # base class shared by the API, transport, and bulk-helper error families.
 _ES_ERRORS = (ApiError, TransportError, BulkIndexError)
 
+# Index settings: the `code` analyzer for the programming-documentation corpus
+# (see search-guidelines.md). IK drops English stopwords (if/for/not/with are
+# content words in code) and never splits identifiers, so `chunk_text` carries
+# a `code` subfield analyzed with a whitespace tokenizer (no stopword list)
+# plus a word_delimiter_graph filter: camelCase/snake_case split into parts,
+# originals and catenations preserved (`connection pool` matches
+# ConnectionPool; utf8/int64 stay intact). One analyzer for index and search
+# keeps the declaration single-site; `flatten_graph` is required because
+# word_delimiter_graph emits a token graph and index-time analyzers cannot.
+_CHUNK_SETTINGS: dict[str, dict[str, dict[str, dict[str, object]]]] = {
+    "analysis": {
+        "filter": {
+            "code_delimiter": {
+                "type": "word_delimiter_graph",
+                "preserve_original": True,
+                "split_on_case_change": True,
+                "catenate_words": True,
+                "split_on_numerics": False,
+                "stem_english_possessive": False,
+            }
+        },
+        "analyzer": {
+            "code": {
+                "tokenizer": "whitespace",
+                "filter": ["code_delimiter", "flatten_graph", "lowercase"],
+            }
+        },
+    }
+}
+
 # Explicit mapping beats dynamic: schema drift becomes visible, keyword fields
 # stay filterable, text fields stay analyzed. Text fields use the IK analyzers
 # (analysis-ik plugin baked into the compose image): CJK needs word-level
 # segmentation — ik_max_word at index time (fine-grained, maximizes recall),
 # ik_smart at search time (coarse-grained, avoids query-term explosion).
-_CHUNK_MAPPINGS: dict[str, dict[str, dict[str, str]]] = {
+# `chunk_text.code` is the programming-term escape hatch; `heading_path`
+# carries each chunk's heading breadcrumb into the BM25 leg.
+_CHUNK_MAPPINGS: dict[str, dict[str, dict[str, object]]] = {
     "properties": {
         "document_id": {"type": "keyword"},
         "title": {"type": "text", "analyzer": "ik_max_word", "search_analyzer": "ik_smart"},
         "tags": {"type": "keyword"},
-        "chunk_text": {"type": "text", "analyzer": "ik_max_word", "search_analyzer": "ik_smart"},
+        "heading_path": {"type": "text", "analyzer": "ik_max_word", "search_analyzer": "ik_smart"},
+        "chunk_text": {
+            "type": "text",
+            "analyzer": "ik_max_word",
+            "search_analyzer": "ik_smart",
+            "fields": {"code": {"type": "text", "analyzer": "code"}},
+        },
         "chunk_index": {"type": "integer"},
     }
 }
@@ -55,11 +94,13 @@ def get_shared_es_client() -> AsyncElasticsearch:
 
 
 async def ensure_index(client: AsyncElasticsearch, index: str) -> None:
-    """Create the chunk index with an explicit mapping if it is missing."""
+    """Create the chunk index with explicit settings + mapping if missing."""
     try:
         exists = await client.indices.exists(index=index)
         if not bool(exists):
-            await client.indices.create(index=index, mappings=_CHUNK_MAPPINGS)
+            await client.indices.create(
+                index=index, mappings=_CHUNK_MAPPINGS, settings=_CHUNK_SETTINGS
+            )
     except _ES_ERRORS as exc:
         raise _wrap("ensure_index", index, exc) from exc
 
@@ -71,7 +112,7 @@ async def replace_document_chunks(
     document_id: UUID,
     title: str,
     tags: Sequence[str],
-    chunks: Sequence[str],
+    chunks: Sequence[Chunk],
 ) -> None:
     """Idempotently replace one document's ES docs: delete-by-document, bulk-index.
 
@@ -79,7 +120,9 @@ async def replace_document_chunks(
     document never leaves orphan docs behind. Both steps `refresh` on
     completion: ES is near-real-time, and a re-index arriving inside the
     refresh interval must still see (and delete) the previous version's docs —
-    without this, replace would leak orphans.
+    without this, replace would leak orphans. Each doc stores the chunk's
+    `heading_path` breadcrumb alongside the text (retrieval signal only —
+    content is hydrated from PG).
     """
     try:
         await client.delete_by_query(
@@ -101,7 +144,8 @@ async def replace_document_chunks(
                             "title": title,
                             "tags": list(tags),
                             "chunk_index": chunk_index,
-                            "chunk_text": chunk,
+                            "chunk_text": chunk.text,
+                            "heading_path": chunk.heading_path,
                         },
                     }
                     for chunk_index, chunk in enumerate(chunks)
