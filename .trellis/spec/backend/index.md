@@ -41,6 +41,7 @@ spec on purpose.
 | [Database Guidelines](./database-guidelines.md) | SQLAlchemy 2.0 async, pgvector patterns, Alembic migrations | Filled |
 | [Error Handling](./error-handling.md) | `AppError` hierarchy + LLM/MCP/streaming taxonomy, response envelope | Filled |
 | [Logging Guidelines](./logging-guidelines.md) | structlog events, request/run context, AI-stack logging rules | Filled |
+| [Search Guidelines](./search-guidelines.md) | ES image + analysis-ik plugin build, mapping analyzers, index lifecycle | Filled |
 | [Quality Guidelines](./quality-guidelines.md) | toolchain gates, offline AI test strategy, review checklist, forbidden patterns | Filled |
 
 ---
