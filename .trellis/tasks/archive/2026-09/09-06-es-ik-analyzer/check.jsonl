@@ -1,0 +1,6 @@
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Review checklist and forbidden patterns to audit the change against before completion."}
+{"file": ".trellis/spec/backend/index.md", "reason": "Conventions audit: ES access stays inside search/, config flows through Settings, uv run is canonical."}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "SearchIndexError wrapping contract — ensure_index failures must keep exposing error class + index only."}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "Module map and layering matrix — the mapping change must stay inside search/es.py and infra files must sit at repo root (docker/), not under src/."}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "The runbook resets documents.index_status (PG enum) via raw SQL — confirm no schema/migration code was touched and the ops-only path composes existing primitives."}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "SearchIndexError _wrap logging must keep the no-content contract (error_class + index only); no new log events expected in this change."}
