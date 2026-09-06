@@ -71,3 +71,25 @@ Two-tier head-rescue vector gate (rescue only when the 0.45 ceiling empties the 
 ### Status
 
 [OK] **Completed**
+
+
+## Session 4: ES IK analyzer for Chinese corpus
+
+**Date**: 2026-09-06
+**Task**: ES IK analyzer for Chinese corpus
+**Branch**: `main`
+
+### Summary
+
+Shipped analysis-ik into a locally built ES 8.17.3 image (hermetic zip install after get.infini.cloud throttled to ~1.6KB/s), set ik_max_word/ik_smart on title+chunk_text in _CHUNK_MAPPINGS (queries.py untouched, inherits search_analyzer), added live mapping+_analyze plugin-contract tests, README upgrade runbook (drop index, reset done->pending, cli reindex), migrated the live 16-doc/40-chunk corpus with zero failures; spec captured in search-guidelines.md.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `5a09cf4` | (see git log) |
+| `efd3a70` | (see git log) |
+
+### Status
+
+[OK] **Completed**
