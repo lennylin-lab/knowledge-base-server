@@ -93,3 +93,26 @@ Shipped analysis-ik into a locally built ES 8.17.3 image (hermetic zip install a
 ### Status
 
 [OK] **Completed**
+
+
+## Session 5: Code-aware markdown chunking + code-friendly ES index
+
+**Date**: 2026-09-07
+**Task**: Code-aware markdown chunking + code-friendly ES index
+**Branch**: `main`
+
+### Summary
+
+Implemented 09-06-code-aware-chunking end to end: fence state machine in rag/chunker.py (no more splitting on # comments inside fences, byte-preserving fence content, oversized fences re-fenced per piece, Chunk dataclass + heading breadcrumbs via chunk_markdown_structured), ES code analyzer subfield (whitespace + word_delimiter_graph, no stopwords) with heading_path field and BM25 boosts while IK stays primary for Chinese, indexer embeds title+breadcrumb+text (PG still stores plain text). Regression tests written first and observed failing; check agent fixed breadcrumb store assertion and heading closing-sequence stripping. 400 unit + 44 live-ES tests green; dev-stack migration executed (drop index, reset pending, reindex 16 docs/40 chunks); vector probe re-measured within defaults. Specs updated: search-guidelines (code analyzer, stopword incident, breadcrumb contract), directory-structure (fence-aware chunking invariant, re-measured vector distances).
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `47be781` | (see git log) |
+| `4e933c4` | (see git log) |
+| `365f8f5` | (see git log) |
+
+### Status
+
+[OK] **Completed**
