@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "rag/ and search/ layer boundaries; every ES query lives in search/"}
+{"file": ".trellis/spec/backend/search-guidelines.md", "reason": "mapping is the only analyzer declaration site; index migration runbook"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "bug fixes ship a reproducing test first; chunking is pure-logic unit tested; ES gated by ES_INTEGRATION"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "SearchIndexError wrapping stays content-free"}
