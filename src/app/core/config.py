@@ -69,7 +69,25 @@ class Settings(BaseSettings):
     # corpora. Defaults mirror the Retriever constructor constants; keep the
     # two in sync (guarded by a unit test).
     # BM25 leg: drop ES hits with `_score` below this; `0.0` disables.
-    SEARCH_BM25_MIN_SCORE: float = 1.0
+    # 0.0 is the deliberate default — an absolute BM25 floor cannot work
+    # (measured 2026-09-08, task 09-08-es-bm25-scoring D5): the score scale
+    # is query-dependent, top hits spanning 4.46 ("for 循环怎么写") to 28.39
+    # ("setState 状态管理") with min/top ratios 0.045-0.586 within result
+    # sets, so a floor calibrated for one query is meaningless for another.
+    # The scale-free noise gate is term coverage (SEARCH_BM25_MIN_COVERAGE);
+    # keep this field only as a measured operator escape hatch, never
+    # re-enable it blindly.
+    SEARCH_BM25_MIN_SCORE: float = 0.0
+    # BM25 leg term coverage: ES `minimum_should_match` applied to the
+    # `chunk_text` leaf of the BM25 query (search/queries.py) — how much of
+    # the query a document must match on the prose field. Scale-free, unlike
+    # the score floor above: "matched 70% of the query's terms" means the
+    # same thing across queries with different BM25 score scales. Empty
+    # string omits the key entirely (gate disabled). Applied to `chunk_text`
+    # only: its IK tokenization defines the query's terms, while the `code`
+    # subfield keeps English stopwords IK drops (a percentage would mean
+    # something different there) and title/heading breadcrumbs are short.
+    SEARCH_BM25_MIN_COVERAGE: str = "70%"
     # Vector leg: drop pgvector hits with cosine distance (range 0..2) above
     # this; `2.0` (or anything greater) disables.
     SEARCH_VECTOR_MAX_DISTANCE: float = 0.45

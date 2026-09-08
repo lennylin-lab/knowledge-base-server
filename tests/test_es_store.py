@@ -52,9 +52,63 @@ async def test_ensure_index_creates_explicit_mapping_and_is_idempotent(es_client
         "type": "text",
         "analyzer": "ik_max_word",
         "search_analyzer": "ik_smart",
-        "fields": {"code": {"type": "text", "analyzer": "code"}},
+        "fields": {"code": {"type": "text", "analyzer": "code", "search_analyzer": "code_search"}},
     }
     assert properties["chunk_index"] == {"type": "integer"}
+
+
+async def test_code_analyzer_emits_camel_case_token_exactly_once(es_client, es_index_name):
+    await ensure_index(es_client, es_index_name)
+    # The index-time expansion (preserve_original + catenate_words) emits the
+    # same string twice for a pure camelCase identifier; remove_duplicates
+    # (after lowercase) must collapse it or BM25 tf doubles for every
+    # camelCase token.
+    response = await es_client.indices.analyze(
+        index=es_index_name, analyzer="code", text="setState"
+    )
+
+    tokens = [entry["token"] for entry in response["tokens"]]
+    assert tokens.count("setstate") == 1
+
+
+async def test_code_search_analyzer_emits_flat_split_stream(es_client, es_index_name):
+    await ensure_index(es_client, es_index_name)
+    # The search-side analyzer must ONLY split: a stacked token graph (the
+    # index-time preserve_original/catenate expansion) compiles into an
+    # adjacency phrase, so an identifier query silently matched nothing. Flat
+    # means one token per position: no stacked duplicates, no
+    # positionLength > 1 multi-position tokens.
+    response = await es_client.indices.analyze(
+        index=es_index_name, analyzer="code_search", text="ConnectionPool"
+    )
+
+    tokens = [entry["token"] for entry in response["tokens"]]
+    positions = [entry["position"] for entry in response["tokens"]]
+    # ES omits positionLength when it is 1; any present value means a
+    # multi-position (stacked) token — the phrase-query trap this analyzer
+    # exists to avoid.
+    stacked = [entry for entry in response["tokens"] if entry.get("positionLength", 1) > 1]
+    assert tokens == ["connection", "pool"]
+    assert len(set(positions)) == len(positions)
+    assert stacked == []
+
+
+async def test_identifier_match_query_compiles_without_phrase_clause(es_client, es_index_name):
+    await ensure_index(es_client, es_index_name)
+    # End-to-end compile check of the D2 fix: the query Lucene builds for an
+    # identifier against the code subfield must be a plain OR over the split
+    # parts. Pre-fix the stacked search-side token graph compiled into an
+    # adjacency-constrained phrase (`chunk_text.code:"connection pool"`,
+    # wedged between duplicated `connectionpool` clauses) and matched nothing.
+    response = await es_client.indices.validate_query(
+        index=es_index_name,
+        query={"match": {"chunk_text.code": "ConnectionPool"}},
+        explain=True,
+        all_shards=True,
+    )
+
+    explanation = response["explanations"][0]["explanation"]
+    assert explanation == "chunk_text.code:connection chunk_text.code:pool"
 
 
 async def test_code_analyzer_keeps_programming_keywords(es_client, es_index_name):

@@ -26,15 +26,26 @@ logger = structlog.get_logger(__name__)
 # base class shared by the API, transport, and bulk-helper error families.
 _ES_ERRORS = (ApiError, TransportError, BulkIndexError)
 
-# Index settings: the `code` analyzer for the programming-documentation corpus
-# (see search-guidelines.md). IK drops English stopwords (if/for/not/with are
-# content words in code) and never splits identifiers, so `chunk_text` carries
-# a `code` subfield analyzed with a whitespace tokenizer (no stopword list)
-# plus a word_delimiter_graph filter: camelCase/snake_case split into parts,
-# originals and catenations preserved (`connection pool` matches
-# ConnectionPool; utf8/int64 stay intact). One analyzer for index and search
-# keeps the declaration single-site; `flatten_graph` is required because
-# word_delimiter_graph emits a token graph and index-time analyzers cannot.
+# Index settings: the `code` analyzers for the programming-documentation
+# corpus (see search-guidelines.md). IK drops English stopwords
+# (if/for/not/with are content words in code) and never splits identifiers, so
+# `chunk_text` carries a `code` subfield analyzed with a whitespace tokenizer
+# (no stopword list) plus a word_delimiter_graph filter: camelCase/snake_case
+# split into parts, originals and catenations preserved (`connection pool`
+# matches ConnectionPool; utf8/int64 stay intact).
+#
+# Index and search analyzers are deliberately SPLIT here. The index-time
+# `preserve_original` + `catenate_words` expansion stacks alternative tokens at
+# one position; used at search time that stacked graph compiles into an
+# adjacency-constrained PHRASE query, so an identifier query like
+# `ConnectionPool` silently matches nothing. The search-side `code_search`
+# analyzer only splits (flat token stream, plain OR). The same expansion also
+# emits the same string twice for a pure camelCase identifier (original ==
+# catenation after lowercase), so `remove_duplicates` — AFTER `lowercase`, so
+# casing variants collapse first — drops the duplicate index token and its
+# BM25 tf inflation. `flatten_graph` stays index-time only: it exists because
+# index-time analyzers cannot emit token graphs, and the flat search stream
+# needs none.
 _CHUNK_SETTINGS: dict[str, dict[str, dict[str, dict[str, object]]]] = {
     "analysis": {
         "filter": {
@@ -45,13 +56,25 @@ _CHUNK_SETTINGS: dict[str, dict[str, dict[str, dict[str, object]]]] = {
                 "catenate_words": True,
                 "split_on_numerics": False,
                 "stem_english_possessive": False,
-            }
+            },
+            "code_delimiter_search": {
+                "type": "word_delimiter_graph",
+                "preserve_original": False,
+                "split_on_case_change": True,
+                "catenate_words": False,
+                "split_on_numerics": False,
+                "stem_english_possessive": False,
+            },
         },
         "analyzer": {
             "code": {
                 "tokenizer": "whitespace",
-                "filter": ["code_delimiter", "flatten_graph", "lowercase"],
-            }
+                "filter": ["code_delimiter", "flatten_graph", "lowercase", "remove_duplicates"],
+            },
+            "code_search": {
+                "tokenizer": "whitespace",
+                "filter": ["code_delimiter_search", "lowercase"],
+            },
         },
     }
 }
@@ -73,7 +96,9 @@ _CHUNK_MAPPINGS: dict[str, dict[str, dict[str, object]]] = {
             "type": "text",
             "analyzer": "ik_max_word",
             "search_analyzer": "ik_smart",
-            "fields": {"code": {"type": "text", "analyzer": "code"}},
+            "fields": {
+                "code": {"type": "text", "analyzer": "code", "search_analyzer": "code_search"}
+            },
         },
         "chunk_index": {"type": "integer"},
     }

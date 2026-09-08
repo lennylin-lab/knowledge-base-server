@@ -5,9 +5,12 @@ ES returns ranked chunk keys only (source retrieval disabled); PostgreSQL is
 the single source of truth for visibility and content — hydration joins live
 documents, so soft-deleted (but still-indexed) chunks can never surface.
 
-Relevance gates keep weak matches from padding the results: each leg drops
-hits failing an absolute threshold before fusion (a BM25 `_score` floor, a
-cosine-distance ceiling), and the fused ranking applies a relative floor
+Relevance gates keep weak matches from padding the results: the BM25 leg's
+noise guard is term coverage (an ES `minimum_should_match` on the prose
+field, threaded from Settings through the query builder; the absolute
+`_score` floor is a disabled-by-default operator escape hatch — see
+`DEFAULT_BM25_MIN_SCORE` below), and the vector leg drops hits beyond a
+cosine-distance ceiling. The fused ranking applies a relative floor
 against the top hit — empty results beat noise on small corpora. When the
 vector ceiling empties its leg, a rescue tier admits that leg's clustered
 head (short keyword queries sit systematically farther from long chunks, so
@@ -32,7 +35,7 @@ from app.core.exceptions import LLMProviderError, LLMRateLimitedError
 from app.llm.embeddings import EmbeddingProvider
 from app.repositories.document_chunk import ChunkRow, DocumentChunkRepository
 from app.search.es import EsChunkHit, search_chunks
-from app.search.queries import bm25_chunk_query
+from app.search.queries import DEFAULT_BM25_MIN_COVERAGE, bm25_chunk_query
 
 logger = structlog.get_logger(__name__)
 
@@ -45,7 +48,14 @@ CANDIDATE_POOL = 50
 # Gate defaults, mirroring the Settings fields in core/config.py (a drift-guard
 # unit test keeps the two in sync). Wiring always injects the configured
 # values (api/deps.py); these cover direct construction (tests, tooling).
-DEFAULT_BM25_MIN_SCORE = 1.0
+# The absolute BM25 score floor is RETIRED as a live gate (default 0.0): BM25
+# score scales are query-dependent (measured 2026-09-08, task
+# 09-08-es-bm25-scoring D5: top-hit scores spanned 4.46-28.39 across probe
+# queries with min/top ratios 0.045-0.586 within result sets), so no absolute
+# floor separates weak-but-real hits from noise. The live BM25 noise gate is
+# the scale-free term coverage (`bm25_min_coverage`, an ES
+# `minimum_should_match` on the prose leaf — see search/queries.py).
+DEFAULT_BM25_MIN_SCORE = 0.0
 DEFAULT_VECTOR_MAX_DISTANCE = 0.45
 DEFAULT_VECTOR_RESCUE_MARGIN = 0.15
 DEFAULT_VECTOR_RESCUE_MAX_DISTANCE = 0.85
@@ -267,6 +277,7 @@ class Retriever:
         embedding_provider: EmbeddingProvider | None,
         es_index: str,
         bm25_min_score: float = DEFAULT_BM25_MIN_SCORE,
+        bm25_min_coverage: str = DEFAULT_BM25_MIN_COVERAGE,
         vector_max_distance: float = DEFAULT_VECTOR_MAX_DISTANCE,
         vector_rescue_margin: float = DEFAULT_VECTOR_RESCUE_MARGIN,
         vector_rescue_max_distance: float = DEFAULT_VECTOR_RESCUE_MAX_DISTANCE,
@@ -278,6 +289,7 @@ class Retriever:
         self._embedding_provider = embedding_provider
         self._es_index = es_index
         self._bm25_min_score = bm25_min_score
+        self._bm25_min_coverage = bm25_min_coverage
         self._vector_max_distance = vector_max_distance
         self._vector_rescue_margin = vector_rescue_margin
         self._vector_rescue_max_distance = vector_rescue_max_distance
@@ -307,7 +319,13 @@ class Retriever:
         the raw caller-provided length — truncation is retriever-internal.
         """
         query = truncate_query(query, max_length=self._max_query_length)
-        body = bm25_chunk_query(query, size=CANDIDATE_POOL, tag=tag, min_score=self._bm25_min_score)
+        body = bm25_chunk_query(
+            query,
+            size=CANDIDATE_POOL,
+            tag=tag,
+            min_score=self._bm25_min_score,
+            min_coverage=self._bm25_min_coverage,
+        )
         es_result, vector_result = await asyncio.gather(
             search_chunks(self._es_client, index=self._es_index, body=body),
             self._vector_leg(query, tag=tag),

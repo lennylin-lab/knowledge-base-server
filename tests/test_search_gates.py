@@ -26,6 +26,7 @@ from app.rag.retriever import (
 )
 from app.repositories.document_chunk import ChunkRow
 from app.search.es import EsChunkHit
+from app.search.queries import DEFAULT_BM25_MIN_COVERAGE
 from fakes import hermetic_settings
 
 
@@ -261,3 +262,11 @@ def test_settings_gate_defaults_match_retriever_defaults():
     assert settings.SEARCH_VECTOR_RESCUE_MAX_DISTANCE == DEFAULT_VECTOR_RESCUE_MAX_DISTANCE
     assert settings.SEARCH_RRF_MIN_RELATIVE == DEFAULT_RRF_MIN_RELATIVE
     assert settings.SEARCH_MAX_QUERY_LENGTH == DEFAULT_MAX_QUERY_LENGTH
+
+
+def test_settings_coverage_default_matches_query_builder_default():
+    # The coverage gate's single source: Settings.SEARCH_BM25_MIN_COVERAGE.
+    # The Retriever constructor default IS this constant (imported, not
+    # redefined), so one assertion covers the whole wiring chain — Settings,
+    # Retriever, and bm25_chunk_query.
+    assert hermetic_settings().SEARCH_BM25_MIN_COVERAGE == DEFAULT_BM25_MIN_COVERAGE

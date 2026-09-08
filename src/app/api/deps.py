@@ -160,6 +160,7 @@ def _build_retriever(settings: Settings, provider: OpenAIEmbeddingProvider | Non
         embedding_provider=provider,
         es_index=settings.ES_INDEX,
         bm25_min_score=settings.SEARCH_BM25_MIN_SCORE,
+        bm25_min_coverage=settings.SEARCH_BM25_MIN_COVERAGE,
         vector_max_distance=settings.SEARCH_VECTOR_MAX_DISTANCE,
         vector_rescue_margin=settings.SEARCH_VECTOR_RESCUE_MARGIN,
         vector_rescue_max_distance=settings.SEARCH_VECTOR_RESCUE_MAX_DISTANCE,
