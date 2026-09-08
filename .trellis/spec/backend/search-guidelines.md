@@ -88,9 +88,14 @@
 #### Correct
 
 ```python
-# queries.py stays analyzer-free; multi_match inherits each field's
-# search_analyzer declared in _CHUNK_MAPPINGS (single declaration site).
-{"multi_match": {"query": q, "fields": ["chunk_text", f"title^{_TITLE_BOOST}"]}}
+# queries.py stays analyzer-free; every clause inherits each field's
+# analyzers from _CHUNK_MAPPINGS (single declaration site).
+{"bool": {"should": [
+    {"multi_match": {"query": q, "fields": ["title^2", "heading_path^1.5"],
+                     "type": "best_fields"}},   # identity group: max, not sum
+    {"match": {"chunk_text": {"query": q, "minimum_should_match": "70%"}}},
+    {"match": {"chunk_text.code": {"query": q, "boost": 1.5}}},
+], "minimum_should_match": 1}}
 ```
 
 ---
@@ -125,14 +130,42 @@ their most discriminative terms. IK also never splits identifiers
 (`ConnectionPool` stays one token, so `connection pool` can never match it).
 The escape hatch is a multi-field, NOT a replacement analyzer: `chunk_text`
 keeps IK (Chinese word segmentation is the corpus majority) and
-`chunk_text.code` analyzes with the index-settings `code` analyzer —
-whitespace tokenizer (no stopword list: keywords survive) +
-`word_delimiter_graph` (`preserve_original`, `split_on_case_change`,
-`catenate_words`, `split_on_numerics=False`) + `flatten_graph` + `lowercase`.
-One analyzer for index and search keeps the declaration single-site;
-`flatten_graph` is mandatory because index-time analyzers cannot emit token
-graphs. In `best_fields` a term matched by both `chunk_text` and its `code`
-subfield scores once (max, not sum) — the subfield adds recall only.
+`chunk_text.code` uses TWO analyzers (2026-09-08, task
+`09-08-es-bm25-scoring`) — both still declared in `_CHUNK_SETTINGS` only:
+
+- **index** `code`: whitespace tokenizer (no stopword list: keywords
+  survive) + `word_delimiter_graph` (`preserve_original`,
+  `split_on_case_change`, `catenate_words`, `split_on_numerics=False`) +
+  `flatten_graph` (mandatory: index-time analyzers cannot emit token
+  graphs) + `lowercase` + `remove_duplicates`.
+- **search** `code_search`: whitespace + a delimiter filter with
+  `preserve_original=False`, `catenate_words=False` (+`lowercase`) — a
+  flat, unstacked stream. NO `flatten_graph` (flattening is an index-time
+  requirement, not a search-time one).
+
+`remove_duplicates` (D3): `preserve_original` + `catenate_words` emit the
+SAME string twice at one position for pure camelCase
+(`setState -> setstate(p0) setstate(p0) set(p0) state(p1)`), inflating tf
+to 2. It runs after `lowercase` so casing variants collapse first.
+
+> **Warning (D2 — the phrase-query trap)**: a `word_delimiter_graph` with
+> `preserve_original`/`catenate_words` used as a SEARCH analyzer stacks
+> alternatives at one position; Lucene compiles the stack into an
+> adjacency-constrained phrase, so identifier queries returned **0 hits**
+> (`ConnectionPool`, `async_bulk` measured). Rule: index-time expansion
+> filters never run at search time — split analyzers and bind the search
+> one via `search_analyzer` in `_CHUNK_MAPPINGS`. `auto_generate_synonyms
+> _phrase_query: false` at the query site was rejected: it patches the
+> symptom, leaves the broken analyzer in place, and drags analyzer
+> knowledge into `queries.py` against C3.
+
+Identifier matching is symmetric through sub-words after the split:
+`ConnectionPool` and `connection pool` both analyze to `[connection,
+pool]` on the search side and match the indexed parts. The exact
+concatenated form (`connectionpool`) is no longer a distinct query term on
+the code subfield — accepted trade-off: a chunk with "connection" and
+"pool" scattered apart scores like one containing the identifier; recall
+was the priority (D2 measured 0 hits for identifier queries before this).
 
 **Heading breadcrumbs**: every ES chunk doc carries `heading_path` (the
 ancestor breadcrumb from `rag/chunker.py::Chunk`, IK-analyzed like `title`),
@@ -151,4 +184,88 @@ the vector leg embeds `title + heading_path + text` (`rag/indexer.py
 
 ---
 
+## Scenario: BM25 scoring shape and the coverage gate
+
+### 1. Scope / Trigger
+
+- Trigger: cross-layer contract change — `bm25_chunk_query` body shape and
+  a new `Settings` env key (`KB_SEARCH_BM25_MIN_COVERAGE`), added
+  2026-09-08 (task `09-08-es-bm25-scoring`).
+
+### 2. Signatures
+
+- `bm25_chunk_query(q, *, size, tag=None, min_score=0.0,
+  min_coverage=DEFAULT_BM25_MIN_COVERAGE)` in `search/queries.py`.
+- `Retriever(..., bm25_min_coverage=...)` — constructor-injected from
+  `Settings` via `_build_retriever` (established gates pattern).
+
+### 3. Contracts
+
+- Body: three `bool.should` groups — identity (`title^2` + `heading_path^1.5`
+  as ONE `best_fields` group, max within), prose (`chunk_text`), code
+  (`chunk_text.code^1.5`); independent groups SUM; outer
+  `minimum_should_match: 1`; tag filter as `filter` clause.
+- `KB_SEARCH_BM25_MIN_COVERAGE` (default `"70%"`, `""` omits the key):
+  ES `minimum_should_match` on the `chunk_text` leaf ONLY.
+- `KB_SEARCH_BM25_MIN_SCORE` (default `0.0`, **retired**): mechanism and
+  ES-side `min_score` plumbing kept as an operator escape hatch only.
+
+### 4. Validation & Error Matrix
+
+- `heading_path` contains `title` textually (C1) → any additive scheme
+  must keep them in one max-group, else title matches triple-count.
+- Absolute BM25 floor re-enabled → gate silently never fires or silences
+  real hits: top-hit scores measured 4.46–28.39 across probe queries,
+  min/top ratios 0.045–0.586 (D5) — the reason the default is 0.0.
+- Coverage tightened to `100%` → legitimate queries return 0 (`for
+  循环怎么写` measured); `70%` is the loosest value that zeroes the noise
+  probes.
+
+### 5. Good/Base/Bad Cases
+
+- Good: `setState 状态管理` — chunk matching both halves outranks
+  single-field matches (D1 inversion fixed; measured 39.99/30.99 vs 15.67).
+- Base: pure-CJK query — identity + prose groups carry it, code group
+  contributes nothing.
+- Bad: setting `minimum_should_match` on `chunk_text.code` (different
+  token semantics — that analyzer keeps IK-dropped stopwords) or on the
+  identity group (penalizes short breadcrumbs).
+
+### 6. Tests Required
+
+- `tests/test_es_queries.py`: full-dict body pin; coverage present /
+  omitted on `""`; recursive no-`analyzer`-key walk; tag-filter
+  non-interference (offline).
+- `tests/test_es_relevance.py` (`es`-marked, live): D2 identifier
+  regressions (`ConnectionPool`/`async_bulk` ≥ 1 hit), D1 rank ordering,
+  C1 title non-duplication (synthetic corpus), noise → 0, relevance
+  probes ≥ 1.
+- `tests/test_search_gates.py`: Settings↔query-builder↔Retriever
+  drift-guard covers `SEARCH_BM25_MIN_COVERAGE` and the 0.0 score default.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```python
+# best_fields takes ONE field's score; cross-field evidence is discarded
+# (rank inversion: mixed queries lose to single-field matches).
+{"multi_match": {"query": q, "fields": _MATCH_FIELDS}}
+```
+
+#### Correct
+
+```python
+# Groups that must not double-count share a max-group; independent
+# evidence sums. See §2/§3 above for the exact shape.
+```
+
+**Calibration record**: design.md § Calibration of task
+`09-08-es-bm25-scoring` holds the before/after probe matrix (9 queries ×
+coverage values) — re-run the probe before changing coverage or boosts.
+
+---
+
 **Language**: All documentation is written in **English**.
+
+

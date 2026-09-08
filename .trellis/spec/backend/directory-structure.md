@@ -121,10 +121,15 @@ Key points:
   text-only wrapper for `services/agents.py`. Never decide structure with a
   line-level test alone — `tests/test_chunker.py` pins the fence invariants.
 - **Retrieval quality gates live in `rag/retriever.py` only** (2026-09-05).
-  Three `Settings` thresholds, constructor-injected into `Retriever` from
+  `Settings` thresholds, constructor-injected into `Retriever` from
   `_build_retriever` in `api/deps.py` (shared by search, chat, and writing
-  wiring): `KB_SEARCH_BM25_MIN_SCORE` (default 1.0; `0.0` disables, also
-  omitted from the ES body when non-positive via `bm25_chunk_query`),
+  wiring): `KB_SEARCH_BM25_MIN_COVERAGE` (default `"70%"` — term-coverage
+  `minimum_should_match` on the `chunk_text` leaf via `bm25_chunk_query`;
+  the LIVE BM25 noise guard since 2026-09-08, because BM25 score scale is
+  query-dependent and no absolute floor generalizes; `""` omits the key),
+  `KB_SEARCH_BM25_MIN_SCORE` (default `0.0`, RETIRED as a relevance gate
+  — mechanism + ES-side `min_score` plumbing kept as an operator escape
+  hatch only; rationale at the `core/config.py` site),
   `KB_SEARCH_VECTOR_MAX_DISTANCE` (default 0.45 cosine distance ceiling;
   `>= 2.0` disables), `KB_SEARCH_RRF_MIN_RELATIVE` (default 0.35 fraction
   of top fused score; `0.0` disables). Pipeline order: leg gates →
@@ -146,8 +151,9 @@ Key points:
   enforcement point for API and agent tools; standard-analyzer CJK yields
   ~1 token per char, so uncapped queries overflow Lucene's 1024 clause
   limit and 502 the ES leg. `SearchHit` carries optional `es_score` / `vector_distance`
-  (None when that leg did not rank the chunk); `Retriever` thresholds are
-  raw-leg absolute scores, never RRF rank-derived scores. Routers,
+  (None when that leg did not rank the chunk); `Retriever` leg gates are
+  raw-leg quantities (vector distance ceiling, BM25 term coverage), never
+  RRF rank-derived scores. Routers,
   services, and agents consume the gated retriever as-is — no re-filtering
   or re-thresholding outside `rag/`. Tests pinning legacy ungated behavior
   use `GATES_OFF` from `tests/fakes.py`; a drift-guard unit test keeps

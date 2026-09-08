@@ -87,6 +87,14 @@ safe. Instances of this migration so far:
   schema change). Both legs' inputs change, so a full reindex is required.
   Afterward, recalibrate `KB_SEARCH_VECTOR_MAX_DISTANCE` with
   `tests/test_vector_distance_probe.py` if retrieval quality shifts.
+- **BM25 scoring overhaul** (`09-08-es-bm25-scoring`): the `code` analyzer
+  gains `remove_duplicates` (camelCase identifiers were stored twice,
+  inflating BM25 tf) and the subfield splits into an index analyzer plus a
+  new `code_search` search analyzer bound via `search_analyzer` — a flat
+  token stream that stops identifier queries from compiling into adjacency
+  phrases (they returned 0 hits). Query shape changed from a single
+  `multi_match` to additive field groups with a term-coverage gate; only the
+  analyzers force this reindex.
 
 ## Quality gates
 
