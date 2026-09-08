@@ -116,3 +116,25 @@ Implemented 09-06-code-aware-chunking end to end: fence state machine in rag/chu
 ### Status
 
 [OK] **Completed**
+
+
+## Session 6: ES BM25 scoring overhaul: cross-field evidence and coverage gate
+
+**Date**: 2026-09-08
+**Task**: ES BM25 scoring overhaul: cross-field evidence and coverage gate
+**Branch**: `main`
+
+### Summary
+
+Implemented 09-08-es-bm25-scoring end to end. G1: split the code analyzer — flat code_search (no preserve_original/catenate/flatten_graph) bound via search_analyzer, remove_duplicates on the index side (camelCase tf inflation); D2 phrase-query trap eliminated (ConnectionPool 0->2 hits, async_bulk 0->12). G2: replaced multi_match best_fields with three-group bool.should (identity max-group for title/heading_path C1 overlap, prose, code groups sum). G3: SEARCH_BM25_MIN_COVERAGE=70% minimum_should_match on chunk_text leaf replaces the never-firing absolute floor; SEARCH_BM25_MIN_SCORE retired to 0.0 with rationale. Calibration matrix recorded in design.md (noise queries -> 0, all relevance probes >= 1). Live migration run: 16/16 docs done, 40 chunk docs. Check agent verified all 12 acceptance criteria against live-ES measurements; fixed retriever docstring + design.md files table. 414 unit + 51 live-ES tests green, ruff/mypy clean. Specs updated: search-guidelines (analyzer split rule, D2 warning, scoring scenario), directory-structure (gates block).
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `bf03a23` | (see git log) |
+| `0d599ad` | (see git log) |
+
+### Status
+
+[OK] **Completed**

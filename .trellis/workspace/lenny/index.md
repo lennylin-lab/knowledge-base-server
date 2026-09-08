@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 5
-- **Last Active**: 2026-09-07
+- **Total Sessions**: 6
+- **Last Active**: 2026-09-08
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~118 | Active |
+| `journal-1.md` | ~140 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 6 | 2026-09-08 | ES BM25 scoring overhaul: cross-field evidence and coverage gate | `bf03a23`, `0d599ad` | `main` |
 | 5 | 2026-09-07 | Code-aware markdown chunking + code-friendly ES index | `47be781`, `4e933c4`, `365f8f5` | `main` |
 | 4 | 2026-09-06 | ES IK analyzer for Chinese corpus | `5a09cf4`, `efd3a70` | `main` |
 | 3 | 2026-09-06 | Short-query vector gate calibration | `bba8dad`, `77c8693` | `main` |
