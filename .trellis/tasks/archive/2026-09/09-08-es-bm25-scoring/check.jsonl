@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Review checklist, forbidden patterns, and the gate commands the check run must re-execute."}
+{"file": ".trellis/spec/backend/search-guidelines.md", "reason": "Compliance target: no analyzer key in query bodies, mapping as single declaration site, migration runbook completeness."}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Verify the ES-side change did not leak into rag/ fusion or repositories/ and that degradation paths stay intact."}
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend conventions baseline for the consistency sweep."}

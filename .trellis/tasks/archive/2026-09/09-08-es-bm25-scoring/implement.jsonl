@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/backend/search-guidelines.md", "reason": "Binding ES contract: analyzers are declared ONLY in _CHUNK_SETTINGS/_CHUNK_MAPPINGS and never in query bodies (C3); also holds the reindex migration runbook this task must follow and the code-subfield claim this task corrects."}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "Layering rule that every ES query lives in search/ and the retriever consumes prepared bodies — keeps the change inside search/es.py + search/queries.py (R9 scope discipline)."}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Test markers (es/db/live_llm) and the offline-first test strategy; this task adds both offline body-shape tests and live-ES relevance tests."}
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend conventions: Settings-driven config, uv run toolchain, layering matrix."}
