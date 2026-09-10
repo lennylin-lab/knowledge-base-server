@@ -15,9 +15,12 @@ against the top hit — empty results beat noise on small corpora. When the
 vector ceiling empties its leg, a rescue tier admits that leg's clustered
 head (short keyword queries sit systematically farther from long chunks, so
 the absolute ceiling alone would silence semantic recall exactly when it is
-needed) — but only when the leg is plausibly on-domain: a leg whose closest
-hit is already beyond the on-domain trigger stays empty (empty beats noise),
-and the rescue cap remains the absolute backstop.
+needed) — but only as a backstop for lexical failure: the gated BM25 leg
+must have no surviving hits (when BM25 already answered, the semantic
+backstop would only inject the same-domain cluster), and the leg must be
+plausibly on-domain: a leg whose closest hit is already beyond the on-domain
+trigger stays empty (empty beats noise), and the rescue cap remains the
+absolute backstop.
 """
 
 from __future__ import annotations
@@ -161,6 +164,7 @@ def filter_vector_rows_with_rescue(
     rescue_margin: float,
     rescue_max_distance: float,
     rescue_trigger_max_distance: float,
+    bm25_leg_empty: bool,
 ) -> tuple[list[ChunkRow], int]:
     """Two-tier vector gate: the absolute ceiling plus a head-rescue tier.
 
@@ -168,23 +172,33 @@ def filter_vector_rows_with_rescue(
     the leg (and rows exist) does the rescue tier admit rows within
     `min(leg_min + rescue_margin, rescue_max_distance)` — the clustered head
     of a leg shifted up wholesale — so short keyword queries keep semantic
-    recall without loosening the primary ceiling for everyone. The on-domain
+    recall without loosening the primary ceiling for everyone. Rescue is the
+    lexical-failure backstop: `bm25_leg_empty` must hold (the gated BM25 leg
+    produced no surviving hits — a vocabulary mismatch the exact-term leg
+    could not answer); when BM25 already has matches, the emptied vector leg
+    stays empty instead of injecting the same-domain cluster. The on-domain
     trigger gates WHETHER rescue fires at all: a leg whose minimum distance
     exceeds `rescue_trigger_max_distance` is not plausibly on-domain, so it
-    stays empty instead of rescuing its noise band. `rescue_trigger_max_distance
-    >= 2.0` — cosine distance's maximum — disables the trigger (rescue fires
-    whenever the primary tier empties the leg). The rescue WINDOW logic is
-    unchanged: `rescue_margin <= 0` or `rescue_max_distance <= 0` still
-    disables rescue (behavior identical to the single-tier gate), and the cap
-    remains the absolute backstop for the window. Returns the kept rows and
-    how many were admitted ONLY via the rescue tier (0 whenever the primary
-    tier has survivors).
+    stays empty instead of rescuing its noise band.
+    `rescue_trigger_max_distance >= 2.0` — cosine distance's maximum —
+    disables the trigger (rescue fires whenever the primary tier empties the
+    leg). The rescue WINDOW logic is unchanged: `rescue_margin <= 0` or
+    `rescue_max_distance <= 0` still disables rescue (behavior identical to
+    the single-tier gate), and the cap remains the absolute backstop for the
+    window. Returns the kept rows and how many were admitted ONLY via the
+    rescue tier (0 whenever the primary tier has survivors or the BM25 leg
+    is non-empty).
     """
     if max_distance >= 2.0:
         return list(rows), 0
     primary = [row for row in rows if row.distance is None or row.distance <= max_distance]
     if primary or not rows:
         return primary, 0
+    if not bm25_leg_empty:
+        # BM25 already answered lexically: the backstop exists for vocabulary
+        # mismatch, so the emptied vector leg stays empty rather than
+        # admitting the broad same-domain cluster.
+        return [], 0
     if rescue_margin <= 0 or rescue_max_distance <= 0:
         return [], 0
     # Every remaining row carries a measured distance: a None-distance row
@@ -367,8 +381,9 @@ class Retriever:
         # gate). ES already pruned at `min_score`; the Python-side re-check
         # keeps the gate authoritative regardless of ES scoring quirks. The
         # vector gate is two-tier: rescue only ever fires when the ceiling
-        # empties the leg AND the leg is plausibly on-domain (the trigger), so
-        # a living primary tier is bit-identical to the single-tier behavior.
+        # empties the leg AND the gated BM25 leg is empty (the lexical-failure
+        # backstop) AND the leg is plausibly on-domain (the trigger), so a
+        # living primary tier is bit-identical to the single-tier behavior.
         kept_es_hits = filter_es_hits(es_hits, min_score=self._bm25_min_score)
         kept_vector_rows, vector_rescued = filter_vector_rows_with_rescue(
             vector_leg.rows,
@@ -376,6 +391,7 @@ class Retriever:
             rescue_margin=self._vector_rescue_margin,
             rescue_max_distance=self._vector_rescue_max_distance,
             rescue_trigger_max_distance=self._vector_rescue_trigger_max_distance,
+            bm25_leg_empty=(len(kept_es_hits) == 0),
         )
 
         es_keys = [ChunkKey(hit.document_id, hit.chunk_index) for hit in kept_es_hits]
