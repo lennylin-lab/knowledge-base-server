@@ -277,3 +277,24 @@ Implemented 09-11-rolling-history-summary: evicted turns now fold incrementally 
 ### Status
 
 [OK] **Completed**
+
+
+## Session 13: Follow-up residual-noise evaluation (direction #4, no-go)
+
+**Date**: 2026-09-11
+**Task**: Follow-up residual-noise evaluation (direction #4, no-go)
+**Branch**: `main`
+
+### Summary
+
+Executed 09-11-followup-noise-eval against the live 15-doc corpus (37+2 chunks; 2 orphan ES chunks of a deleted predecessor doc recorded as hygiene note, never surfaced). 6 follow-ups over 5 axes (anaphora, comparative, topic shift, ellipsis, out-of-domain), three-way measurement raw/rewritten/ideal at limit=8 with actual rewritten strings captured from the shipped rewriter. Results: mean noise 5.50 -> 3.17 (ideal 2.67), rewrite lift 2.33 = 82% of achievable reduction, recall 3/6 -> 6/6, out-of-domain follow-up returns 0 in ALL conditions; 3 end-to-end chat spot-checks corroborate. Decision: NO-GO per design rule (0.50 residual gap, F6 residual is N=1 with no recall cost — watched pattern, no follow-up task). Check agent verified all 5 ACs incl. live re-run reproduction of the F6 row, fixed 3 findings.md accuracy issues, removed leftover /tmp scratch dir; zero production code changes. Spec: follow-up noise calibration record appended to search-guidelines.md. Direction #4 of the multi-turn issue is now closed.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `998cf21` | (see git log) |
+
+### Status
+
+[OK] **Completed**
