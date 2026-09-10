@@ -128,6 +128,20 @@ that reproduces the bug first.
 > prompt itself (e.g. `_user_prompts(histories[0]) == [original,
 > transformed]`), which simultaneously re-pins what the history carried.
 
+> **Warning (learned 2026-09-11, token-history-budget task): tiktoken hides a
+> network fetch behind first use.** Cold-cache `get_encoding` performs an
+> un-timed `requests.get` for the BPE file, so constructing a tokenizer
+> eagerly (or inside a test import path) silently requires the network;
+> `encoding_for_model` on an unknown name, by contrast, raises `KeyError` in
+> a pure registry lookup before any I/O. Pattern: wrap BOTH encoder
+> construction and `encode` calls in try/except degrading to a deterministic
+> heuristic (see `llm/tokens.py::build_token_counter`), build the encoder
+> lazily on first use, and in tests either inject a plain callable counter or
+> monkeypatch tiktoken — never load a real encoder. Proof technique for "the
+> suite needs no network": re-run under a socket-blocking plugin (loopback
+> allowed) with an empty `TIKTOKEN_CACHE_DIR` and assert zero outbound
+> connection attempts.
+
 > **Warning (learned 2026-09-05, content-hash task): the default suite can
 > silently require Redis via the dev `.env`.** The "zero live connections"
 > rule above has one hole: when `.env` sets `KB_REDIS_URL`,
