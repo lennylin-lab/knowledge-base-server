@@ -1,0 +1,6 @@
+{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python3 .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Offline AI test strategy vs live_llm-marked calibration probe; toolchain gates and review checklist for verifying the fix"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "search_executed rules: vector_rescued/vector_gated counter meaning must stay consistent, no query text"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Degradation paths (ran=False) must stay unchanged when the on-domain trigger alters rescue admission"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "Verify rescue trigger stays in rag/retriever.py and query change stays in search/ per layering"}
+{"file": ".trellis/spec/backend/search-guidelines.md", "reason": "Verify identity-group minimum_should_match matches mapping analyzer semantics; no reindex required"}
