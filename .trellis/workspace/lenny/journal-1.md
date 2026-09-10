@@ -182,3 +182,26 @@ Fixed both irrelevant-query noise holes. Hole 2: bm25_chunk_query identity group
 ### Status
 
 [OK] **Completed**
+
+
+## Session 9: Vector rescue scoped to lexical-failure backstop (BM25-empty gate)
+
+**Date**: 2026-09-10
+**Task**: Vector rescue scoped to lexical-failure backstop (BM25-empty gate)
+**Branch**: `main`
+
+### Summary
+
+Closed the q=python topical-neighbor leak: filter_vector_rows_with_rescue gains a bm25_leg_empty precondition (zero gated BM25 survivors) so the vector rescue tier fires only on genuine lexical failure; Retriever.retrieve wires len(kept_es_hits)==0. Unit/integration tests pin suppression (vector_rescued==0 with BM25 hits) and preserved vocabulary-mismatch recall; live E2E verified q=python returns only the 6 genuine Python/FastAPI chunks and the five archived out-of-domain queries still return 0. Spec: new 7-section 'Vector rescue is a lexical-failure backstop' scenario in search-guidelines.md with the distance-interleaving finding and trigger-recalibration caveat (probe with BM25-empty queries).
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `f66870a` | (see git log) |
+| `5e128e7` | (see git log) |
+| `066b3e6` | (see git log) |
+
+### Status
+
+[OK] **Completed**

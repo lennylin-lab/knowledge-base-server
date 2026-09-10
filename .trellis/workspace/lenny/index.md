@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 8
+- **Total Sessions**: 9
 - **Last Active**: 2026-09-10
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~184 | Active |
+| `journal-1.md` | ~207 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 9 | 2026-09-10 | Vector rescue scoped to lexical-failure backstop (BM25-empty gate) | `f66870a`, `5e128e7`, `066b3e6` | `main` |
 | 8 | 2026-09-10 | Close irrelevant-query noise gates: BM25 identity coverage + vector rescue on-domain trigger (0.62) | `aef7bea`, `9db9635`, `964dcd0`, `8d84e1b`, `60bc581` | `main` |
 | 7 | 2026-09-10 | Complete Trellis onboarding (00-join-lenny) | - | `main` |
 | 6 | 2026-09-08 | ES BM25 scoring overhaul: cross-field evidence and coverage gate | `bf03a23`, `0d599ad` | `main` |
