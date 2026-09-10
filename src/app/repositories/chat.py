@@ -67,6 +67,23 @@ class ChatSessionRepository:
             update(ChatSession).where(ChatSession.id == session_id).values(updated_at=func.now())
         )
 
+    async def update_rolling_summary(
+        self, session_id: UUID, *, summary: str, through_id: UUID
+    ) -> None:
+        """Store the folded summary and advance its watermark; the caller owns
+        the transaction.
+
+        One statement so summary and watermark move together — a summary
+        without its watermark would re-fold the same turns next time, a
+        watermark without its summary would drop them silently. Only the
+        session row changes; message rows are never rewritten.
+        """
+        await self._session.execute(
+            update(ChatSession)
+            .where(ChatSession.id == session_id)
+            .values(rolling_summary=summary, summarized_through_id=through_id)
+        )
+
     async def soft_delete(self, chat_session: ChatSession) -> None:
         """Mark deleted; hard delete is never exposed in the MVP."""
         # Deliberate SQL-expression assignment: now() is bound server-side so

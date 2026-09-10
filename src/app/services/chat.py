@@ -16,6 +16,14 @@ turns a follow-up question into a self-contained retrieval query before the
 run; the persisted message and the rebuilt history always keep the original
 text.
 
+When a summary model is wired, turns that scroll out of the token window are
+folded incrementally into a per-session rolling summary (watermark =
+`summarized_through_id`) that is injected ahead of the in-window turns as a
+labeled synthetic exchange, so older context degrades gradually instead of
+vanishing at the window edge. Maintenance runs best-effort after the answer
+streamed and was persisted: it never raises into the stream, never holds a
+transaction across the LLM call, and never rewrites message rows.
+
 Failures after the first event become a terminal `error` event — nothing may
 escape `ask` once streaming has started (error-handling spec, streaming rule).
 The one exception is the session prelude: it runs before the first event, so
@@ -44,6 +52,10 @@ from pydantic_ai.models import Model
 from pydantic_ai.tools import Tool
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.agents.conversation_summary import (
+    build_conversation_summary_agent,
+    render_fold_prompt,
+)
 from app.agents.qa import ChatDeps, SourceCollector, build_qa_agent
 from app.agents.rewrite import build_rewrite_agent
 from app.core.exceptions import (
@@ -224,6 +236,68 @@ def to_message_history(messages: Sequence[ChatMessage]) -> list[ModelMessage]:
     return history
 
 
+# Label opening the injected rolling summary so the model reads it as a
+# compressed memory of earlier turns, never as a verbatim user question. Part
+# of the assembled-history contract (tests pin it); never persisted.
+SUMMARY_PREFIX_LABEL = "[Summary of earlier conversation]"
+_SUMMARY_ACKNOWLEDGEMENT = (
+    "Understood. I will treat this summary as context from earlier in our conversation."
+)
+
+
+def summary_prefix(summary: str) -> list[ModelMessage]:
+    """The rolling summary as a labeled synthetic exchange leading the history.
+
+    A request/response pair (not a `SystemPromptPart`, which could collide
+    with the agent's own instructions) keeps the alternation clean and makes
+    the summary's role explicit to the model.
+    """
+    return [
+        ModelRequest(parts=[UserPromptPart(content=f"{SUMMARY_PREFIX_LABEL}\n{summary}")]),
+        ModelResponse(parts=[TextPart(content=_SUMMARY_ACKNOWLEDGEMENT)]),
+    ]
+
+
+def select_turns_to_fold(
+    messages: Sequence[ChatMessage],
+    *,
+    watermark: UUID | None,
+    budget: int,
+    measure: Callable[[str], int],
+    per_turn_cap: int,
+) -> list[tuple[ChatMessage, ChatMessage]]:
+    """Complete turns that scrolled out of the window and are not yet summarized.
+
+    Input is newest-first (the repository's bounded read). The window walk is
+    the very one `select_history_window` performs with the same parameters,
+    so "evicted" means exactly what the next prelude would not show the
+    model. Of those evicted turns, only the ones newer than `watermark` (the
+    id of the newest message already folded; ids are uuid7, time-ordered)
+    still need folding — the comparison is an ordering, not a membership
+    test, so widening the budget later never re-folds a turn that re-enters
+    the window. Output is oldest-first original rows (never copies), so the
+    caller can advance the watermark to the last assistant id. Turns that
+    scrolled past the bounded read before folding are not summarized (the
+    documented MVP bound).
+    """
+    turns = _complete_turns_newest_first(messages)
+    retained = (
+        len(
+            select_history_window(
+                messages, budget=budget, measure=measure, per_turn_cap=per_turn_cap
+            )
+        )
+        // 2
+    )
+    to_fold = [
+        (user, assistant)
+        for user, assistant in turns[retained:]
+        if watermark is None or assistant.id > watermark
+    ]
+    to_fold.reverse()
+    return to_fold
+
+
 @dataclass(slots=True)
 class _ChatTurn:
     """Persistence context for one `ask` run (absent in stateless mode)."""
@@ -248,6 +322,8 @@ class ChatService:
         token_counter: Callable[[str], int] | None = None,
         rewrite_model: Model | None = None,
         rewrite_history_turns: int = 3,
+        summary_model: Model | None = None,
+        summary_max_tokens: int = 400,
     ) -> None:
         self._retriever = retriever
         self._mode = mode
@@ -271,6 +347,15 @@ class ChatService:
         # turns and stateless mode never rewrite regardless).
         self._rewrite_agent = build_rewrite_agent(rewrite_model) if rewrite_model else None
         self._rewrite_history_turns = rewrite_history_turns
+        # Rolling summary of evicted turns (same injection pattern): None
+        # disables it entirely — no summary column consulted, no fold call,
+        # no injection — which is byte-identical to the cliff-eviction
+        # service. The cap bounds both the stored summary the fold prompt
+        # asks for and the budget slice reserved for injecting it.
+        self._summary_agent = (
+            build_conversation_summary_agent(summary_model) if summary_model else None
+        )
+        self._summary_max_tokens = summary_max_tokens
         # Wrapped MCP tools arrive here (wired once per process in deps.py);
         # the default empty sequence keeps the agent identical to pre-MCP.
         self._agent = build_qa_agent(model, extra_tools=extra_tools)
@@ -293,6 +378,24 @@ class ChatService:
         if self._history_max_turn_fraction >= 1.0:
             return 0
         return round(self._history_token_budget * self._history_max_turn_fraction)
+
+    def _reserved_summary_tokens(self, summary: str) -> int:
+        """Budget slice reserved for the injected summary: its measured cost,
+        capped at `summary_max_tokens`.
+
+        Reserving (rather than counting the summary as an ordinary leading
+        entry) is what keeps turn growth from evicting the summary itself —
+        the older context stays represented, which is the point. The cap
+        bounds the reservation even if a stored summary overshoots the fold
+        prompt's limit."""
+        return min(self._token_measure()(summary), self._summary_max_tokens)
+
+    def _turn_budget(self, summary: str | None) -> int:
+        """Token budget left for in-window turns once the summary is reserved
+        (the full budget when no summary is present)."""
+        if not summary:
+            return self._history_token_budget
+        return max(self._history_token_budget - self._reserved_summary_tokens(summary), 0)
 
     async def ask(
         self, question: str, *, limit: int = 8, session_id: UUID | None = None
@@ -391,6 +494,14 @@ class ChatService:
             input_tokens=usage_input_tokens,
             output_tokens=usage_output_tokens,
         )
+        # Rolling-summary maintenance runs only once the turn has fully
+        # succeeded (answer streamed AND persisted) and outside the try above:
+        # it never raises (own guard), so it can neither become a terminal
+        # error event nor escape the generator — a fold failure merely defers
+        # to a later turn. `latency_ms` was fixed before it so `done` keeps
+        # reporting the answer's own latency.
+        if turn is not None:
+            await self._maybe_update_rolling_summary(turn.session_id)
         yield DoneEvent(
             run_id=run_id,
             outcome="success",
@@ -453,13 +564,17 @@ class ChatService:
         History is read BEFORE the user message is added: the current
         question reaches the model as the run prompt, not as history. The
         window is bounded in tokens; an oversized turn is admitted
-        truncated-with-marker (copies only — rows keep full content).
+        truncated-with-marker (copies only — rows keep full content). With a
+        summary agent wired, a non-empty rolling summary reserves its slice
+        of the budget and leads the assembled history as a labeled synthetic
+        exchange; without one the summary column is never consulted.
         """
         if self._session_factory is None:
             return None
         async with self._session_factory() as session:
             sessions = ChatSessionRepository(session)
             messages = ChatMessageRepository(session)
+            summary: str | None = None
             if session_id is None:
                 chat_session = await sessions.create(ChatSession(title=derive_title(question)))
                 logger.info(
@@ -471,12 +586,22 @@ class ChatService:
                 if existing is None:
                     raise NotFoundError(f"Chat session {session_id} not found")
                 chat_session = existing
+                if self._summary_agent is not None:
+                    summary = existing.rolling_summary or None
                 history_rows = select_history_window(
                     await messages.list_recent_for_session(session_id, limit=HISTORY_READ_LIMIT),
-                    budget=self._history_token_budget,
+                    budget=self._turn_budget(summary),
                     measure=self._token_measure(),
                     per_turn_cap=self._per_turn_cap(),
                 )
+                if summary:
+                    # Numbers only — the summary is user-derived content.
+                    logger.info(
+                        "rolling_summary_injected",
+                        session_id=str(session_id),
+                        summary_length=len(summary),
+                        reserved_tokens=self._reserved_summary_tokens(summary),
+                    )
                 if history_rows:
                     # Numbers only — history contents are user data. The
                     # truncated count is what makes an oversized-turn
@@ -502,7 +627,10 @@ class ChatService:
                 role=MessageRole.USER.value,
                 content_length=len(question),
             )
-            return _ChatTurn(session_id=chat_session.id, history=to_message_history(history_rows))
+            history = to_message_history(history_rows)
+            if summary:
+                history = summary_prefix(summary) + history
+            return _ChatTurn(session_id=chat_session.id, history=history)
 
     async def _persist_assistant_message(
         self, turn: _ChatTurn, *, content: str, run_id: str
@@ -529,6 +657,94 @@ class ChatService:
                 session_id=str(turn.session_id),
                 role=MessageRole.ASSISTANT.value,
                 content_length=len(content),
+            )
+
+    async def _maybe_update_rolling_summary(self, session_id: UUID) -> None:
+        """Fold newly evicted turns into the session's rolling summary; never raises.
+
+        Best-effort maintenance after a successful turn: a failure here must
+        not turn an already-streamed answer into an error event, so every
+        `Exception` is caught and logged (error class only) — the watermark
+        then stays put and the same turns are folded on a later turn.
+        `BaseException` (cancellation) propagates as it must.
+
+        Three phases with NO transaction held across the model call:
+        (1) a read session loads the summary/watermark and the bounded
+        message read, then closes; (2) the turns to fold are computed
+        offline and, if any, the summary agent runs; (3) a fresh write
+        session stores summary + watermark in one statement. The fold
+        boundary mirrors the prelude's window (same budget reservation for
+        the summary as it stands now), so a turn is folded as soon as the
+        next prelude would stop showing it; because the summary used on turn
+        N reflects folds through turn N-1, a summary that grows between
+        fold and prelude can leave a turn briefly in neither for one turn.
+        Oversized turns are bounded with the same per-turn guardrail before
+        folding (cost bound on the fold prompt; the rows stay whole). The
+        message rows are never written — only the session row changes.
+        """
+        if self._summary_agent is None or self._session_factory is None:
+            return
+        try:
+            async with self._session_factory() as session:
+                chat_session = await ChatSessionRepository(session).get_by_id(session_id)
+                if chat_session is None:
+                    return
+                rows = await ChatMessageRepository(session).list_recent_for_session(
+                    session_id, limit=HISTORY_READ_LIMIT
+                )
+                existing_summary = chat_session.rolling_summary or None
+                watermark = chat_session.summarized_through_id
+            measure = self._token_measure()
+            cap = self._per_turn_cap()
+            folds = select_turns_to_fold(
+                rows,
+                watermark=watermark,
+                budget=self._turn_budget(existing_summary),
+                measure=measure,
+                per_turn_cap=cap,
+            )
+            if not folds:
+                return
+            pairs: list[tuple[str, str]] = []
+            for user, assistant in folds:
+                if 0 < cap < measure(user.content) + measure(assistant.content):
+                    user, assistant, _ = _bound_turn(user, assistant, cap, measure)
+                pairs.append((user.content, assistant.content))
+            through_id = folds[-1][1].id
+            result = await self._summary_agent.run(
+                render_fold_prompt(existing_summary, pairs, max_tokens=self._summary_max_tokens)
+            )
+            new_summary = result.output.strip()
+            if not new_summary:
+                # An empty fold would erase the memory it was meant to extend;
+                # keep the watermark so these turns are retried later.
+                logger.warning(
+                    "rolling_summary_update_failed",
+                    agent="conversation_summary",
+                    session_id=str(session_id),
+                    error_class="EmptySummary",
+                )
+                return
+            async with self._session_factory() as session:
+                await ChatSessionRepository(session).update_rolling_summary(
+                    session_id, summary=new_summary, through_id=through_id
+                )
+                await session.commit()
+            # Numbers only — summary and turn contents are user data.
+            logger.info(
+                "rolling_summary_updated",
+                agent="conversation_summary",
+                session_id=str(session_id),
+                folded_turns=len(folds),
+                summary_length=len(new_summary),
+                summary_tokens=measure(new_summary),
+            )
+        except Exception as exc:
+            logger.warning(
+                "rolling_summary_update_failed",
+                agent="conversation_summary",
+                session_id=str(session_id),
+                error_class=type(exc).__name__,
             )
 
 

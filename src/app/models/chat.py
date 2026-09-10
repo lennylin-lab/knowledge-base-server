@@ -39,6 +39,16 @@ class ChatSession(Base):
     title: Mapped[str] = mapped_column(Text, nullable=False, default="New chat")
     # Reserved for multi-user: schema is ready, auth is not (project convention).
     owner_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    # Rolling summary of turns evicted from the history token window
+    # (migration 0007): derived, additional state — ChatMessage rows are never
+    # rewritten. NULL/empty = nothing folded yet; maintained best-effort
+    # post-answer by the chat service.
+    rolling_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Incremental watermark: id of the newest message already folded into
+    # `rolling_summary` (uuid7, time-ordered, so id order == message order).
+    summarized_through_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

@@ -235,6 +235,11 @@ def build_chat_service(settings: Settings) -> ChatService:
         # Settings flag is the runtime kill switch (false = no rewrite at all).
         rewrite_model=model if settings.CHAT_QUERY_REWRITE_ENABLED else None,
         rewrite_history_turns=settings.CHAT_REWRITE_HISTORY_TURNS,
+        # Rolling summary of evicted history shares the same model instance;
+        # its flag is the runtime kill switch back to cliff eviction (false =
+        # no summary consulted, computed, or injected).
+        summary_model=model if settings.CHAT_ROLLING_SUMMARY_ENABLED else None,
+        summary_max_tokens=settings.CHAT_SUMMARY_MAX_TOKENS,
     )
 
 

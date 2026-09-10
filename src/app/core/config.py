@@ -66,6 +66,20 @@ class Settings(BaseSettings):
     # rewriter — a latency/cost bound smaller than the full history window;
     # <= 0 reuses the whole assembled window.
     CHAT_REWRITE_HISTORY_TURNS: int = 3
+    # Rolling summary of evicted history: turns that fall outside the token
+    # window are folded incrementally (per-session watermark) into a stored
+    # summary that leads the next turn's history as labeled context, so older
+    # context degrades gradually instead of vanishing at the window edge.
+    # Maintained best-effort after each answer (one extra model call only
+    # when new turns evicted). false disables the step entirely — no summary
+    # column consulted, no fold call, no injection (byte-identical to
+    # cliff eviction); stored summaries stay but are unused.
+    CHAT_ROLLING_SUMMARY_ENABLED: bool = True
+    # Bound on the rolling summary, in tokens: the fold prompt asks the model
+    # to stay within it, and the same amount (capped at the summary's actual
+    # cost) is reserved from CHAT_HISTORY_TOKEN_BUDGET when a summary is
+    # injected, so turn growth can never evict the summary itself.
+    CHAT_SUMMARY_MAX_TOKENS: int = 400
 
     # --- MCP extension ---
     # Path to a Claude-Desktop-style `{"mcpServers": {...}}` file; relative
