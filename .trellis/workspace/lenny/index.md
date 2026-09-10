@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 10
+- **Total Sessions**: 11
 - **Last Active**: 2026-09-11
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~231 | Active |
+| `journal-1.md` | ~255 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 11 | 2026-09-11 | Token-based history budget + long-document guardrail | `c990389`, `eda8061`, `d2103b5`, `07cdc0b` | `main` |
 | 10 | 2026-09-11 | History-aware query rewriting for chat follow-ups | `56d85d5`, `0f75035`, `f7d4648`, `9ba7898` | `main` |
 | 9 | 2026-09-10 | Vector rescue scoped to lexical-failure backstop (BM25-empty gate) | `f66870a`, `5e128e7`, `066b3e6` | `main` |
 | 8 | 2026-09-10 | Close irrelevant-query noise gates: BM25 identity coverage + vector rescue on-domain trigger (0.62) | `aef7bea`, `9db9635`, `964dcd0`, `8d84e1b`, `60bc581` | `main` |

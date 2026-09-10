@@ -229,3 +229,27 @@ Implemented 09-10-query-rewrite-followups end to end: new toolless rewrite agent
 ### Status
 
 [OK] **Completed**
+
+
+## Session 11: Token-based history budget + long-document guardrail
+
+**Date**: 2026-09-11
+**Task**: Token-based history budget + long-document guardrail
+**Branch**: `main`
+
+### Summary
+
+Implemented 09-11-token-history-budget: chat history window now budgeted by tokens (CHAT_HISTORY_TOKEN_BUDGET=2000) with the measure injected into a still-pure select_history_window; long-turn guardrail truncates oversized turns with a visible marker in detached history copies only (persisted rows keep full content; fraction >= 1.0 disables). New llm/tokens.py build_token_counter: tiktoken with o200k_base fallback + deterministic CJK heuristic, never raises; encoder built LAZILY on first history assembly because tiktoken's cold-cache get_encoding does an un-timed network fetch (eager __init__ construction would network in stateless tests). tiktoken promoted to direct dep. Breaking config rename (CHAR_BUDGET -> TOKEN_BUDGET) grep-verified clean. Check agent found only an under-curated check.jsonl (fixed; all five backend specs); gates green: ruff + format, strict mypy, 449 tests — proven network-free by re-running under a socket blocker with empty TIKTOKEN_CACHE_DIR. Specs: new chat-guidelines.md (budget+guardrail contract, ready for the rolling-summary follow-up); quality-guidelines.md gained the tiktoken hidden network-fetch gotcha + no-network proof technique.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `c990389` | (see git log) |
+| `eda8061` | (see git log) |
+| `d2103b5` | (see git log) |
+| `07cdc0b` | (see git log) |
+
+### Status
+
+[OK] **Completed**
