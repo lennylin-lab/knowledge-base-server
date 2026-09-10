@@ -49,6 +49,7 @@ from fakes import (
     StubRetriever,
     retrieved_chunk,
     scripted_chat_model,
+    scripted_rewrite_model,
 )
 
 QUESTION = "What do the notes say about zorblat?"
@@ -752,3 +753,291 @@ async def test_stateless_service_performs_no_db_writes(session_factory, db_engin
         sessions = (await conn.execute(text("SELECT count(*) FROM chat_sessions"))).scalar_one()
         messages = (await conn.execute(text("SELECT count(*) FROM chat_messages"))).scalar_one()
     assert (sessions, messages) == (0, 0)
+
+
+# --- history-aware query rewriting (follow-up turns; scripted rewrite model) ---
+
+TOPIC_QUESTION = "Redis 是什么?"
+ANAPHORIC_FOLLOWUP = "那它的缺点呢?"
+STANDALONE_QUERY = "Redis 的主要缺点有哪些?"
+
+
+def _rewriting_service(
+    factory: async_sessionmaker[AsyncSession],
+    retriever: StubRetriever,
+    rewrite_model,
+    *,
+    qa_model=None,
+) -> ChatService:
+    """ChatService wired with a rewrite model: scripted QA model, recording
+    stub retriever, one DB session per ask() via the injected factory."""
+    return ChatService(
+        retriever,
+        qa_model if qa_model is not None else scripted_chat_model(answer_parts=["Turn answer."]),
+        mode="hybrid",
+        session_factory=factory,
+        rewrite_model=rewrite_model,
+    )
+
+
+@pytest.mark.db
+async def test_followup_turn_retrieves_on_rewritten_standalone_query(session_factory):
+    # AC1/AC6: turn 1 establishes the topic; the anaphoric turn-2 follow-up
+    # ("那它的缺点呢?") must retrieve on the scripted standalone Chinese
+    # query — never the raw referent-less text.
+    rewrite_prompts: list[str] = []
+    rewrite_histories: list[list[ModelMessage]] = []
+    retriever = _make_retriever()
+    rewriter = scripted_rewrite_model(
+        [STANDALONE_QUERY], prompts=rewrite_prompts, histories=rewrite_histories
+    )
+
+    # Turn 1: topic-establishing question; no history — no rewrite, raw search.
+    turn1 = _rewriting_service(
+        session_factory,
+        retriever,
+        rewriter,
+        qa_model=scripted_chat_model(tool_calls=["Redis 是什么"], answer_parts=["Turn answer."]),
+    )
+    events1 = await _collect(turn1, TOPIC_QUESTION)
+    session_id = events1[0].session_id
+    assert session_id is not None
+    assert rewrite_prompts == []  # first turn: the rewriter never ran
+
+    # Turn 2: anaphoric follow-up. The standalone rewrite becomes the run
+    # prompt, and the QA model searches the distinctive terms of that
+    # self-contained prompt (scripted here as the standalone query itself).
+    qa_histories: list[list[ModelMessage]] = []
+    turn2 = _rewriting_service(
+        session_factory,
+        retriever,
+        rewriter,
+        qa_model=scripted_chat_model(
+            tool_calls=[STANDALONE_QUERY],
+            answer_parts=["Turn answer."],
+            histories=qa_histories,
+        ),
+    )
+    await _collect(turn2, ANAPHORIC_FOLLOWUP, session_id=session_id)
+
+    assert retriever.calls == [("Redis 是什么", 8), (STANDALONE_QUERY, 8)]
+    # The rewriter ran exactly once, on the raw follow-up…
+    assert rewrite_prompts == [ANAPHORIC_FOLLOWUP]
+    # …and saw the prior turns as its history: [q1, a1] precede its prompt.
+    assert len(rewrite_histories) == 1
+    assert _user_prompts(rewrite_histories[0]) == [TOPIC_QUESTION, ANAPHORIC_FOLLOWUP]
+    assert _assistant_texts(rewrite_histories[0]) == ["Turn answer."]
+    # The QA run itself opened on the REWRITTEN prompt (the wiring under test):
+    # its first request's user prompts are the original topic turn from
+    # history, then the standalone rewrite as the run's own input.
+    assert qa_histories
+    assert _user_prompts(qa_histories[0]) == [TOPIC_QUESTION, STANDALONE_QUERY]
+
+
+@pytest.mark.db
+async def test_first_turn_performs_no_rewrite_call(session_factory):
+    # AC2: with history empty the rewrite step is skipped entirely — no
+    # rewrite call, and the raw question reaches retriever and agent unchanged.
+    rewrite_prompts: list[str] = []
+    retriever = _make_retriever()
+    service = _rewriting_service(
+        session_factory,
+        retriever,
+        scripted_rewrite_model([STANDALONE_QUERY], prompts=rewrite_prompts),
+        qa_model=scripted_chat_model(
+            tool_calls=[ANAPHORIC_FOLLOWUP], answer_parts=["Turn answer."]
+        ),
+    )
+
+    events = await _collect(service, ANAPHORIC_FOLLOWUP)
+
+    assert isinstance(events[-1], DoneEvent)
+    assert rewrite_prompts == []
+    assert retriever.calls == [(ANAPHORIC_FOLLOWUP, 8)]
+
+
+async def test_stateless_service_never_rewrites():
+    # AC2: without a session factory there is never history, hence never a
+    # rewrite — the stateless behavior is byte-identical to the pre-rewrite
+    # service even when a rewrite model is wired.
+    rewrite_prompts: list[str] = []
+    retriever = _make_retriever()
+    service = ChatService(
+        retriever,
+        scripted_chat_model(tool_calls=[ANAPHORIC_FOLLOWUP], answer_parts=["Answer."]),
+        mode="hybrid",
+        rewrite_model=scripted_rewrite_model([STANDALONE_QUERY], prompts=rewrite_prompts),
+    )
+
+    events = await _collect(service, ANAPHORIC_FOLLOWUP)
+
+    assert isinstance(events[-1], DoneEvent)
+    assert rewrite_prompts == []
+    assert retriever.calls == [(ANAPHORIC_FOLLOWUP, 8)]
+
+
+@pytest.mark.db
+async def test_rewrite_keeps_original_question_persisted_and_in_history(session_factory):
+    # AC3/R3: the rewritten query only ever replaces the run prompt — the
+    # persisted user message and later turns' message_history keep the
+    # original text.
+    retriever = _make_retriever()
+    service = _rewriting_service(
+        session_factory, retriever, scripted_rewrite_model([STANDALONE_QUERY])
+    )
+    events1 = await _collect(service, TOPIC_QUESTION)
+    session_id = events1[0].session_id
+    assert session_id is not None
+    await _collect(service, ANAPHORIC_FOLLOWUP, session_id=session_id)
+
+    messages = await _session_messages(session_factory, session_id)
+    assert [(m.role, m.content) for m in messages] == [
+        (MessageRole.USER, TOPIC_QUESTION),
+        (MessageRole.ASSISTANT, "Turn answer."),
+        (MessageRole.USER, ANAPHORIC_FOLLOWUP),  # original, not the rewrite
+        (MessageRole.ASSISTANT, "Turn answer."),
+    ]
+
+    # A following (non-rewriting) turn's message_history carries the
+    # originals: neither history user entry is the rewritten form.
+    histories: list[list[ModelMessage]] = []
+    plain = ChatService(
+        _make_retriever(),
+        scripted_chat_model(answer_parts=["Third."], histories=histories),
+        mode="hybrid",
+        session_factory=session_factory,
+    )
+    await _collect(plain, "third question", session_id=session_id)
+
+    assert histories
+    for messages in histories:
+        assert _user_prompts(messages) == [
+            TOPIC_QUESTION,
+            ANAPHORIC_FOLLOWUP,
+            "third question",
+        ]
+
+
+@pytest.mark.db
+async def test_rewrite_disabled_construction_passes_raw_questions(session_factory):
+    # AC4: without a rewrite model (the default construction and the
+    # Settings-disabled wiring) every turn passes the raw question through.
+    qa_histories: list[list[ModelMessage]] = []
+    retriever = _make_retriever()
+    turn1 = ChatService(
+        retriever,
+        scripted_chat_model(
+            tool_calls=[TOPIC_QUESTION], answer_parts=["Turn answer."], histories=qa_histories
+        ),
+        mode="hybrid",
+        session_factory=session_factory,
+    )
+    events1 = await _collect(turn1, TOPIC_QUESTION)
+    session_id = events1[0].session_id
+    assert session_id is not None
+
+    turn2 = ChatService(
+        retriever,
+        scripted_chat_model(
+            tool_calls=[ANAPHORIC_FOLLOWUP],
+            answer_parts=["Turn answer."],
+            histories=qa_histories,
+        ),
+        mode="hybrid",
+        session_factory=session_factory,
+    )
+    events2 = await _collect(turn2, ANAPHORIC_FOLLOWUP, session_id=session_id)
+
+    assert isinstance(events2[-1], DoneEvent)
+    # The retriever saw the raw questions: an anaphoric follow-up retrieves
+    # on its verbatim text — exactly the pre-rewrite behavior.
+    assert retriever.calls == [(TOPIC_QUESTION, 8), (ANAPHORIC_FOLLOWUP, 8)]
+    # Both turns' model requests ran on the raw questions as their prompts
+    # (two requests per turn: tool call, then answer).
+    assert [_user_prompts(messages) for messages in qa_histories] == [
+        [TOPIC_QUESTION],
+        [TOPIC_QUESTION],
+        [TOPIC_QUESTION, ANAPHORIC_FOLLOWUP],
+        [TOPIC_QUESTION, ANAPHORIC_FOLLOWUP],
+    ]
+
+
+@pytest.mark.db
+async def test_rewrite_failure_degrades_to_raw_query_and_still_completes(session_factory):
+    # AC5: a rewrite provider failure degrades to the raw question and the
+    # answer still streams to a normal done — the rewrite step never turns a
+    # would-be answer into a terminal error.
+    rewriter = scripted_rewrite_model(
+        [STANDALONE_QUERY],
+        fail=openai.APIConnectionError(
+            request=httpx.Request("POST", "http://provider.test/v1/chat")
+        ),
+    )
+    retriever = _make_retriever()
+
+    # Turn 1: no history, so the failing rewriter is never invoked.
+    turn1 = _rewriting_service(
+        session_factory,
+        retriever,
+        rewriter,
+        qa_model=scripted_chat_model(tool_calls=[TOPIC_QUESTION], answer_parts=["Turn answer."]),
+    )
+    events1 = await _collect(turn1, TOPIC_QUESTION)
+    session_id = events1[0].session_id
+    assert session_id is not None
+    assert isinstance(events1[-1], DoneEvent)
+
+    # Turn 2: the rewrite call fails; the run continues on the raw question.
+    turn2 = _rewriting_service(
+        session_factory,
+        retriever,
+        rewriter,
+        qa_model=scripted_chat_model(
+            tool_calls=[ANAPHORIC_FOLLOWUP], answer_parts=["Turn answer."]
+        ),
+    )
+    with capture_logs() as logs:
+        events2 = await _collect(turn2, ANAPHORIC_FOLLOWUP, session_id=session_id)
+
+    # The run completed normally, retrieving on the raw question.
+    assert _names(events2) == [
+        "RunStartedEvent",
+        "SourcesEvent",
+        "AnswerDeltaEvent",
+        "DoneEvent",
+    ]
+    done = events2[-1]
+    assert isinstance(done, DoneEvent)
+    assert done.outcome == "success"
+    assert not any(isinstance(event, ErrorEvent) for event in events2)
+    assert retriever.calls == [(TOPIC_QUESTION, 8), (ANAPHORIC_FOLLOWUP, 8)]
+    # The failure was logged once, error class only — no question text.
+    failed = [entry for entry in logs if entry["event"] == "query_rewrite_failed"]
+    assert len(failed) == 1
+    assert failed[0]["error_class"] == "APIConnectionError"
+    assert ANAPHORIC_FOLLOWUP not in str(logs)
+
+
+@pytest.mark.db
+async def test_rewrite_logs_flags_and_lengths_only(session_factory):
+    # AC7: the rewrite observability event carries flags and lengths — never
+    # the question or the rewritten query text.
+    rewriter = scripted_rewrite_model([STANDALONE_QUERY])
+    service = _rewriting_service(session_factory, _make_retriever(), rewriter)
+
+    events1 = await _collect(service, TOPIC_QUESTION)
+    session_id = events1[0].session_id
+    assert session_id is not None
+    with capture_logs() as logs:
+        await _collect(service, ANAPHORIC_FOLLOWUP, session_id=session_id)
+
+    rewrites = [entry for entry in logs if entry["event"] == "query_rewrite"]
+    assert len(rewrites) == 1
+    entry = rewrites[0]
+    assert entry["applied"] is True
+    assert entry["changed"] is True
+    assert entry["original_length"] == len(ANAPHORIC_FOLLOWUP)
+    assert entry["rewritten_length"] == len(STANDALONE_QUERY)
+    # User data stays out of logs: neither text appears anywhere.
+    assert ANAPHORIC_FOLLOWUP not in str(logs)
+    assert STANDALONE_QUERY not in str(logs)

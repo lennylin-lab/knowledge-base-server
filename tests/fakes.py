@@ -360,6 +360,20 @@ def _first_user_prompt(messages: list[ModelMessage]) -> str:
     return ""
 
 
+def _last_user_prompt(messages: list[ModelMessage]) -> str:
+    """Text of the run's user prompt when history may be present.
+
+    The current run's prompt is appended after `message_history`, so the
+    LAST user prompt is the run's own input (the first would be the oldest
+    prior turn)."""
+    for message in reversed(messages):
+        if isinstance(message, ModelRequest):
+            for part in reversed(message.parts):
+                if isinstance(part, UserPromptPart) and isinstance(part.content, str):
+                    return part.content
+    return ""
+
+
 def scripted_summarize_model(
     outputs: Sequence[str],
     *,
@@ -386,6 +400,40 @@ def scripted_summarize_model(
         return ModelResponse(parts=[TextPart(content=scripted[index])])
 
     return FunctionModel(function, model_name="scripted-summarize")
+
+
+def scripted_rewrite_model(
+    outputs: Sequence[str],
+    *,
+    prompts: list[str] | None = None,
+    histories: list[list[ModelMessage]] | None = None,
+    fail: Exception | None = None,
+) -> FunctionModel:
+    """FunctionModel scripting tool-free rewrite passes (plain text out).
+
+    Mirrors `scripted_summarize_model`: the i-th rewrite request returns
+    `outputs[i]` (the last entry repeats if more requests arrive), built on
+    `function` because the rewrite path runs `Agent.run` (non-streaming).
+    `prompts`, when given, collects each request's own prompt — the question
+    handed to the rewriter (the last user prompt, since prior turns ride in
+    as history); `histories`, when given, records the FULL message list of
+    each request — the observable that the rewriter actually saw the prior
+    turns. `fail` raises instead, scripting a provider failure for the
+    service's degrade-to-raw path.
+    """
+    scripted = list(outputs)
+    seen = prompts if prompts is not None else []
+
+    async def function(messages: list[ModelMessage], info: object) -> ModelResponse:
+        if fail is not None:
+            raise fail
+        seen.append(_last_user_prompt(messages))
+        if histories is not None:
+            histories.append(list(messages))
+        index = min(len(seen) - 1, len(scripted) - 1)
+        return ModelResponse(parts=[TextPart(content=scripted[index])])
+
+    return FunctionModel(function, model_name="scripted-rewrite")
 
 
 def scripted_association_model(
