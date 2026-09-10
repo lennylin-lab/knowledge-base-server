@@ -205,3 +205,27 @@ Closed the q=python topical-neighbor leak: filter_vector_rows_with_rescue gains 
 ### Status
 
 [OK] **Completed**
+
+
+## Session 10: History-aware query rewriting for chat follow-ups
+
+**Date**: 2026-09-11
+**Task**: History-aware query rewriting for chat follow-ups
+**Branch**: `main`
+
+### Summary
+
+Implemented 09-10-query-rewrite-followups end to end: new toolless rewrite agent (agents/rewrite.py + prompts/rewrite.md, reuses qa.load_prompt) and a best-effort _rewrite_query step in ChatService.ask that turns anaphoric follow-ups into self-contained retrieval prompts using the last N=3 history turns; original question stays persisted and in history (R3); first turn / stateless / KB_CHAT_QUERY_REWRITE_ENABLED=false are byte-identical; rewrite failure degrades to raw with the stream reaching DoneEvent. Check agent fixed a vacuous-wiring test gap (assert the recorded run prompt, not just StubRetriever.calls) plus a format nit; gates green: ruff check + ruff format --check, strict mypy (63 files), 432 tests (7 new AC tests). Specs updated: search-guidelines.md gains the history-aware query rewrite contract scenario; quality-guidelines.md gains FunctionModel message-history fake gotchas (last-user-prompt recording; prompt-wiring needs its own assertion).
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `56d85d5` | (see git log) |
+| `0f75035` | (see git log) |
+| `f7d4648` | (see git log) |
+| `9ba7898` | (see git log) |
+
+### Status
+
+[OK] **Completed**
