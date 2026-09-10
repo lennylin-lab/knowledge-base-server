@@ -217,15 +217,20 @@ def build_chat_service(settings: Settings) -> ChatService:
     # CHAT_API_KEY: chat with only a chat key wires a BM25-only retriever,
     # and run_started.mode must report that truthfully (writing's pattern).
     provider = embedding_provider_from_settings(settings)
+    model = get_chat_model(settings)
     return ChatService(
         _build_retriever(settings, provider),
-        get_chat_model(settings),
+        model,
         mode="hybrid" if provider is not None else "bm25",
         extra_tools=extra_tools,
         # Session persistence: the process-lifetime service opens one session
         # per ask() via the factory (the SummarizeService lifetime pattern).
         session_factory=SessionFactory,
         history_char_budget=settings.CHAT_HISTORY_CHAR_BUDGET,
+        # Follow-up rewrite shares the single chat model/SDK client; the
+        # Settings flag is the runtime kill switch (false = no rewrite at all).
+        rewrite_model=model if settings.CHAT_QUERY_REWRITE_ENABLED else None,
+        rewrite_history_turns=settings.CHAT_REWRITE_HISTORY_TURNS,
     )
 
 

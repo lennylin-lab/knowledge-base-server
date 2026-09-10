@@ -46,6 +46,15 @@ class Settings(BaseSettings):
     # first) sent to the agent as `message_history` — chars, not tokens, are
     # the MVP proxy (PRD out-of-scope: token-accurate budgeting).
     CHAT_HISTORY_CHAR_BUDGET: int = 8000
+    # History-aware query rewriting for follow-ups: before each non-first
+    # turn, a rewrite call turns anaphoric questions ("那它的缺点呢?") into a
+    # self-contained retrieval query using recent history. false disables the
+    # step entirely (byte-identical to the no-rewrite service).
+    CHAT_QUERY_REWRITE_ENABLED: bool = True
+    # Recent complete turns (user + assistant, so 2*N messages) fed to the
+    # rewriter — a latency/cost bound smaller than the full history window;
+    # <= 0 reuses the whole assembled window.
+    CHAT_REWRITE_HISTORY_TURNS: int = 3
 
     # --- MCP extension ---
     # Path to a Claude-Desktop-style `{"mcpServers": {...}}` file; relative

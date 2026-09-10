@@ -8,6 +8,11 @@ recent conversation returns to the agent as `message_history` within a
 character budget. Without a factory the service is exactly the original
 stateless single-turn chat — no database access at all.
 
+When a rewrite model is wired and history exists, a best-effort rewrite
+turns a follow-up question into a self-contained retrieval query before the
+run; the persisted message and the rebuilt history always keep the original
+text.
+
 Failures after the first event become a terminal `error` event — nothing may
 escape `ask` once streaming has started (error-handling spec, streaming rule).
 The one exception is the session prelude: it runs before the first event, so
@@ -37,6 +42,7 @@ from pydantic_ai.tools import Tool
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.agents.qa import ChatDeps, SourceCollector, build_qa_agent
+from app.agents.rewrite import build_rewrite_agent
 from app.core.exceptions import (
     AppError,
     LLMProviderError,
@@ -145,6 +151,8 @@ class ChatService:
         extra_tools: Sequence[Tool[ChatDeps]] = (),
         session_factory: async_sessionmaker[AsyncSession] | None = None,
         history_char_budget: int = 8000,
+        rewrite_model: Model | None = None,
+        rewrite_history_turns: int = 3,
     ) -> None:
         self._retriever = retriever
         self._mode = mode
@@ -152,6 +160,12 @@ class ChatService:
         # None = stateless mode: exactly the pre-session service, no DB writes.
         self._session_factory = session_factory
         self._history_char_budget = history_char_budget
+        # History-aware query rewriting (multi-turn follow-ups): a separate
+        # injected model lets tests script the rewrite call independently of
+        # the stream-only QA fake; None disables the step entirely (first
+        # turns and stateless mode never rewrite regardless).
+        self._rewrite_agent = build_rewrite_agent(rewrite_model) if rewrite_model else None
+        self._rewrite_history_turns = rewrite_history_turns
         # Wrapped MCP tools arrive here (wired once per process in deps.py);
         # the default empty sequence keeps the agent identical to pre-MCP.
         self._agent = build_qa_agent(model, extra_tools=extra_tools)
@@ -190,12 +204,18 @@ class ChatService:
             run_id=run_id, mode=self._mode, session_id=turn.session_id if turn else None
         )
 
+        # Best-effort history-aware rewrite of the run prompt (`_rewrite_query`
+        # never raises): a follow-up question reaches the agent — and through
+        # it the retrieval — as a self-contained query, while the persisted
+        # message and the rebuilt history keep the original text.
+        retrieval_question = await self._rewrite_query(question, turn.history if turn else [])
+
         usage_input_tokens: int | None = None
         usage_output_tokens: int | None = None
         answer_parts: list[str] = []
         try:
             async with self._agent.run_stream(
-                question,
+                retrieval_question,
                 deps=deps,
                 # Empty history passes None: a first turn behaves exactly like
                 # the stateless service (no empty-sequence edge cases).
@@ -254,6 +274,50 @@ class ChatService:
             latency_ms=latency_ms,
             session_id=turn.session_id if turn else None,
         )
+
+    async def _rewrite_query(self, question: str, history: list[ModelMessage]) -> str:
+        """Best-effort standalone-question rewrite; never raises.
+
+        Runs only when a rewrite model was injected AND history is non-empty
+        (a first turn and stateless mode return the question as-is, byte
+        identical to the pre-rewrite service). The last `rewrite_history_turns`
+        complete turns back the rewrite run (a turn = user + assistant, so 2N
+        messages; `<= 0` uses the full assembled window), and a non-empty
+        output replaces the run prompt. Any failure — provider error, empty
+        output — degrades to the raw question: this runs after the first event
+        is out, so by the streaming rule nothing may escape `ask`, and a
+        rewrite problem must never turn a would-be answer into an error event.
+        The original question stays the persisted message and the history
+        entry; only the run prompt is rewritten.
+        """
+        if self._rewrite_agent is None or not history:
+            return question
+        recent = (
+            history
+            if self._rewrite_history_turns <= 0
+            else history[-2 * self._rewrite_history_turns :]
+        )
+        rewritten: str | None = None
+        try:
+            result = await self._rewrite_agent.run(question, message_history=recent)
+            rewritten = result.output.strip() or None
+        except Exception as exc:
+            # Error class only — question and rewritten text stay out of logs.
+            logger.warning(
+                "query_rewrite_failed",
+                agent="rewrite",
+                error_class=type(exc).__name__,
+            )
+        resolved = rewritten or question
+        logger.info(
+            "query_rewrite",
+            agent="rewrite",
+            applied=rewritten is not None,
+            changed=resolved != question,
+            original_length=len(question),
+            rewritten_length=len(resolved),
+        )
+        return resolved
 
     async def _prepare_turn(self, question: str, session_id: UUID | None) -> _ChatTurn | None:
         """Resolve the session, assemble history, persist the user message.
