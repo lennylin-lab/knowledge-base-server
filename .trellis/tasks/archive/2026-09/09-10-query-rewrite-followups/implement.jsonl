@@ -1,0 +1,5 @@
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "Layering matrix + convention #6 (agents never import services): the new agents/rewrite.py must import only pydantic-ai + the shared prompt loader; service orchestrates"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Streaming rule (nothing may escape after the first event): _rewrite_query must be best-effort and never raise into ask; degrade-to-raw policy (R4/AC5)"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "run_id/run-scope logging; user text (question and rewritten query) must never be logged — flags/lengths only (AC7)"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "Reuse agents/qa.py load_prompt and the summarize-style function-based FunctionModel fake instead of new helpers; before adding CHAT_* config, grep existing settings"}
+{"file": ".trellis/tasks/archive/2026-09/09-02-chat-sessions/design.md", "reason": "Origin of the history window, message_history assembly, persist-original-question contract this task must preserve (R3)"}

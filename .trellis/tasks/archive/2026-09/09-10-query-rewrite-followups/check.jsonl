@@ -1,0 +1,5 @@
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Offline AI test strategy (FunctionModel + StubRetriever), toolchain gates (ruff/mypy/pytest), review checklist for verifying the rewrite step"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Verify _rewrite_query never raises after the first SSE event; rewrite failure degrades to raw and the stream still reaches DoneEvent (AC5), error taxonomy unchanged (R5)"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Verify no question/rewritten text reaches logs; only flags/lengths/run_id (AC7)"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "Verify agents/rewrite.py respects the layering matrix (no services import) and the rewrite stays a chat-only concern"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "New config field + new constructor params + new prompt asset span config→deps→service→agent; check every consumer is updated and defaults keep old call sites byte-identical"}
