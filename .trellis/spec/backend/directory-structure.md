@@ -124,7 +124,9 @@ Key points:
   `Settings` thresholds, constructor-injected into `Retriever` from
   `_build_retriever` in `api/deps.py` (shared by search, chat, and writing
   wiring): `KB_SEARCH_BM25_MIN_COVERAGE` (default `"70%"` — term-coverage
-  `minimum_should_match` on the `chunk_text` leaf via `bm25_chunk_query`;
+  `minimum_should_match` on the `chunk_text` leaf AND the title/heading
+  identity group via `bm25_chunk_query` (identity coverage added
+  2026-09-10: a lone stopword title hit must not activate the BM25 leg);
   the LIVE BM25 noise guard since 2026-09-08, because BM25 score scale is
   query-dependent and no absolute floor generalizes; `""` omits the key),
   `KB_SEARCH_BM25_MIN_SCORE` (default `0.0`, RETIRED as a relevance gate
@@ -144,8 +146,17 @@ Key points:
   0.22; re-measured 2026-09-06 after the breadcrumb-enriched embedding input
   (`embedding_input`): pure-CJK heads 0.50-0.53, `redis` 0.46, long-query
   0.31 — same band, defaults still cover it), and
-  the cap keeps rare-term legs silent; `tests/test_vector_distance_probe.py`
-  (`live_llm`, excluded from the default run) recalibrates the window.
+  the cap keeps rare-term legs silent. Since 2026-09-10 the rescue tier is
+  additionally gated by an on-domain trigger:
+  `KB_SEARCH_VECTOR_RESCUE_TRIGGER_MAX_DISTANCE` (default 0.62, calibrated
+  on the real 15-doc corpus — see task `09-10-irrelevant-query-noise-gates`
+  design.md § Calibration): rescue fires only when the emptied leg's own
+  minimum distance is at or below it; an off-domain leg stays empty
+  (empty beats noise); `>= 2.0` disables the trigger, restoring the
+  pre-09-10 rescue-on-any-empty-primary behavior.
+  `tests/test_vector_distance_probe.py`
+  (`live_llm`, excluded from the default run) recalibrates the window and
+  the trigger.
   `retrieve()` also truncates the query once at entry to
   `SEARCH_MAX_QUERY_LENGTH` (default 256, `<= 0` disables) — the single
   enforcement point for API and agent tools; standard-analyzer CJK yields

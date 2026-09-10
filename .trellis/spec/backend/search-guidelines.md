@@ -92,7 +92,8 @@
 # analyzers from _CHUNK_MAPPINGS (single declaration site).
 {"bool": {"should": [
     {"multi_match": {"query": q, "fields": ["title^2", "heading_path^1.5"],
-                     "type": "best_fields"}},   # identity group: max, not sum
+                     "type": "best_fields",
+                     "minimum_should_match": "70%"}},  # identity group: max, not sum
     {"match": {"chunk_text": {"query": q, "minimum_should_match": "70%"}}},
     {"match": {"chunk_text.code": {"query": q, "boost": 1.5}}},
 ], "minimum_should_match": 1}}
@@ -206,7 +207,14 @@ the vector leg embeds `title + heading_path + text` (`rag/indexer.py
   (`chunk_text.code^1.5`); independent groups SUM; outer
   `minimum_should_match: 1`; tag filter as `filter` clause.
 - `KB_SEARCH_BM25_MIN_COVERAGE` (default `"70%"`, `""` omits the key):
-  ES `minimum_should_match` on the `chunk_text` leaf ONLY.
+  ES `minimum_should_match` on the `chunk_text` leaf AND the
+  title/heading identity group (both IK-tokenized, so a percentage of the
+  query's terms is well-defined). Identity-group coverage added 2026-09-10
+  (task `09-10-irrelevant-query-noise-gates`): without it a single
+  function-word title hit (a lone "的") satisfied the outer
+  `minimum_should_match: 1` and activated the whole BM25 leg above genuine
+  prose evidence. ES rounds the percentage DOWN per field, so single-term
+  identifier queries are unaffected.
 - `KB_SEARCH_BM25_MIN_SCORE` (default `0.0`, **retired**): mechanism and
   ES-side `min_score` plumbing kept as an operator escape hatch only.
 
@@ -228,14 +236,20 @@ the vector leg embeds `title + heading_path + text` (`rag/indexer.py
 - Base: pure-CJK query — identity + prose groups carry it, code group
   contributes nothing.
 - Bad: setting `minimum_should_match` on `chunk_text.code` (different
-  token semantics — that analyzer keeps IK-dropped stopwords) or on the
-  identity group (penalizes short breadcrumbs).
+  token semantics — that analyzer keeps IK-dropped stopwords) or REMOVING
+  it from the identity group (a lone stopword title hit then activates
+  the whole BM25 leg — the 09-10 noise hole; before 2026-09-10 the spec
+  said the opposite — the "penalizes short breadcrumbs" worry is bounded
+  by per-field round-down: one-term breadcrumbs are always fully
+  required, and multi-term breadcrumbs need the same 70% the prose leaf
+  needs).
 
 ### 6. Tests Required
 
-- `tests/test_es_queries.py`: full-dict body pin; coverage present /
-  omitted on `""`; recursive no-`analyzer`-key walk; tag-filter
-  non-interference (offline).
+- `tests/test_es_queries.py`: full-dict body pin; coverage present on
+  the prose leaf AND the identity group / omitted on `""` (both);
+  recursive no-`analyzer`-key walk; tag-filter non-interference
+  (offline).
 - `tests/test_es_relevance.py` (`es`-marked, live): D2 identifier
   regressions (`ConnectionPool`/`async_bulk` ≥ 1 hit), D1 rank ordering,
   C1 title non-duplication (synthetic corpus), noise → 0, relevance
@@ -263,6 +277,14 @@ the vector leg embeds `title + heading_path + text` (`rag/indexer.py
 **Calibration record**: design.md § Calibration of task
 `09-08-es-bm25-scoring` holds the before/after probe matrix (9 queries ×
 coverage values) — re-run the probe before changing coverage or boosts.
+The vector rescue on-domain trigger
+(`KB_SEARCH_VECTOR_RESCUE_TRIGGER_MAX_DISTANCE`, default 0.62, added
+2026-09-10) is calibrated in design.md § Calibration of task
+`09-10-irrelevant-query-noise-gates` (real 15-doc corpus: in-domain
+short-keyword leg_min 0.473-0.652 vs off-domain 0.656-0.774 — the bands
+touch; 0.62 is a precision-first policy choice, losing only bare `事务`)
+— re-run `uv run pytest -m live_llm tests/test_vector_distance_probe.py -s`
+before changing it.
 
 ---
 
