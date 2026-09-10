@@ -295,7 +295,13 @@ before changing it. Since 2026-09-10 (task
 `09-10-vector-rescue-bm25-backstop`) the rescue tier additionally requires
 BM25-leg emptiness (scenario below), so trigger-calibration probes must use
 BM25-empty queries — with BM25 survivors rescue is suppressed and the
-trigger is unreachable.
+trigger is unreachable. Multi-turn follow-up noise was measured 2026-09-11
+(task `09-11-followup-noise-eval`, findings.md in the archived task): with
+rewriting on, follow-up mean noise 3.17 vs raw 5.50 and hand-ideal 2.67 at
+`limit=8` (lift 2.33 = 82% of achievable; recall 6/6 vs raw 3/6;
+out-of-domain follow-up 0 in ALL conditions) — decision **no-go**, no gate
+change warranted; re-run that task's probes before changing rewrite or
+gate behavior for follow-ups.
 
 ---
 
