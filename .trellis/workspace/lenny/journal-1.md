@@ -253,3 +253,27 @@ Implemented 09-11-token-history-budget: chat history window now budgeted by toke
 ### Status
 
 [OK] **Completed**
+
+
+## Session 12: Rolling conversation summary beyond the history window
+
+**Date**: 2026-09-11
+**Task**: Rolling conversation summary beyond the history window
+**Branch**: `main`
+
+### Summary
+
+Implemented 09-11-rolling-history-summary: evicted turns now fold incrementally into chat_sessions.rolling_summary (migration 0007, up/down round-trip verified) with a monotone uuid7 id-ordering watermark (summarized_through_id) that never re-folds on window widening; summary injected as a labeled synthetic request/response pair ahead of in-window history with budget reservation (CHAT_SUMMARY_MAX_TOKENS=400) so it cannot be evicted; maintenance is persist-time best-effort after the streaming try/except before DoneEvent (latency_ms fixed first), read txn closed before the agent LLM call, never raises into ask, empty output treated as failed fold. KB_CHAT_ROLLING_SUMMARY_ENABLED=false restores cliff eviction byte-identically. Check: full-scope 13 files, 0 defects; 468 tests green (18 new DB tests), ruff + strict mypy clean. Specs: rolling-summary contract (watermark ordering, maintenance phasing, reservation formula) into chat-guidelines.md; create_all-does-not-ALTER test-DB gotcha into quality-guidelines.md.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `19bcc6f` | (see git log) |
+| `f410869` | (see git log) |
+| `33c14c1` | (see git log) |
+| `b000064` | (see git log) |
+
+### Status
+
+[OK] **Completed**

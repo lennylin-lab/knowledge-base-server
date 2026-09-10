@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/backend/search-guidelines.md", "reason": "Retrieval/search surface being measured (GET /api/v1/search); index/corpus state to hold constant across probes"}
+{"file": ".trellis/tasks/archive/2026-09/09-10-irrelevant-query-noise-gates/design.md", "reason": "Real-corpus live-probe methodology and evidence-recording style this evaluation reuses; the on-domain trigger calibration baseline"}
+{"file": ".trellis/tasks/archive/2026-09/09-10-vector-rescue-bm25-backstop/design.md", "reason": "The shipped BM25-empty rescue coupling and q=python evidence; defines the single-turn noise baseline follow-ups are compared against"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Query/corpus text stays out of logs; the evaluation writes its own artifact (data) rather than logging user content"}
