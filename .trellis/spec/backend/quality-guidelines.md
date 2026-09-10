@@ -74,6 +74,14 @@ keep them fast enough to run locally on every change.
   or a dedicated local `kb_test` DB), schema created per-session via
   `Base.metadata.create_all`, truncated between tests in fixtures —
   never the dev database.
+
+  > **Warning (learned 2026-09-11, rolling-summary task): `create_all` never
+  > ALTERs existing tables.** The disposable test DB is created once; when a
+  > task adds a migration, a stale `kb_test` from before the change hits
+  > `UndefinedColumnError` in every DB test — indistinguishable from a
+  > product bug. Fix: drop the test DB and let the fixture recreate it
+  > (`create_all` then matches the new models). Rule this out BEFORE
+  > debugging model/mapping code on any schema-change task.
 - **Naming**: `test_<unit>_<behavior>`, e.g. `test_get_document_missing_raises_404`.
 - Arrange–Act–Assert, one behavior per test; shared setup in `conftest.py`
   fixtures, not copy-pasted blocks.
