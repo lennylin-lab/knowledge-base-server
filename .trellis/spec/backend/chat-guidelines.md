@@ -143,4 +143,121 @@ window = select_history_window(
 
 ---
 
+## Scenario: Rolling conversation summary folds evicted turns
+
+### 1. Scope / Trigger
+
+- Trigger: cross-layer contract change — schema addition on `chat_sessions`
+  (migration `0007`: `rolling_summary`, `summarized_through_id`), a new
+  repository method, a new toolless agent, and post-answer service
+  orchestration (2026-09-11, task `09-11-rolling-history-summary`). Any
+  change to history assembly, fold logic, or summary injection must
+  re-verify this scenario.
+
+### 2. Signatures
+
+- `agents/conversation_summary.py::build_conversation_summary_agent(model)
+  -> Agent[None, str]` and `render_fold_prompt(turn_text_pairs, *,
+  max_tokens)` — toolless, imports pydantic-ai + `qa.load_prompt` ONLY.
+  `agents/` cannot import `models/`, so prompt rendering takes plain
+  `(user_text, assistant_text)` pairs, never ORM rows.
+- `ChatSessionRepository.update_rolling_summary(session_id, *, summary,
+  through_id)` — one `update(ChatSession)` statement, caller owns the txn.
+- `services/chat.py::select_turns_to_fold(...)` — pure;
+  `summary_prefix(summary)` — the labeled synthetic request/response pair.
+- `ChatService(..., *, summary_model: Model | None = None,
+  summary_max_tokens: int = 400)` — `None` disables (same injected-model
+  pattern as `rewrite_model`).
+
+### 3. Contracts
+
+- Watermark semantics: `summarized_through_id` is compared by uuid7 ID
+  ORDERING (`assistant.id > watermark`), never by membership — a later
+  budget widening that re-admits a folded turn into the window must NOT
+  re-fold it (the watermark never moves backward).
+- Fold boundary mirrors the prelude's reservation: a turn is folded as soon
+  as the next prelude (`budget - min(measure(summary), summary_max_tokens)`)
+  would stop showing it. The one-turn transient while the fold itself
+  changes the reservation is accepted and documented in
+  `select_turns_to_fold`.
+- Fold input is bounded through the `_bound_turn` guardrail copies before
+  rendering (a 50k-token pasted document cannot become a 50k-token fold
+  prompt); persisted rows stay whole.
+- Empty model output is a FAILED fold (`rolling_summary_update_failed`,
+  `error_class="EmptySummary"`, watermark held) — an empty summary would
+  erase the memory it was meant to extend.
+- Maintenance timing (persist-time, off the answer critical path): runs
+  after `ask`'s streaming try/except and before `DoneEvent`; `latency_ms`
+  is fixed BEFORE the call so `DoneEvent` keeps meaning answer latency.
+  Phasing: read txn CLOSED → `agent.run` (no open txn) → write txn. The
+  body catches `Exception` only and never raises into `ask`
+  (`BaseException` propagates).
+- Injection: labeled synthetic pair (`SUMMARY_PREFIX_LABEL` + acknowledgment)
+  prepended to the in-window history; never persisted.
+- Budget reservation: `_turn_budget = max(budget -
+  min(measure(summary), summary_max_tokens), 0)`, applied only when a
+  summary is present — the summary cannot be evicted by turn growth.
+- Settings: `CHAT_ROLLING_SUMMARY_ENABLED=True` (gates `summary_model`
+  injection in deps), `CHAT_SUMMARY_MAX_TOKENS=400`.
+- Logs: `rolling_summary_injected` (summary_length, reserved_tokens; only
+  when present) and `rolling_summary_update_failed` (error_class only).
+  NEVER summary or question text.
+- Disabled (`summary_model=None`) / stateless: no column read, no model
+  call, no injection, no new log events — byte-identical to cliff eviction.
+
+### 4. Validation & Error Matrix
+
+- Maintenance LLM failure → warning with error_class, watermark and summary
+  unchanged → folding retries next turn; the turn already succeeded and can
+  never become a terminal `ErrorEvent`.
+- Empty summary output → `EmptySummary`, watermark held.
+- Bounded fold still over the remaining budget → nothing folded this turn
+  (deferred; retried next turn).
+
+### 5. Good/Base/Bad Cases
+
+- Good: long session, oldest turns evicted → early-turn facts remain
+  answerable via the injected labeled summary.
+- Base: nothing evicted yet → no summary, identical to token-window
+  behavior.
+- Bad: read-time folding (prelude latency + LLM call near the read txn —
+  rejected); recomputing the whole summary from all evicted turns each turn
+  (O(history), non-incremental — rejected); `SystemPromptPart` framing
+  (collides with the agent's own instructions — rejected); membership-test
+  watermark (re-folds on window widening).
+
+### 6. Tests Required
+
+- `tests/test_chat_service.py` (AC1–AC7, DB-marked): evicted turn folded
+  into the stored summary; summary injected ahead of window turns in the
+  recorded histories; fold is incremental (call count / watermark advance);
+  disabled path pins cliff-shaped histories + `NULL`/`NULL` columns + zero
+  summary log events; scripted maintenance failure still reaches
+  `DoneEvent`; persisted rows unchanged; logs carry no summary/question
+  text; Settings defaults pinned.
+- `tests/test_history_window.py`: pure `select_turns_to_fold` coverage
+  including never-refold-on-window-widening; `summary_prefix` shape.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```python
+# Membership watermark: widening the window later re-admits an already-
+# folded turn and the summary folds it a second time.
+if turn.assistant.id not in summarized_ids:
+    fold(turn)
+```
+
+#### Correct
+
+```python
+# Monotone id-ordering watermark: once folded, never re-folded, whatever
+# the window does afterwards.
+if turn.assistant.id > summarized_through_id:
+    fold(turn)
+```
+
+---
+
 **Language**: All documentation is written in **English**.

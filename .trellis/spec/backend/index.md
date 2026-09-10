@@ -42,7 +42,7 @@ spec on purpose.
 | [Error Handling](./error-handling.md) | `AppError` hierarchy + LLM/MCP/streaming taxonomy, response envelope | Filled |
 | [Logging Guidelines](./logging-guidelines.md) | structlog events, request/run context, AI-stack logging rules | Filled |
 | [Search Guidelines](./search-guidelines.md) | ES image + analysis-ik plugin build, mapping analyzers, index lifecycle; retrieval-quality contracts (BM25 shape, gates, vector rescue) + chat query rewrite | Filled |
-| [Chat Guidelines](./chat-guidelines.md) | conversation-history contracts: token budget, long-turn guardrail, offline token counter | Filled |
+| [Chat Guidelines](./chat-guidelines.md) | conversation-history contracts: token budget, long-turn guardrail, rolling summary, offline token counter | Filled |
 | [Quality Guidelines](./quality-guidelines.md) | toolchain gates, offline AI test strategy, review checklist, forbidden patterns | Filled |
 
 ---
