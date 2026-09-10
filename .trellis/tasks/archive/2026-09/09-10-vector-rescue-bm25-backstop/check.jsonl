@@ -1,0 +1,5 @@
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Offline test strategy + toolchain gates + review checklist for verifying the rescue-suppression fix"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "search_executed: vector_rescued now 0 when BM25 non-empty; counter meaning must stay consistent, no query text"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Degradation paths (ran=False, BM25 error propagation) must stay unchanged by the new precondition"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "Verify the BM25-empty coupling stays in rag/retriever.py per the gates-in-rag layering contract"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "Completeness per quality-guidelines manifest rule; task touches no schema/queries, guideline read to confirm nothing DB-side is implicated"}

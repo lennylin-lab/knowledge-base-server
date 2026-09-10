@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "Gates-in-rag contract: rescue logic + the new BM25-empty coupling stay in rag/retriever.py; layering matrix"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "ChunkRow distance projection the rescue helper consumes; search_similar contract feeding the vector leg"}
+{"file": ".trellis/tasks/archive/2026-09/09-05-short-query-vector-gate/design.md", "reason": "Original rescue purpose (semantic recall backstop for short keywords) this task scopes to lexical-failure only"}
+{"file": ".trellis/tasks/archive/2026-09/09-10-irrelevant-query-noise-gates/design.md", "reason": "Immediate predecessor (archived): on-domain trigger this task ANDs a bm25_leg_empty condition onto; full rescue precondition chain and calibration"}
