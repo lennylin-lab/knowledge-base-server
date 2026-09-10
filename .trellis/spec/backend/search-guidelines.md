@@ -232,7 +232,11 @@ the vector leg embeds `title + heading_path + text` (`rag/indexer.py
 ### 5. Good/Base/Bad Cases
 
 - Good: `setState 状态管理` — chunk matching both halves outranks
-  single-field matches (D1 inversion fixed; measured 39.99/30.99 vs 15.67).
+  single-field matches (D1 inversion fixed; measured 39.99/30.99 vs 15.67
+  on the 09-08 corpus; re-anchored 2026-09-10 on the current corpus: React
+  渲染与并发 both-halves 18.84 (rank 1) vs React title-only 16.03 (rank 4)
+  — note the Flutter root chunk now mentions setState in its body, so it is
+  a both-halves chunk, not a single-side anchor).
 - Base: pure-CJK query — identity + prose groups carry it, code group
   contributes nothing.
 - Bad: setting `minimum_should_match` on `chunk_text.code` (different
@@ -251,9 +255,12 @@ the vector leg embeds `title + heading_path + text` (`rag/indexer.py
   recursive no-`analyzer`-key walk; tag-filter non-interference
   (offline).
 - `tests/test_es_relevance.py` (`es`-marked, live): D2 identifier
-  regressions (`ConnectionPool`/`async_bulk` ≥ 1 hit), D1 rank ordering,
-  C1 title non-duplication (synthetic corpus), noise → 0, relevance
-  probes ≥ 1.
+  regressions (`useState`/`lru_cache` ≥ 1 hit — re-anchored 2026-09-10 from
+  `ConnectionPool`/`async_bulk` when the dev corpus was replaced; one anchor
+  per naming convention), D2 plain-words presence (`use state`/`lru cache`
+  must reach the identifier chunks; totals NOT pinned — corpus-mutable),
+  D1 rank ordering, C1 title non-duplication (synthetic corpus), noise → 0,
+  relevance probes ≥ 1.
 - `tests/test_search_gates.py`: Settings↔query-builder↔Retriever
   drift-guard covers `SEARCH_BM25_MIN_COVERAGE` and the 0.0 score default.
 
