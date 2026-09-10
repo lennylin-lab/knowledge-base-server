@@ -401,6 +401,118 @@ if not bm25_leg_empty:
 
 ---
 
+## Scenario: History-aware query rewrite precedes retrieval (chat path)
+
+### 1. Scope / Trigger
+
+- Trigger: cross-layer contract change — new `Settings` env keys, new
+  `ChatService` constructor params, and a new agent module
+  (`agents/rewrite.py`; 2026-09-10, task
+  `09-10-query-rewrite-followups`). Any change to what query reaches the
+  retriever on chat follow-up turns must re-verify this scenario.
+
+### 2. Signatures
+
+- `agents/rewrite.py::build_rewrite_agent(model: Model) -> Agent[None, str]`
+  — toolless (`deps_type` defaults to `None`), instructions from
+  `agents/prompts/rewrite.md` via the shared `qa.load_prompt`; imports
+  pydantic-ai + the prompt loader only (layering convention #6).
+- `ChatService(..., *, rewrite_model: Model | None = None,
+  rewrite_history_turns: int = 3)` — both keyword-only, default-off, so
+  pre-existing call sites are unchanged.
+- `ChatService._rewrite_query(question, history) -> str` — best-effort,
+  never raises.
+- `api/deps.py::build_chat_service` passes
+  `rewrite_model=model if settings.CHAT_QUERY_REWRITE_ENABLED else None`
+  (the SAME `get_chat_model` instance — one SDK client per process) and
+  `rewrite_history_turns=settings.CHAT_REWRITE_HISTORY_TURNS`.
+
+### 3. Contracts
+
+- The rewritten string is ONLY the `run_stream` prompt. The ORIGINAL question
+  is what `_prepare_turn` persists and what `to_message_history` rebuilds for
+  later turns — history stays faithful to what the user typed. pydantic-ai
+  copies `message_history` on `run`/`run_stream` (verified in installed
+  source), so passing `turn.history` to both the rewrite run and the QA run
+  cannot mutate shared state.
+- Gate placement: first turn (empty history), stateless construction (no
+  factory), and flag-off (`rewrite_model=None`) short-circuit before any
+  rewrite LLM call or new log line — byte-identical to pre-rewrite behavior,
+  `RunStartedEvent` timing included.
+- The disable switch is `KB_CHAT_QUERY_REWRITE_ENABLED` folded into
+  construction (model injected or not), NOT a runtime branch in `ask`; the
+  runtime kill switch is setting it false (no deploy).
+- Turn cap: `history[-2 * rewrite_history_turns:]` (N turns = 2N messages);
+  `<= 0` uses the full assembled window
+  (`KB_CHAT_REWRITE_HISTORY_TURNS`, default 3).
+- Prompt contract (`rewrite.md`): resolve pronouns/anaphora/ellipsis from the
+  history; return the question UNCHANGED when already self-contained;
+  preserve the original language; output only the query text.
+- Log events: `query_rewrite` info (emitted only when a rewrite is
+  attempted) carries `applied`/`changed`/`original_length`/
+  `rewritten_length`; `query_rewrite_failed` carries `error_class` only.
+  NEVER the question or rewritten text (logging-guidelines).
+
+### 4. Validation & Error Matrix
+
+- Rewrite agent raises (provider error, etc.) → caught →
+  `query_rewrite_failed` (error_class only) → raw question proceeds; the
+  stream still reaches `DoneEvent`. Degrade-to-raw is the mandated failure
+  policy (never a terminal error solely from the rewrite step); the
+  streaming rule's BaseException carve-out holds —
+  `CancelledError`/`GeneratorExit` propagate for cancellation.
+- Empty/whitespace rewrite output → raw question.
+- Rewriting inside `search_knowledge` via `ChatDeps` → wrong layer
+  (rejected): an LLM round-trip per search call, a retrieval tool growing an
+  LLM dependency, and the answer-generation prompt stays anaphoric.
+
+### 5. Good/Base/Bad Cases
+
+- Good: turn 2 `那它的缺点呢?` after a topic turn → the retriever receives a
+  standalone Chinese query with the referent resolved (language preserved,
+  pinned via `StubRetriever.calls`).
+- Base: already self-contained follow-up → the prompt's no-op rule returns
+  it unchanged (pass-through, not a paraphrase).
+- Bad: persisting or history-rebuilding the rewritten form (breaks the
+  faithful-history contract); rewriting on the first turn or in the
+  stateless path (breaks the byte-identical invariant); a bool flag instead
+  of the model-or-None param (a bool would still need a model for tests).
+
+### 6. Tests Required
+
+- `tests/test_chat_service.py` (AC1–AC7): the standalone query reaches the
+  retriever AND is the run prompt itself (`_user_prompts` on the recorded QA
+  histories == [original turn-1, standalone turn-2] — with `message_history`,
+  the run's own prompt is the LAST user entry); first turn / stateless /
+  flag-off never invoke the rewriter; persisted rows and next-turn history
+  carry the ORIGINAL text; a scripted rewrite failure degrades to raw with
+  `DoneEvent` and no `ErrorEvent`; no question/rewritten text in captured
+  logs.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```python
+# History-blind retrieval: the anaphoric follow-up reaches the retriever
+# verbatim (the QA model's own search query is not reliably self-resolving).
+async with self._agent.run_stream(question, deps=deps, message_history=history):
+```
+
+#### Correct
+
+```python
+# Service-level, pre-run, best-effort: the run prompt is self-contained;
+# persistence and history keep the original.
+retrieval_question = await self._rewrite_query(question, turn.history if turn else [])
+async with self._agent.run_stream(
+    retrieval_question, deps=deps,
+    message_history=turn.history if turn and turn.history else None,
+):
+```
+
+---
+
 **Language**: All documentation is written in **English**.
 
 
