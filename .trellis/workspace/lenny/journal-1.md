@@ -138,3 +138,22 @@ Implemented 09-08-es-bm25-scoring end to end. G1: split the code analyzer — fl
 ### Status
 
 [OK] **Completed**
+
+
+## Session 7: Complete Trellis onboarding (00-join-lenny)
+
+**Date**: 2026-09-10
+**Task**: Complete Trellis onboarding (00-join-lenny)
+**Branch**: `main`
+
+### Summary
+
+Archived the join-lenny onboarding task after completing Trellis orientation. No application code changes in this session.
+
+### Git Commits
+
+(No commits - planning session)
+
+### Status
+
+[OK] **Completed**
