@@ -101,6 +101,17 @@ class Settings(BaseSettings):
     # `<= 0` disables rescue entirely (exact single-tier behavior).
     SEARCH_VECTOR_RESCUE_MARGIN: float = 0.15
     SEARCH_VECTOR_RESCUE_MAX_DISTANCE: float = 0.85
+    # Vector rescue on-domain trigger: rescue fires ONLY when the emptied
+    # leg's own minimum distance is at or below this — an off-domain leg
+    # (closest hit already unrelated) stays empty instead of rescuing its
+    # noise band. Calibrated 2026-09-10 on the real 15-doc corpus:
+    # in-domain short-keyword leg_min 0.473-0.652, off-domain queries
+    # 0.656-0.774; 0.62 is the precision-first policy choice (keeps the whole
+    # in-domain recall band except bare `事务`, whose BM25 leg still fires) —
+    # see task 09-10-irrelevant-query-noise-gates design.md. `2.0` (or
+    # anything greater) disables the trigger: rescue then fires whenever the
+    # ceiling above empties the leg (the pre-09-10 behavior).
+    SEARCH_VECTOR_RESCUE_TRIGGER_MAX_DISTANCE: float = 0.62
     # Post-fusion: keep a hit only when its fused score is at least this
     # fraction of the top hit's score; `0.0` disables.
     SEARCH_RRF_MIN_RELATIVE: float = 0.35

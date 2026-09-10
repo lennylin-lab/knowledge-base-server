@@ -50,21 +50,30 @@ SHIFTED_DISTANCE = 0.55
 # rescue cap (0.85), so the vector leg stays silenced — ES-dominated by design.
 RESCUE_PROOF_QUERY = "zorblat quibnard"
 RESCUE_PROOF_DISTANCE = 0.9
+# An off-domain-band query at 0.70: beyond the on-domain rescue trigger
+# (0.62) yet inside the rescue cap (0.85). Before the trigger existed this
+# leg was rescued wholesale (window = min(0.70 + 0.15, 0.85) = 0.85); now it
+# stays empty — the band the on-domain trigger closes.
+TRIGGER_PROOF_QUERY = "distant noise"
+TRIGGER_PROOF_DISTANCE = 0.70
 
 
 def shifted_scripted_provider() -> ScriptedEmbeddingProvider:
     """Both chunks share E0; `SHIFTED_QUERY` sits at cosine 0.55 from them
-    (E0/E2 plane, so orthogonal E1 defaults stay at distance 1.0).
+    (E0/E2 plane, so orthogonal E1 defaults stay at distance 1.0), and
+    `TRIGGER_PROOF_QUERY` at 0.70.
 
-    The primary ceiling empties the whole leg but the head is clustered —
-    only the rescue tier can admit it. Unmapped texts land orthogonally:
-    nothing rescues, empty over noise still holds.
+    The primary ceiling empties the whole leg but the shifted head is
+    clustered inside the trigger — only the rescue tier can admit it, while
+    the 0.70 leg (window-covered but off-domain) must stay empty. Unmapped
+    texts land orthogonally: nothing rescues, empty over noise still holds.
     """
     provider = ScriptedEmbeddingProvider(default=E1)
     provider.vectors[KOTLIN_EMBED_TEXT] = E0
     provider.vectors[PYTHON_EMBED_TEXT] = E0
     provider.vectors[SHIFTED_QUERY] = vector_at_distance(E0, E2, SHIFTED_DISTANCE)
     provider.vectors[RESCUE_PROOF_QUERY] = vector_at_distance(E0, E2, RESCUE_PROOF_DISTANCE)
+    provider.vectors[TRIGGER_PROOF_QUERY] = vector_at_distance(E0, E2, TRIGGER_PROOF_DISTANCE)
     return provider
 
 

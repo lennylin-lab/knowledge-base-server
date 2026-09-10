@@ -25,6 +25,7 @@ from corpus import (
     KOTLIN_EMBED_TEXT,
     KOTLIN_SECTION,
     SHIFTED_QUERY,
+    TRIGGER_PROOF_QUERY,
     VECTOR_QUERY,
     distant_scripted_provider,
     neighbor_scripted_provider,
@@ -234,6 +235,26 @@ async def test_search_executed_reports_vector_rescued_on_rescue_path(
     assert len(executed) == 1
     assert executed[0]["vector_gated"] == 0  # rescue admitted the shifted head
     assert executed[0]["vector_rescued"] == 2
+
+
+@pytest.mark.db
+@pytest.mark.es
+async def test_search_off_domain_band_query_returns_empty_items(rescued_search_client):
+    # TRIGGER_PROOF_QUERY sits at leg_min 0.70 — beyond the on-domain rescue
+    # trigger yet inside the rescue cap, i.e. exactly the noise band the
+    # trigger closes. The API must answer empty, with `vector_rescued: 0` as
+    # the search_executed signal.
+    with capture_logs() as logs:
+        resp = await rescued_search_client.get("/api/v1/search", params={"q": TRIGGER_PROOF_QUERY})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["mode"] == "hybrid"
+    assert body["items"] == []  # empty beats noise, despite the default limit=10
+    executed = [entry for entry in logs if entry["event"] == "search_executed"]
+    assert len(executed) == 1
+    assert executed[0]["vector_rescued"] == 0
+    assert executed[0]["vector_gated"] == 2
 
 
 @pytest.mark.db

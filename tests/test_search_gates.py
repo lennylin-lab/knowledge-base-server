@@ -1,8 +1,8 @@
 """Relevance gate units: pure helper behavior, offline (no db/es).
 
 Covers the post-fusion relative floor, the per-leg absolute gates, the
-two-tier vector rescue gate, the query length cap, and the Settings/Retriever
-default drift guard.
+two-tier vector rescue gate with its on-domain trigger, the query length
+cap, and the Settings/Retriever default drift guard.
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ from app.rag.retriever import (
     DEFAULT_VECTOR_MAX_DISTANCE,
     DEFAULT_VECTOR_RESCUE_MARGIN,
     DEFAULT_VECTOR_RESCUE_MAX_DISTANCE,
+    DEFAULT_VECTOR_RESCUE_TRIGGER_MAX_DISTANCE,
     ChunkKey,
     FusedHit,
     apply_relative_score_floor,
@@ -140,7 +141,11 @@ def test_vector_gate_empty_input_passes_through():
 def test_rescue_gate_primary_survivors_skip_rescue():
     rows = [_row(0.1), _row(0.9)]
     kept, rescued = filter_vector_rows_with_rescue(
-        rows, max_distance=0.45, rescue_margin=0.15, rescue_max_distance=0.85
+        rows,
+        max_distance=0.45,
+        rescue_margin=0.15,
+        rescue_max_distance=0.85,
+        rescue_trigger_max_distance=DEFAULT_VECTOR_RESCUE_TRIGGER_MAX_DISTANCE,
     )
 
     assert [row.distance for row in kept] == [0.1]
@@ -150,7 +155,11 @@ def test_rescue_gate_primary_survivors_skip_rescue():
 def test_rescue_gate_admits_clustered_head_when_primary_empties():
     rows = [_row(0.50), _row(0.55), _row(0.80)]
     kept, rescued = filter_vector_rows_with_rescue(
-        rows, max_distance=0.45, rescue_margin=0.15, rescue_max_distance=0.85
+        rows,
+        max_distance=0.45,
+        rescue_margin=0.15,
+        rescue_max_distance=0.85,
+        rescue_trigger_max_distance=DEFAULT_VECTOR_RESCUE_TRIGGER_MAX_DISTANCE,
     )
 
     # Window = min(0.50 + 0.15, 0.85) = 0.65: the clustered head, not the tail.
@@ -161,7 +170,13 @@ def test_rescue_gate_admits_clustered_head_when_primary_empties():
 def test_rescue_gate_cap_binds_the_window():
     rows = [_row(0.70), _row(0.71)]
     kept, rescued = filter_vector_rows_with_rescue(
-        rows, max_distance=0.45, rescue_margin=0.15, rescue_max_distance=0.85
+        rows,
+        max_distance=0.45,
+        rescue_margin=0.15,
+        rescue_max_distance=0.85,
+        # Trigger sentinel 2.0: isolate the cap's window arithmetic from the
+        # on-domain trigger (leg_min 0.70 would otherwise trip it first).
+        rescue_trigger_max_distance=2.0,
     )
 
     # Window = min(0.85, 0.85): both rows exactly at the cap survive.
@@ -172,7 +187,13 @@ def test_rescue_gate_cap_binds_the_window():
 def test_rescue_gate_cap_keeps_high_leg_min_silent():
     rows = [_row(0.90), _row(0.95)]
     kept, rescued = filter_vector_rows_with_rescue(
-        rows, max_distance=0.45, rescue_margin=0.15, rescue_max_distance=0.85
+        rows,
+        max_distance=0.45,
+        rescue_margin=0.15,
+        rescue_max_distance=0.85,
+        # Trigger sentinel 2.0: isolate the cap (the trigger would otherwise
+        # silence this leg first — see the off-domain-band test below).
+        rescue_trigger_max_distance=2.0,
     )
 
     # leg_min 0.90 puts the whole window above the cap: rare-term keywords
@@ -181,10 +202,78 @@ def test_rescue_gate_cap_keeps_high_leg_min_silent():
     assert rescued == 0
 
 
+def test_rescue_gate_off_domain_leg_above_trigger_stays_empty():
+    rows = [_row(0.70), _row(0.80)]
+    kept, rescued = filter_vector_rows_with_rescue(
+        rows,
+        max_distance=0.45,
+        rescue_margin=0.15,
+        rescue_max_distance=0.85,
+        rescue_trigger_max_distance=DEFAULT_VECTOR_RESCUE_TRIGGER_MAX_DISTANCE,
+    )
+
+    # leg_min 0.70 sits in the measured off-domain band: the window
+    # (min(0.85, 0.85)) would still admit it, but not even the closest hit is
+    # plausibly on-domain — the trigger keeps the leg empty. Empty beats noise.
+    assert kept == []
+    assert rescued == 0
+
+
+def test_rescue_gate_leg_min_exactly_at_trigger_still_rescued():
+    rows = [_row(0.62)]
+    kept, rescued = filter_vector_rows_with_rescue(
+        rows,
+        max_distance=0.45,
+        rescue_margin=0.15,
+        rescue_max_distance=0.85,
+        rescue_trigger_max_distance=DEFAULT_VECTOR_RESCUE_TRIGGER_MAX_DISTANCE,
+    )
+
+    # The trigger is inclusive: leg_min == trigger is plausibly on-domain.
+    assert [row.distance for row in kept] == [0.62]
+    assert rescued == 1
+
+
+def test_rescue_gate_in_domain_leg_between_ceiling_and_trigger_still_rescued():
+    rows = [_row(0.55), _row(0.60)]
+    kept, rescued = filter_vector_rows_with_rescue(
+        rows,
+        max_distance=0.45,
+        rescue_margin=0.15,
+        rescue_max_distance=0.85,
+        rescue_trigger_max_distance=DEFAULT_VECTOR_RESCUE_TRIGGER_MAX_DISTANCE,
+    )
+
+    # leg_min 0.55: beyond the primary ceiling, inside the trigger — the
+    # short-keyword granularity band the rescue tier exists for (AC3 recall).
+    assert [row.distance for row in kept] == [0.55, 0.60]
+    assert rescued == 2
+
+
+def test_rescue_gate_trigger_sentinel_reproduces_pre_task_behavior():
+    rows = [_row(0.70), _row(0.75)]
+    kept, rescued = filter_vector_rows_with_rescue(
+        rows,
+        max_distance=0.45,
+        rescue_margin=0.15,
+        rescue_max_distance=0.85,
+        rescue_trigger_max_distance=2.0,
+    )
+
+    # `>= 2.0` disables the trigger: a leg no sane trigger would admit still
+    # rescues whenever its window covers it — the pre-09-10 behavior.
+    assert [row.distance for row in kept] == [0.70, 0.75]
+    assert rescued == 2
+
+
 def test_rescue_gate_margin_sentinel_disables_rescue():
     rows = [_row(0.50), _row(0.55)]
     kept, rescued = filter_vector_rows_with_rescue(
-        rows, max_distance=0.45, rescue_margin=0.0, rescue_max_distance=0.85
+        rows,
+        max_distance=0.45,
+        rescue_margin=0.0,
+        rescue_max_distance=0.85,
+        rescue_trigger_max_distance=DEFAULT_VECTOR_RESCUE_TRIGGER_MAX_DISTANCE,
     )
 
     assert kept == []
@@ -194,7 +283,11 @@ def test_rescue_gate_margin_sentinel_disables_rescue():
 def test_rescue_gate_cap_sentinel_disables_rescue():
     rows = [_row(0.50)]
     kept, rescued = filter_vector_rows_with_rescue(
-        rows, max_distance=0.45, rescue_margin=0.15, rescue_max_distance=0.0
+        rows,
+        max_distance=0.45,
+        rescue_margin=0.15,
+        rescue_max_distance=0.0,
+        rescue_trigger_max_distance=DEFAULT_VECTOR_RESCUE_TRIGGER_MAX_DISTANCE,
     )
 
     assert kept == []
@@ -204,7 +297,11 @@ def test_rescue_gate_cap_sentinel_disables_rescue():
 def test_rescue_gate_row_without_distance_passes_primary():
     rows = [_row(None), _row(0.9)]
     kept, rescued = filter_vector_rows_with_rescue(
-        rows, max_distance=0.45, rescue_margin=0.15, rescue_max_distance=0.85
+        rows,
+        max_distance=0.45,
+        rescue_margin=0.15,
+        rescue_max_distance=0.85,
+        rescue_trigger_max_distance=DEFAULT_VECTOR_RESCUE_TRIGGER_MAX_DISTANCE,
     )
 
     # The fail-open row survives the primary tier, so the rescue branch —
@@ -216,7 +313,11 @@ def test_rescue_gate_row_without_distance_passes_primary():
 def test_rescue_gate_full_ceiling_sentinel_disables_everything():
     rows = [_row(1.5)]
     kept, rescued = filter_vector_rows_with_rescue(
-        rows, max_distance=2.0, rescue_margin=0.15, rescue_max_distance=0.85
+        rows,
+        max_distance=2.0,
+        rescue_margin=0.15,
+        rescue_max_distance=0.85,
+        rescue_trigger_max_distance=DEFAULT_VECTOR_RESCUE_TRIGGER_MAX_DISTANCE,
     )
 
     assert kept == rows
@@ -225,7 +326,11 @@ def test_rescue_gate_full_ceiling_sentinel_disables_everything():
 
 def test_rescue_gate_empty_input_passes_through():
     assert filter_vector_rows_with_rescue(
-        [], max_distance=0.45, rescue_margin=0.15, rescue_max_distance=0.85
+        [],
+        max_distance=0.45,
+        rescue_margin=0.15,
+        rescue_max_distance=0.85,
+        rescue_trigger_max_distance=DEFAULT_VECTOR_RESCUE_TRIGGER_MAX_DISTANCE,
     ) == ([], 0)
 
 
@@ -260,6 +365,10 @@ def test_settings_gate_defaults_match_retriever_defaults():
     assert settings.SEARCH_VECTOR_MAX_DISTANCE == DEFAULT_VECTOR_MAX_DISTANCE
     assert settings.SEARCH_VECTOR_RESCUE_MARGIN == DEFAULT_VECTOR_RESCUE_MARGIN
     assert settings.SEARCH_VECTOR_RESCUE_MAX_DISTANCE == DEFAULT_VECTOR_RESCUE_MAX_DISTANCE
+    assert (
+        settings.SEARCH_VECTOR_RESCUE_TRIGGER_MAX_DISTANCE
+        == DEFAULT_VECTOR_RESCUE_TRIGGER_MAX_DISTANCE
+    )
     assert settings.SEARCH_RRF_MIN_RELATIVE == DEFAULT_RRF_MIN_RELATIVE
     assert settings.SEARCH_MAX_QUERY_LENGTH == DEFAULT_MAX_QUERY_LENGTH
 

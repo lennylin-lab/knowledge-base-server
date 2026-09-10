@@ -20,6 +20,7 @@ from app.rag.retriever import (
     DEFAULT_BM25_MIN_SCORE,
     DEFAULT_MAX_QUERY_LENGTH,
     DEFAULT_VECTOR_MAX_DISTANCE,
+    DEFAULT_VECTOR_RESCUE_TRIGGER_MAX_DISTANCE,
     Retriever,
 )
 from app.services.document import DocumentService
@@ -32,6 +33,7 @@ from corpus import (
     RESCUE_PROOF_QUERY,
     SHIFTED_DISTANCE,
     SHIFTED_QUERY,
+    TRIGGER_PROOF_QUERY,
     VECTOR_QUERY,
     distant_scripted_provider,
     neighbor_scripted_provider,
@@ -333,11 +335,14 @@ async def test_rescued_vector_head_restores_short_query_recall(
         "Python Notes",
     }
     # Admitted by rescue, NOT by the primary ceiling: every distance sits
-    # above the ceiling yet inside the rescue window (float32 pgvector
-    # storage rounds the scripted distance — compare approximately).
+    # above the ceiling yet inside the on-domain trigger's band (leg_min
+    # 0.55 <= trigger 0.62) — exactly the short-keyword recall the trigger
+    # must keep rescuing (float32 pgvector storage rounds the scripted
+    # distance — compare approximately).
     distances = [item.vector_distance for item in outcome.items]
     assert all(distance == pytest.approx(SHIFTED_DISTANCE, abs=1e-3) for distance in distances)
     assert all(distance > DEFAULT_VECTOR_MAX_DISTANCE for distance in distances)
+    assert all(distance <= DEFAULT_VECTOR_RESCUE_TRIGGER_MAX_DISTANCE for distance in distances)
 
 
 async def test_rescue_cap_keeps_rare_term_query_es_dominated(
@@ -351,13 +356,34 @@ async def test_rescue_cap_keeps_rare_term_query_es_dominated(
     outcome = await retriever.retrieve(RESCUE_PROOF_QUERY)
 
     assert outcome.mode == "hybrid"
-    assert outcome.vector_gated == 2  # head at 0.9: beyond the rescue cap
+    assert outcome.vector_gated == 2  # head at 0.9: beyond trigger and rescue cap
     assert outcome.vector_rescued == 0
     assert {item.document_title for item in outcome.items} == {
         "Kotlin Notes",
         "Python Notes",
     }
     assert all(item.es_score is not None for item in outcome.items)  # ES decided alone
+
+
+async def test_off_domain_band_query_stays_empty_above_rescue_trigger(
+    seed_indexed, session_factory, es_client, es_index_name
+):
+    await seed_corpus(seed_indexed, shifted_scripted_provider())
+    retriever = make_retriever(
+        session_factory, es_client, es_index_name, shifted_scripted_provider()
+    )
+
+    outcome = await retriever.retrieve(TRIGGER_PROOF_QUERY)
+
+    assert outcome.mode == "hybrid"
+    assert outcome.es_hits == 0  # no term overlap: a vector-only leg
+    assert outcome.vector_hits == 2
+    # leg_min 0.70 (TRIGGER_PROOF_DISTANCE) sits in the off-domain band:
+    # beyond the on-domain trigger yet inside the rescue cap — pre-task the
+    # window (0.85) admitted this whole band; the trigger keeps it empty.
+    assert outcome.vector_rescued == 0
+    assert outcome.vector_gated == 2
+    assert outcome.items == []
 
 
 async def test_unrelated_query_stays_empty_in_rescue_world(

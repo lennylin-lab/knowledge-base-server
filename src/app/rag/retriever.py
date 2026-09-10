@@ -15,7 +15,9 @@ against the top hit — empty results beat noise on small corpora. When the
 vector ceiling empties its leg, a rescue tier admits that leg's clustered
 head (short keyword queries sit systematically farther from long chunks, so
 the absolute ceiling alone would silence semantic recall exactly when it is
-needed); the rescue cap keeps genuinely unrelated legs silent.
+needed) — but only when the leg is plausibly on-domain: a leg whose closest
+hit is already beyond the on-domain trigger stays empty (empty beats noise),
+and the rescue cap remains the absolute backstop.
 """
 
 from __future__ import annotations
@@ -59,6 +61,13 @@ DEFAULT_BM25_MIN_SCORE = 0.0
 DEFAULT_VECTOR_MAX_DISTANCE = 0.45
 DEFAULT_VECTOR_RESCUE_MARGIN = 0.15
 DEFAULT_VECTOR_RESCUE_MAX_DISTANCE = 0.85
+# On-domain rescue trigger: rescue fires only when the leg's minimum distance
+# is at or below this (a plausibly on-domain leg); a noisier leg stays empty.
+# Calibrated 2026-09-10 on the real 15-doc corpus (in-domain short-keyword
+# leg_min 0.473-0.652, off-domain queries 0.656-0.774; precision-first policy
+# — see task 09-10-irrelevant-query-noise-gates design.md). `>= 2.0` disables
+# the trigger: rescue then fires whenever the primary tier is empty.
+DEFAULT_VECTOR_RESCUE_TRIGGER_MAX_DISTANCE = 0.62
 DEFAULT_RRF_MIN_RELATIVE = 0.35
 DEFAULT_MAX_QUERY_LENGTH = 256
 
@@ -151,6 +160,7 @@ def filter_vector_rows_with_rescue(
     max_distance: float,
     rescue_margin: float,
     rescue_max_distance: float,
+    rescue_trigger_max_distance: float,
 ) -> tuple[list[ChunkRow], int]:
     """Two-tier vector gate: the absolute ceiling plus a head-rescue tier.
 
@@ -158,12 +168,17 @@ def filter_vector_rows_with_rescue(
     the leg (and rows exist) does the rescue tier admit rows within
     `min(leg_min + rescue_margin, rescue_max_distance)` — the clustered head
     of a leg shifted up wholesale — so short keyword queries keep semantic
-    recall without loosening the primary ceiling for everyone. The cap is
-    the noise floor: a leg whose minimum distance exceeds it rescues nothing
-    (rare-term keywords stay ES-dominated). `rescue_margin <= 0` or
-    `rescue_max_distance <= 0` disables rescue: behavior identical to the
-    single-tier gate. Returns the kept rows and how many were admitted ONLY
-    via the rescue tier (0 whenever the primary tier has survivors).
+    recall without loosening the primary ceiling for everyone. The on-domain
+    trigger gates WHETHER rescue fires at all: a leg whose minimum distance
+    exceeds `rescue_trigger_max_distance` is not plausibly on-domain, so it
+    stays empty instead of rescuing its noise band. `rescue_trigger_max_distance
+    >= 2.0` — cosine distance's maximum — disables the trigger (rescue fires
+    whenever the primary tier empties the leg). The rescue WINDOW logic is
+    unchanged: `rescue_margin <= 0` or `rescue_max_distance <= 0` still
+    disables rescue (behavior identical to the single-tier gate), and the cap
+    remains the absolute backstop for the window. Returns the kept rows and
+    how many were admitted ONLY via the rescue tier (0 whenever the primary
+    tier has survivors).
     """
     if max_distance >= 2.0:
         return list(rows), 0
@@ -177,7 +192,12 @@ def filter_vector_rows_with_rescue(
     measured = [row.distance for row in rows if row.distance is not None]
     if not measured:  # defensive; unreachable given the fail-open primary tier
         return [], 0
-    window = min(min(measured) + rescue_margin, rescue_max_distance)
+    measured_min = min(measured)
+    if measured_min > rescue_trigger_max_distance:
+        # Off-domain leg: not even the closest hit is plausibly on-domain, so
+        # the rescue window would admit pure noise. Empty beats noise.
+        return [], 0
+    window = min(measured_min + rescue_margin, rescue_max_distance)
     rescued = [row for row in rows if row.distance is not None and row.distance <= window]
     return rescued, len(rescued)
 
@@ -281,6 +301,7 @@ class Retriever:
         vector_max_distance: float = DEFAULT_VECTOR_MAX_DISTANCE,
         vector_rescue_margin: float = DEFAULT_VECTOR_RESCUE_MARGIN,
         vector_rescue_max_distance: float = DEFAULT_VECTOR_RESCUE_MAX_DISTANCE,
+        vector_rescue_trigger_max_distance: float = DEFAULT_VECTOR_RESCUE_TRIGGER_MAX_DISTANCE,
         rrf_min_relative: float = DEFAULT_RRF_MIN_RELATIVE,
         max_query_length: int = DEFAULT_MAX_QUERY_LENGTH,
     ) -> None:
@@ -293,6 +314,7 @@ class Retriever:
         self._vector_max_distance = vector_max_distance
         self._vector_rescue_margin = vector_rescue_margin
         self._vector_rescue_max_distance = vector_rescue_max_distance
+        self._vector_rescue_trigger_max_distance = vector_rescue_trigger_max_distance
         self._rrf_min_relative = rrf_min_relative
         self._max_query_length = max_query_length
 
@@ -345,14 +367,15 @@ class Retriever:
         # gate). ES already pruned at `min_score`; the Python-side re-check
         # keeps the gate authoritative regardless of ES scoring quirks. The
         # vector gate is two-tier: rescue only ever fires when the ceiling
-        # empties the leg, so a living primary tier is bit-identical to the
-        # single-tier behavior.
+        # empties the leg AND the leg is plausibly on-domain (the trigger), so
+        # a living primary tier is bit-identical to the single-tier behavior.
         kept_es_hits = filter_es_hits(es_hits, min_score=self._bm25_min_score)
         kept_vector_rows, vector_rescued = filter_vector_rows_with_rescue(
             vector_leg.rows,
             max_distance=self._vector_max_distance,
             rescue_margin=self._vector_rescue_margin,
             rescue_max_distance=self._vector_rescue_max_distance,
+            rescue_trigger_max_distance=self._vector_rescue_trigger_max_distance,
         )
 
         es_keys = [ChunkKey(hit.document_id, hit.chunk_index) for hit in kept_es_hits]
