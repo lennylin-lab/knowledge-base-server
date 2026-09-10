@@ -291,7 +291,113 @@ The vector rescue on-domain trigger
 short-keyword leg_min 0.473-0.652 vs off-domain 0.656-0.774 — the bands
 touch; 0.62 is a precision-first policy choice, losing only bare `事务`)
 — re-run `uv run pytest -m live_llm tests/test_vector_distance_probe.py -s`
-before changing it.
+before changing it. Since 2026-09-10 (task
+`09-10-vector-rescue-bm25-backstop`) the rescue tier additionally requires
+BM25-leg emptiness (scenario below), so trigger-calibration probes must use
+BM25-empty queries — with BM25 survivors rescue is suppressed and the
+trigger is unreachable.
+
+---
+
+## Scenario: Vector rescue is a lexical-failure backstop
+
+### 1. Scope / Trigger
+
+- Trigger: cross-layer retrieval contract change —
+  `filter_vector_rows_with_rescue` gained the `bm25_leg_empty` precondition
+  (2026-09-10, task `09-10-vector-rescue-bm25-backstop`). Any change to the
+  rescue precondition chain must re-verify this scenario.
+
+### 2. Signatures
+
+- `rag/retriever.py`:
+  `filter_vector_rows_with_rescue(rows, *, max_distance, rescue_margin,
+  rescue_max_distance, rescue_trigger_max_distance, bm25_leg_empty)
+  -> tuple[list[ChunkRow], int]`.
+- Call site: `Retriever.retrieve` passes
+  `bm25_leg_empty=(len(kept_es_hits) == 0)` — zero survivors AFTER
+  `filter_es_hits` (the gated BM25 leg), never a raw/pre-gate hit count.
+  `kept_es_hits` is already computed above the vector gate; both legs are
+  gathered before this point, so no reordering or extra awaits.
+
+### 3. Contracts
+
+- Full rescue precondition chain (all must hold, in evaluation order):
+  GATES_OFF off (`max_distance < 2.0`) → primary tier empty AND rows exist
+  → BM25 leg empty → rescue enabled (`margin > 0`, `cap > 0`) → on-domain
+  (`leg_min <= KB_SEARCH_VECTOR_RESCUE_TRIGGER_MAX_DISTANCE`, 0.62) →
+  window `min(leg_min + margin, cap)`.
+- "BM25 empty" = zero gated survivors — deliberately scale-free; a count
+  threshold ("weak" ≤ N) would be a new corpus/limit-dependent knob and is
+  rejected.
+- The returned count is rows admitted ONLY via rescue — 0 whenever the
+  primary tier survives or the BM25 leg is non-empty;
+  `search_executed.vector_rescued` inherits exactly this meaning.
+- The coupling has NO Settings key: it is structural (cross-leg logic the
+  retriever alone can see), not an operator-tunable calibration. Adding one
+  would break the Settings↔`DEFAULT_*` drift-guard shape for no benefit.
+
+### 4. Validation & Error Matrix
+
+- Relevant and irrelevant chunks INTERLEAVE in vector distance inside a
+  topical cluster (`q=python`: genuine Python chunk at 0.687 is farther
+  than the Vue leak at 0.660) → no vector-side threshold or window
+  tightening separates them; cross-leg agreement is the only clean
+  separator. Do not re-attempt vector-only fixes.
+- Raising `SEARCH_RRF_MIN_RELATIVE` to kill single-leg leaks → global and
+  blunt, cuts genuine single-leg tails in mixed sets; rejected (see task
+  design.md § Tradeoffs). Confidence-weighted RRF remains the deferred
+  general solution.
+- Wiring the BM25 condition inside `filter_vector_rows` → wrong layer: the
+  primary tier is pure distance filtering; cross-leg knowledge enters only
+  via the rescue helper's flag.
+
+### 5. Good/Base/Bad Cases
+
+- Good: `q=python` — BM25 ranks 6 genuine chunks, primary vector tier
+  emptied (leg_min 0.586 > 0.45 ceiling, ≤ 0.62 trigger) → rescue
+  suppressed, BM25-only fusion, zero topical-neighbor leaks
+  (live-verified 2026-09-10).
+- Base: vocabulary-mismatch short keyword (`q=coroutine`-shaped) — BM25 0
+  survivors, on-domain leg → rescue fires exactly as before; recall
+  preserved (live-verified 2026-09-10).
+- Bad: computing `bm25_leg_empty` from pre-gate ES hits or an `es_score`
+  heuristic, or "restoring" rescue by defaulting the flag to `True` in the
+  helper body instead of at the call site (rollback stays a call-site
+  decision).
+
+### 6. Tests Required
+
+- `tests/test_search_gates.py`: rescue suppressed when
+  `bm25_leg_empty=False` despite emptied primary tier + on-domain leg_min;
+  every prior rescue case passes `bm25_leg_empty=True` (bit-identical
+  behavior pin).
+- `tests/test_retriever.py`: BM25-non-empty + emptied primary vector →
+  `vector_rescued == 0` and no vector-only results; BM25-empty short
+  keyword → still rescued.
+- Task 09-10 out-of-domain regressions stay green: off-domain + BM25-empty
+  → trigger blocks rescue unchanged (the new condition only tightens
+  further).
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```python
+# Rescue decides from vector-leg evidence alone: any in-domain keyword
+# query whose primary tier empties gets the whole same-domain cluster.
+if measured_min <= rescue_trigger_max_distance:
+    ...  # fire rescue
+```
+
+#### Correct
+
+```python
+# Rescue is the backstop for LEXICAL failure: without an empty gated BM25
+# leg it never fires, whatever the vector distances look like.
+if not bm25_leg_empty:
+    return [], 0
+```
 
 ---
 
