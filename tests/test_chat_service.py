@@ -33,7 +33,7 @@ from app.agents.qa import SourceCollector
 from app.core.exceptions import NotFoundError, SearchIndexError
 from app.mcp.manager import McpToolInfo, McpToolResult
 from app.mcp.tools import build_agent_tools
-from app.models.chat import ChatMessage, MessageRole
+from app.models.chat import ChatMessage, ChatSession, MessageRole
 from app.rag.retriever import RetrievedChunk, SearchOutcome
 from app.repositories.chat import ChatMessageRepository, ChatSessionRepository
 from app.schemas.chat import (
@@ -43,7 +43,7 @@ from app.schemas.chat import (
     RunStartedEvent,
     SourcesEvent,
 )
-from app.services.chat import TRUNCATION_MARKER, ChatService
+from app.services.chat import SUMMARY_PREFIX_LABEL, TRUNCATION_MARKER, ChatService
 from app.services.session import derive_title
 from fakes import (
     FakeMcpManager,
@@ -52,6 +52,7 @@ from fakes import (
     retrieved_chunk,
     scripted_chat_model,
     scripted_rewrite_model,
+    scripted_summary_model,
 )
 
 QUESTION = "What do the notes say about zorblat?"
@@ -1203,3 +1204,356 @@ async def test_rewrite_logs_flags_and_lengths_only(session_factory):
     # User data stays out of logs: neither text appears anywhere.
     assert ANAPHORIC_FOLLOWUP not in str(logs)
     assert STANDALONE_QUERY not in str(logs)
+
+
+# --- rolling summary of evicted history (scripted summary model; disposable DB) ---
+#
+# Arithmetic under the `len` counter with the guardrail off (fraction 1.0):
+# every "uN"/"aN" turn costs exactly 4 tokens. A budget of 10 keeps two turns
+# in the window, so turn 3's post-answer maintenance evicts and folds turn 1;
+# the short scripted summaries ("S1", 2 tokens) reserve 2 of the 10, leaving 8
+# — still two turns — so the next prelude shows [summary, u2, a2, u3, a3].
+
+
+def _summarizing_service(
+    factory: async_sessionmaker[AsyncSession],
+    summary_model,
+    *,
+    answer: str,
+    budget: int = 10,
+    histories: list[list[ModelMessage]] | None = None,
+) -> ChatService:
+    """ChatService wired with a summary model: scripted QA model, stub
+    retriever, one DB session per ask() via the injected factory, `len`
+    counter, guardrail off — the production shape minus the LLM."""
+    return ChatService(
+        StubRetriever(),
+        scripted_chat_model(answer_parts=[answer], histories=histories),
+        mode="hybrid",
+        session_factory=factory,
+        history_token_budget=budget,
+        history_max_turn_fraction=1.0,
+        token_counter=len,
+        summary_model=summary_model,
+    )
+
+
+async def _session_row(factory: async_sessionmaker[AsyncSession], session_id: UUID) -> ChatSession:
+    async with factory() as session:
+        row = await ChatSessionRepository(session).get_by_id(session_id)
+    assert row is not None
+    return row
+
+
+async def _seed_folded_session(factory: async_sessionmaker[AsyncSession], summary_model) -> UUID:
+    """Three turns (u1..u3) under the 10-token budget: turn 3's maintenance
+    evicts turn 1 and folds it, so the session leaves here with a summary
+    whose watermark is a1."""
+    events = await _collect(_summarizing_service(factory, summary_model, answer="a1"), "u1")
+    session_id = events[0].session_id
+    assert session_id is not None
+    for question, answer in (("u2", "a2"), ("u3", "a3")):
+        await _collect(
+            _summarizing_service(factory, summary_model, answer=answer),
+            question,
+            session_id=session_id,
+        )
+    return session_id
+
+
+@pytest.mark.db
+async def test_evicted_turn_is_folded_into_the_stored_rolling_summary(session_factory):
+    # AC1: once the oldest turn falls outside the token window its content is
+    # represented in the session's stored summary, and the raw turn is no
+    # longer in the in-window history the model receives.
+    fold_prompts: list[str] = []
+    summarizer = scripted_summary_model(["S1", "S2"], prompts=fold_prompts)
+
+    events = await _collect(_summarizing_service(session_factory, summarizer, answer="a1"), "u1")
+    session_id = events[0].session_id
+    assert session_id is not None
+    await _collect(
+        _summarizing_service(session_factory, summarizer, answer="a2"), "u2", session_id=session_id
+    )
+    # Two turns (8 tokens) fit the budget of 10: nothing evicted, nothing folded.
+    assert fold_prompts == []
+    row = await _session_row(session_factory, session_id)
+    assert (row.rolling_summary, row.summarized_through_id) == (None, None)
+
+    # Turn 3 pushes turn 1 out of the window; the fold runs after the answer.
+    events3 = await _collect(
+        _summarizing_service(session_factory, summarizer, answer="a3"), "u3", session_id=session_id
+    )
+    assert isinstance(events3[-1], DoneEvent)
+    assert len(fold_prompts) == 1
+    assert "User: u1\nAssistant: a1" in fold_prompts[0]
+    assert "u2" not in fold_prompts[0]
+    assert "u3" not in fold_prompts[0]
+    row = await _session_row(session_factory, session_id)
+    assert row.rolling_summary == "S1"
+    messages = await _session_messages(session_factory, session_id)
+    assert row.summarized_through_id == messages[1].id  # a1: the newest folded message
+
+    # Turn 4: the raw turn 1 is gone from the in-window history — its memory
+    # arrives through the leading summary instead.
+    histories: list[list[ModelMessage]] = []
+    await _collect(
+        _summarizing_service(session_factory, summarizer, answer="a4", histories=histories),
+        "u4",
+        session_id=session_id,
+    )
+    assert histories
+    for seen in histories:
+        prompts = _user_prompts(seen)
+        assert "u1" not in prompts
+        assert prompts[0].startswith(SUMMARY_PREFIX_LABEL)
+        assert "a1" not in _assistant_texts(seen)
+
+
+@pytest.mark.db
+async def test_rolling_summary_leads_the_next_turn_history_as_labeled_context(session_factory):
+    # AC2: the summary is injected AHEAD of the in-window turns as a labeled
+    # synthetic exchange (request + acknowledgement), never as a bare user turn.
+    summarizer = scripted_summary_model(["S1"])
+    session_id = await _seed_folded_session(session_factory, summarizer)
+
+    histories: list[list[ModelMessage]] = []
+    await _collect(
+        _summarizing_service(session_factory, summarizer, answer="a4", histories=histories),
+        "u4",
+        session_id=session_id,
+    )
+
+    assert histories
+    for seen in histories:
+        assert _user_prompts(seen) == [f"{SUMMARY_PREFIX_LABEL}\nS1", "u2", "u3", "u4"]
+        answers = _assistant_texts(seen)
+        assert answers[1:] == ["a2", "a3"]
+        assert answers[0]  # the synthetic acknowledgement keeps alternation clean
+        assert isinstance(seen[0], ModelRequest)
+        assert isinstance(seen[1], ModelResponse)
+
+
+@pytest.mark.db
+async def test_folding_is_incremental_and_runs_only_when_new_turns_evict(session_factory):
+    # AC3: a turn already folded is never re-summarized — the watermark
+    # advances and each fold carries the existing summary plus the newly
+    # evicted turns only; a turn that evicts nothing makes no fold call.
+    fold_prompts: list[str] = []
+    summarizer = scripted_summary_model(["S1", "S2"], prompts=fold_prompts)
+    session_id = await _seed_folded_session(session_factory, summarizer)
+    assert len(fold_prompts) == 1
+
+    # Turn 4 evicts turn 2: the fold sees summary S1 + turn 2, never turn 1 again.
+    await _collect(
+        _summarizing_service(session_factory, summarizer, answer="a4"), "u4", session_id=session_id
+    )
+    assert len(fold_prompts) == 2
+    assert "# Existing summary\nS1\n" in fold_prompts[1]
+    assert "User: u2\nAssistant: a2" in fold_prompts[1]
+    assert "User: u1" not in fold_prompts[1]
+    row = await _session_row(session_factory, session_id)
+    messages = await _session_messages(session_factory, session_id)
+    assert row.rolling_summary == "S2"
+    assert row.summarized_through_id == messages[3].id  # a2
+
+    # A wide budget evicts nothing new: no fold call, summary/watermark untouched.
+    await _collect(
+        _summarizing_service(session_factory, summarizer, answer="a5", budget=1000),
+        "u5",
+        session_id=session_id,
+    )
+    assert len(fold_prompts) == 2
+    row = await _session_row(session_factory, session_id)
+    assert row.rolling_summary == "S2"
+    assert row.summarized_through_id == messages[3].id
+
+
+@pytest.mark.db
+async def test_rolling_summary_disabled_is_plain_cliff_eviction(session_factory):
+    # AC4: without a summary model (the default construction and the
+    # Settings-disabled wiring) nothing is read, folded, or injected — the
+    # oldest turn simply vanishes at the window edge, exactly as before.
+    def disabled(answer: str, histories: list[list[ModelMessage]] | None = None) -> ChatService:
+        return ChatService(
+            StubRetriever(),
+            scripted_chat_model(answer_parts=[answer], histories=histories),
+            mode="hybrid",
+            session_factory=session_factory,
+            history_token_budget=10,
+            history_max_turn_fraction=1.0,
+            token_counter=len,
+        )
+
+    events = await _collect(disabled("a1"), "u1")
+    session_id = events[0].session_id
+    assert session_id is not None
+    await _collect(disabled("a2"), "u2", session_id=session_id)
+    histories: list[list[ModelMessage]] = []
+    with capture_logs() as logs:
+        await _collect(disabled("a3"), "u3", session_id=session_id)
+        await _collect(disabled("a4", histories), "u4", session_id=session_id)
+
+    assert histories
+    for seen in histories:
+        assert _user_prompts(seen) == ["u2", "u3", "u4"]  # the cliff: u1 is gone, no prefix
+        assert _assistant_texts(seen) == ["a2", "a3"]
+    row = await _session_row(session_factory, session_id)
+    assert (row.rolling_summary, row.summarized_through_id) == (None, None)
+    assert not any(entry["event"].startswith("rolling_summary") for entry in logs)
+
+
+@pytest.mark.db
+async def test_summary_fold_failure_keeps_the_turn_successful_and_retries_later(session_factory):
+    # AC5: a scripted fold failure never touches the answer stream (the turn
+    # still reaches `done`, no `error` event), leaves summary/watermark
+    # unchanged, and the unfolded turns are folded on a later turn.
+    failed_prompts: list[str] = []
+    failing = scripted_summary_model(
+        ["never"],
+        prompts=failed_prompts,
+        fail=openai.APIConnectionError(
+            request=httpx.Request("POST", "http://provider.test/v1/chat")
+        ),
+    )
+    events = await _collect(_summarizing_service(session_factory, failing, answer="a1"), "u1")
+    session_id = events[0].session_id
+    assert session_id is not None
+    await _collect(
+        _summarizing_service(session_factory, failing, answer="a2"), "u2", session_id=session_id
+    )
+    with capture_logs() as logs:
+        events3 = await _collect(
+            _summarizing_service(session_factory, failing, answer="a3"),
+            "u3",
+            session_id=session_id,
+        )
+
+    # The fold was attempted and failed; the turn completed normally regardless.
+    assert len(failed_prompts) == 1
+    assert _names(events3) == ["RunStartedEvent", "AnswerDeltaEvent", "DoneEvent"]
+    done = events3[-1]
+    assert isinstance(done, DoneEvent)
+    assert done.outcome == "success"
+    failed = [entry for entry in logs if entry["event"] == "rolling_summary_update_failed"]
+    assert len(failed) == 1
+    assert failed[0]["error_class"] == "APIConnectionError"
+    row = await _session_row(session_factory, session_id)
+    assert (row.rolling_summary, row.summarized_through_id) == (None, None)
+
+    # Next turn with a working summarizer: by now turns 1 AND 2 are outside
+    # the window, so both are folded — from an empty summary — in one pass.
+    fold_prompts: list[str] = []
+    working = scripted_summary_model(["S1"], prompts=fold_prompts)
+    await _collect(
+        _summarizing_service(session_factory, working, answer="a4"), "u4", session_id=session_id
+    )
+    assert len(fold_prompts) == 1
+    assert "User: u1\nAssistant: a1" in fold_prompts[0]
+    assert "User: u2\nAssistant: a2" in fold_prompts[0]
+    row = await _session_row(session_factory, session_id)
+    messages = await _session_messages(session_factory, session_id)
+    assert row.rolling_summary == "S1"
+    assert row.summarized_through_id == messages[3].id  # a2
+
+
+@pytest.mark.db
+async def test_empty_summary_output_is_treated_as_a_failed_fold(session_factory):
+    # A model returning nothing must not erase the memory it was meant to
+    # extend: the watermark stays, so the same turns are folded next time.
+    fold_prompts: list[str] = []
+    empty = scripted_summary_model(["   "], prompts=fold_prompts)
+    with capture_logs() as logs:
+        session_id = await _seed_folded_session(session_factory, empty)
+
+    assert len(fold_prompts) == 1
+    row = await _session_row(session_factory, session_id)
+    assert (row.rolling_summary, row.summarized_through_id) == (None, None)
+    failed = [entry for entry in logs if entry["event"] == "rolling_summary_update_failed"]
+    assert [entry["error_class"] for entry in failed] == ["EmptySummary"]
+
+
+@pytest.mark.db
+async def test_summarization_changes_only_the_session_row_never_message_rows(session_factory):
+    # AC6/R3: persisted ChatMessage rows are byte-identical before and after
+    # folding; the summary is derived state on the session row only.
+    summarizer = scripted_summary_model(["S1", "S2"])
+    session_id = await _seed_folded_session(session_factory, summarizer)
+
+    def snapshot(rows: list[ChatMessage]) -> list[tuple[object, ...]]:
+        return [(m.id, m.role, m.content, m.run_id, m.created_at) for m in rows]
+
+    before = snapshot(await _session_messages(session_factory, session_id))
+    assert len(before) == 6
+    await _collect(
+        _summarizing_service(session_factory, summarizer, answer="a4"), "u4", session_id=session_id
+    )
+
+    after_rows = await _session_messages(session_factory, session_id)
+    after = snapshot(after_rows)
+    assert after[:6] == before
+    assert [(m.role, m.content) for m in after_rows[6:]] == [
+        (MessageRole.USER, "u4"),
+        (MessageRole.ASSISTANT, "a4"),
+    ]
+    assert not any(SUMMARY_PREFIX_LABEL in m.content for m in after_rows)
+    assert not any(TRUNCATION_MARKER in m.content for m in after_rows)
+    row = await _session_row(session_factory, session_id)
+    assert row.rolling_summary == "S2"
+
+
+@pytest.mark.db
+async def test_rolling_summary_logs_carry_numbers_never_text(session_factory):
+    # AC7: fold and injection are observable through counts/lengths only —
+    # neither the summary nor any turn text reaches the logs.
+    summary_text = "FOLDED-ZORBLAT-MEMORY"
+    summarizer = scripted_summary_model([summary_text])
+
+    def service(answer: str) -> ChatService:
+        return _summarizing_service(session_factory, summarizer, answer=answer, budget=45)
+
+    # Turn costs under `len`: 19, 19, 23, 21 — budget 45 keeps two turns, so
+    # turn 3 evicts turn 1; the 21-token summary then reserves 21 of 45.
+    events = await _collect(service("quib one"), "zorblat one")
+    session_id = events[0].session_id
+    assert session_id is not None
+    await _collect(service("quib two"), "zorblat two", session_id=session_id)
+    with capture_logs() as logs:
+        await _collect(service("quib three"), "zorblat three", session_id=session_id)
+        await _collect(service("quib four"), "zorblat four", session_id=session_id)
+
+    updated = [entry for entry in logs if entry["event"] == "rolling_summary_updated"]
+    assert updated, "expected at least one fold"
+    assert updated[0]["folded_turns"] == 1
+    assert updated[0]["summary_length"] == len(summary_text)
+    assert updated[0]["summary_tokens"] == len(summary_text)
+    injected = [entry for entry in logs if entry["event"] == "rolling_summary_injected"]
+    assert len(injected) == 1
+    assert injected[0]["summary_length"] == len(summary_text)
+    assert injected[0]["reserved_tokens"] == len(summary_text)
+    rendered = str(logs)
+    for secret in ("zorblat one", "quib one", "zorblat four", "quib four", summary_text):
+        assert secret not in rendered
+
+
+def test_rolling_summary_settings_defaults_are_pinned():
+    settings = hermetic_settings()
+    assert settings.CHAT_ROLLING_SUMMARY_ENABLED is True
+    assert settings.CHAT_SUMMARY_MAX_TOKENS == 400
+
+
+async def test_stateless_service_never_folds_a_summary():
+    # Without a session factory there is no history and no session row:
+    # a wired summary model is never called (the stateless invariant).
+    fold_prompts: list[str] = []
+    service = ChatService(
+        _make_retriever(),
+        scripted_chat_model(answer_parts=["Answer."]),
+        mode="hybrid",
+        summary_model=scripted_summary_model(["S1"], prompts=fold_prompts),
+    )
+
+    events = await _collect(service, QUESTION)
+
+    assert isinstance(events[-1], DoneEvent)
+    assert fold_prompts == []

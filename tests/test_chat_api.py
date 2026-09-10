@@ -204,6 +204,21 @@ def test_build_chat_service_mode_tracks_the_embedding_wiring():
     assert hybrid._mode == "hybrid"
 
 
+def test_build_chat_service_rolling_summary_flag_gates_the_summary_agent():
+    # The Settings flag is the runtime kill switch back to cliff eviction:
+    # enabled (default) wires a summary agent on the shared chat model,
+    # disabled wires none — the service then never consults the summary
+    # column, folds, or injects. The cap flows through unchanged.
+    enabled = build_chat_service(hermetic_settings(CHAT_API_KEY=SecretStr("k")))
+    disabled = build_chat_service(
+        hermetic_settings(CHAT_API_KEY=SecretStr("k"), CHAT_ROLLING_SUMMARY_ENABLED=False)
+    )
+
+    assert enabled._summary_agent is not None
+    assert enabled._summary_max_tokens == 400
+    assert disabled._summary_agent is None
+
+
 # --- validation contract (offline) ---
 #
 # The dependency is stubbed for these: FastAPI resolves dependencies before

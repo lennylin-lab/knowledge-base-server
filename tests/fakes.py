@@ -436,6 +436,37 @@ def scripted_rewrite_model(
     return FunctionModel(function, model_name="scripted-rewrite")
 
 
+def scripted_summary_model(
+    outputs: Sequence[str],
+    *,
+    prompts: list[str] | None = None,
+    fail: Exception | None = None,
+) -> FunctionModel:
+    """FunctionModel scripting tool-free rolling-summary fold passes.
+
+    Mirrors `scripted_rewrite_model`: the i-th fold request returns
+    `outputs[i]` (the last entry repeats if more requests arrive), built on
+    `function` because the chat service folds with `Agent.run`
+    (non-streaming). `prompts`, when given, collects each request's rendered
+    fold prompt in order — the observable for what was folded (its length
+    doubles as the fold-call count, the AC3 incremental-fold assertion).
+    `fail` raises instead of answering, scripting a provider failure for
+    the service's best-effort path (AC5). The prompt recording happens
+    BEFORE the raise so a failed fold still counts as an attempt.
+    """
+    scripted = list(outputs)
+    seen = prompts if prompts is not None else []
+
+    async def function(messages: list[ModelMessage], info: object) -> ModelResponse:
+        seen.append(_first_user_prompt(messages))
+        if fail is not None:
+            raise fail
+        index = min(len(seen) - 1, len(scripted) - 1)
+        return ModelResponse(parts=[TextPart(content=scripted[index])])
+
+    return FunctionModel(function, model_name="scripted-summary")
+
+
 def scripted_association_model(
     picks: Sequence[dict[str, Any]],
     *,

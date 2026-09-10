@@ -8,8 +8,16 @@ from uuid import uuid4
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
 
 from app.models.chat import ChatMessage, MessageRole
-from app.services.chat import TRUNCATION_MARKER, select_history_window, to_message_history
+from app.services.chat import (
+    SUMMARY_PREFIX_LABEL,
+    TRUNCATION_MARKER,
+    select_history_window,
+    select_turns_to_fold,
+    summary_prefix,
+    to_message_history,
+)
 from app.services.session import derive_title
+from app.utils.ids import uuid7
 
 
 def _msg(role: MessageRole, content: str) -> ChatMessage:
@@ -249,6 +257,116 @@ def test_to_message_history_maps_roles_onto_model_messages():
 
 def test_to_message_history_empty_is_empty():
     assert to_message_history([]) == []
+
+
+# --- select_turns_to_fold (rolling summary fold boundary) ---
+
+
+def _newest_first_with_ids(*turns: tuple[str, str]) -> list[ChatMessage]:
+    """Newest-first rows from chronological (question, answer) pairs, with
+    uuid7 ids assigned in creation order — the watermark comparison is an
+    id ordering, so the fold tests need ids the way persisted rows have them."""
+    session_id = uuid4()
+    chronological: list[ChatMessage] = []
+    for question, answer in turns:
+        for role, content in ((MessageRole.USER, question), (MessageRole.ASSISTANT, answer)):
+            chronological.append(
+                ChatMessage(id=uuid7(), session_id=session_id, role=role, content=content)
+            )
+    return list(reversed(chronological))
+
+
+def _fold(messages: list[ChatMessage], *, budget: int, watermark=None) -> list[tuple[str, str]]:
+    return [
+        (user.content, assistant.content)
+        for user, assistant in select_turns_to_fold(
+            messages, watermark=watermark, budget=budget, measure=len, per_turn_cap=0
+        )
+    ]
+
+
+def _assistant_id(messages: list[ChatMessage], answer: str):
+    return next(m.id for m in messages if m.content == answer)
+
+
+def test_fold_selects_turns_outside_the_window_oldest_first():
+    # Three 4-token turns under a budget of 8: the window keeps the newest two,
+    # so exactly turn 1 is evicted — and nothing is summarized yet.
+    messages = _newest_first_with_ids(("q1", "a1"), ("q2", "a2"), ("q3", "a3"))
+
+    assert _fold(messages, budget=8) == [("q1", "a1")]
+    assert _fold(messages, budget=4) == [("q1", "a1"), ("q2", "a2")]
+
+
+def test_fold_returns_nothing_when_every_turn_fits():
+    messages = _newest_first_with_ids(("q1", "a1"), ("q2", "a2"))
+
+    assert _fold(messages, budget=1000) == []
+
+
+def test_fold_takes_everything_when_the_window_is_empty():
+    # Degenerate but correct: with no room for turns the summary IS the memory.
+    messages = _newest_first_with_ids(("q1", "a1"), ("q2", "a2"))
+
+    assert _fold(messages, budget=0) == [("q1", "a1"), ("q2", "a2")]
+
+
+def test_fold_skips_turns_at_or_before_the_watermark():
+    messages = _newest_first_with_ids(("q1", "a1"), ("q2", "a2"), ("q3", "a3"), ("q4", "a4"))
+
+    # Budget 8 evicts turns 1 and 2; with turn 1 already folded only turn 2 remains.
+    assert _fold(messages, budget=8, watermark=_assistant_id(messages, "a1")) == [("q2", "a2")]
+    # With turn 2 folded too there is nothing newer than the watermark to fold.
+    assert _fold(messages, budget=8, watermark=_assistant_id(messages, "a2")) == []
+
+
+def test_fold_never_refolds_summarized_turns_when_the_window_widens():
+    # The watermark is an ordering, not a membership test: after turns 1-2
+    # were folded, a wider budget that re-admits turn 2 (or everything) must
+    # not re-summarize the older evicted turn 1.
+    messages = _newest_first_with_ids(("q1", "a1"), ("q2", "a2"), ("q3", "a3"), ("q4", "a4"))
+    watermark = _assistant_id(messages, "a2")
+
+    assert _fold(messages, budget=12, watermark=watermark) == []  # turn 1 evicted, but folded
+    assert _fold(messages, budget=1000, watermark=watermark) == []
+
+
+def test_fold_ignores_an_orphan_trailing_user_message():
+    # A failed run's unanswered question is not a complete turn; the walk
+    # (shared with the window selection) skips it.
+    messages = _newest_first_with_ids(("q1", "a1"), ("q2", "a2"))
+    messages.insert(
+        0, ChatMessage(id=uuid7(), session_id=uuid4(), role=MessageRole.USER, content="orphan")
+    )
+
+    assert _fold(messages, budget=4) == [("q1", "a1")]
+
+
+def test_fold_returns_original_rows_not_copies():
+    # The caller advances the watermark to the folded assistant's id, so the
+    # returned rows must be the persisted ones (copies carry no id).
+    messages = _newest_first_with_ids(("q1", "a1"), ("q2", "a2"))
+
+    folds = select_turns_to_fold(messages, watermark=None, budget=4, measure=len, per_turn_cap=0)
+
+    assert len(folds) == 1
+    assert folds[0][1].id == _assistant_id(messages, "a1")
+    assert folds[0][1] is messages[-2]  # a1's row object itself
+
+
+# --- summary_prefix ---
+
+
+def test_summary_prefix_is_a_labeled_request_response_pair():
+    request, response = summary_prefix("Earlier we discussed zorblats.")
+
+    assert isinstance(request, ModelRequest)
+    assert isinstance(request.parts[0], UserPromptPart)
+    assert request.parts[0].content == f"{SUMMARY_PREFIX_LABEL}\nEarlier we discussed zorblats."
+    assert request.parts[0].content.startswith("[Summary of earlier conversation]")
+    assert isinstance(response, ModelResponse)
+    assert isinstance(response.parts[0], TextPart)
+    assert response.parts[0].content  # a non-empty acknowledgement keeps alternation clean
 
 
 # --- derive_title ---
