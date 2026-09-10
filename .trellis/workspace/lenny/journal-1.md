@@ -157,3 +157,28 @@ Archived the join-lenny onboarding task after completing Trellis orientation. No
 ### Status
 
 [OK] **Completed**
+
+
+## Session 8: Close irrelevant-query noise gates: BM25 identity coverage + vector rescue on-domain trigger (0.62)
+
+**Date**: 2026-09-10
+**Task**: Close irrelevant-query noise gates: BM25 identity coverage + vector rescue on-domain trigger (0.62)
+**Branch**: `main`
+
+### Summary
+
+Fixed both irrelevant-query noise holes. Hole 2: bm25_chunk_query identity group (title/heading_path) now inherits minimum_should_match 70% from SEARCH_BM25_MIN_COVERAGE, so a lone stopword title hit no longer activates the BM25 leg; single-term queries unaffected. Hole 1: new SEARCH_VECTOR_RESCUE_TRIGGER_MAX_DISTANCE=0.62 — when the primary vector tier empties, rescue fires only if leg_min <= 0.62, else the leg stays empty. Live calibration on the real 15-doc corpus (new es+live_llm probe test) showed the in-domain (0.473-0.652) and off-domain (0.656-0.774) leg_min bands touch 0.004 apart — no clean threshold; user approved precision-first 0.62 (only bare 事务 at 0.652 loses vector rescue; its BM25 leg still returns results). Verified live: all five noise queries return 0 items (was 14-32); Redis 分布式锁/MySQL 事务隔离 recall unchanged. Also re-anchored the 09-08 D1/D2 live-ES regressions to the current corpus (useState/lru_cache/React 渲染与并发) after the corpus swap stranded the old anchors; full suite 423 passed / 0 failed. Rollback switches: trigger >= 2.0 or empty min_coverage.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `aef7bea` | (see git log) |
+| `9db9635` | (see git log) |
+| `964dcd0` | (see git log) |
+| `8d84e1b` | (see git log) |
+| `60bc581` | (see git log) |
+
+### Status
+
+[OK] **Completed**
