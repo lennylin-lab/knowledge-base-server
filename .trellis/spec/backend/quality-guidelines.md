@@ -114,6 +114,20 @@ that reproduces the bug first.
 - **RRF fusion and chunking** are pure logic — exhaustive unit tests, no
   infrastructure.
 
+> **Warning (learned 2026-09-10, query-rewrite task): FunctionModel fakes
+> that run with `message_history` must record the LAST user message as the
+> run's own prompt, and prompt-wiring needs its own assertion.** Two related
+> traps: (1) with history present, the run's own prompt is the last user
+> entry — a first-user-message recorder captures the oldest prior turn and
+> makes every history-bearing assertion wrong
+> (`tests/fakes.py::_last_user_prompt` is the pattern). (2) A tool-scripted
+> QA fake emits its tool calls unconditionally, so downstream assertions
+> (`StubRetriever.calls`) stay green even if the service passes the RAW
+> question to `run_stream` instead of the transformed one — the central
+> wiring is vacuously passing. Pin the wiring by asserting the recorded run
+> prompt itself (e.g. `_user_prompts(histories[0]) == [original,
+> transformed]`), which simultaneously re-pins what the history carried.
+
 > **Warning (learned 2026-09-05, content-hash task): the default suite can
 > silently require Redis via the dev `.env`.** The "zero live connections"
 > rule above has one hole: when `.env` sets `KB_REDIS_URL`,
