@@ -25,6 +25,7 @@ dependencies = [
     "sqlalchemy[asyncio]>=2.0.30",
     "sse-starlette>=2.1",
     "structlog>=24.4",
+    "tiktoken>=0.7",
     "uvicorn[standard]>=0.30",
 ]
 

@@ -42,10 +42,21 @@ class Settings(BaseSettings):
     CHAT_BASE_URL: str = "https://api.openai.com/v1"
     CHAT_API_KEY: SecretStr = SecretStr("")
     CHAT_MODEL: str = "gpt-4o-mini"
-    # Multi-turn history window: total characters of complete turns (newest
-    # first) sent to the agent as `message_history` — chars, not tokens, are
-    # the MVP proxy (PRD out-of-scope: token-accurate budgeting).
-    CHAT_HISTORY_CHAR_BUDGET: int = 8000
+    # Multi-turn history window: total TOKENS of complete turns (newest
+    # first) sent to the agent as `message_history`, counted with the chat
+    # model's tokenizer (tiktoken; deterministic char/CJK heuristic fallback
+    # when no encoding can be loaded). Breaking rename: replaces the retired
+    # CHAT_HISTORY_CHAR_BUDGET (chars mis-measured mixed CJK/English; a
+    # leftover KB_CHAT_HISTORY_CHAR_BUDGET env var is silently ignored —
+    # Settings ignores unknown keys). 2000 tokens ≈ the old 8000 chars of
+    # mixed CJK/English content.
+    CHAT_HISTORY_TOKEN_BUDGET: int = 2000
+    # Long-document guardrail: one turn may contribute at most this fraction
+    # of the history token budget; an oversized turn (e.g. a long pasted
+    # document) is admitted truncated-with-marker instead of silently
+    # evicting all other history. >= 1.0 disables the guardrail (turns stand
+    # whole; the all-or-nothing walk of the char-budget era).
+    CHAT_HISTORY_MAX_TURN_FRACTION: float = 0.5
     # History-aware query rewriting for follow-ups: before each non-first
     # turn, a rewrite call turns anaphoric questions ("那它的缺点呢?") into a
     # self-contained retrieval query using recent history. false disables the

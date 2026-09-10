@@ -5,7 +5,10 @@ Multi-turn with session persistence when a `session_factory` is wired: the
 user message is persisted before the run (durable even if the run fails),
 the assistant message on success (full streamed text + run_id), and the
 recent conversation returns to the agent as `message_history` within a
-character budget. Without a factory the service is exactly the original
+token budget. A single oversized turn (e.g. a long pasted document) is
+admitted truncated-with-marker instead of silently evicting all other
+history; only the assembled history copy is bounded — persisted rows always
+keep full content. Without a factory the service is exactly the original
 stateless single-turn chat — no database access at all.
 
 When a rewrite model is wired and history exists, a best-effort rewrite
@@ -23,7 +26,7 @@ answers with a clean 404 envelope instead of a broken stream.
 from __future__ import annotations
 
 import time
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass
 from uuid import UUID, uuid4
 
@@ -49,6 +52,7 @@ from app.core.exceptions import (
     LLMRateLimitedError,
     NotFoundError,
 )
+from app.llm.tokens import build_token_counter
 from app.models.chat import ChatMessage, ChatSession, MessageRole
 from app.rag.retriever import Retriever
 from app.repositories.chat import ChatMessageRepository, ChatSessionRepository
@@ -66,9 +70,15 @@ from app.services.session import derive_title
 
 logger = structlog.get_logger(__name__)
 
-# DB-read bound for the history window: enough newest messages that the char
+# DB-read bound for the history window: enough newest messages that the token
 # budget — not the read — is what limits what reaches the model.
 HISTORY_READ_LIMIT = 200
+
+# Visible elision marker appended to a bounded turn's history copy: the model
+# sees that content was elided instead of silently losing the middle of a
+# long pasted document. Part of the assembled-history contract (numbers-only
+# observability counts occurrences of it); never persisted.
+TRUNCATION_MARKER = "\n\n…[truncated: long message elided]"
 
 
 def _complete_turns_newest_first(
@@ -92,25 +102,108 @@ def _complete_turns_newest_first(
     return turns
 
 
-def select_history_window(messages: Sequence[ChatMessage], *, budget: int) -> list[ChatMessage]:
-    """Pick the newest complete turns whose combined content fits `budget`.
+def _trim_to_tokens(content: str, token_cap: int, measure: Callable[[str], int]) -> str:
+    """Longest prefix of `content` measuring at most `token_cap` tokens.
+
+    Binary search on the prefix length (the measure is monotone across
+    prefixes); character-boundary exactness is not required — the truncation
+    marker tells the model content was elided, and being at or under the cap
+    is what matters.
+    """
+    if token_cap <= 0:
+        return ""
+    if measure(content) <= token_cap:
+        return content
+    low, high = 0, len(content)
+    # Invariant: content[:low] fits, content[:high] does not.
+    while high - low > 1:
+        mid = (low + high) // 2
+        if measure(content[:mid]) <= token_cap:
+            low = mid
+        else:
+            high = mid
+    return content[:low]
+
+
+def _detached_copy(message: ChatMessage, content: str) -> ChatMessage:
+    """A fresh unsaved carrier with the bounded content.
+
+    Persistence keeps full content: bounded copies are only assembled into
+    `message_history` and are never added to a session — mutating the ORM
+    rows themselves would flush back with the session's next commit."""
+    return ChatMessage(session_id=message.session_id, role=message.role, content=content)
+
+
+def _bound_turn(
+    user: ChatMessage,
+    assistant: ChatMessage,
+    cap: int,
+    measure: Callable[[str], int],
+) -> tuple[ChatMessage, ChatMessage, int]:
+    """Bound one oversized turn to at most `cap` tokens, returning copies.
+
+    The costlier side is truncated first (longest prefix fitting the room the
+    other side leaves), then the other side only if it alone still overflows;
+    every truncated copy carries `TRUNCATION_MARKER` so the model sees that
+    content was elided. The returned cost measures the bounded copies — at or
+    under `cap` whenever feasible. The ORM rows are never mutated (they ARE
+    the persisted record); with an extremely small cap (below two markers)
+    the bounded turn may still exceed `cap` and is then simply not admitted
+    by the caller's fit check.
+    """
+    marker_cost = measure(TRUNCATION_MARKER)
+    allowance = max(cap - 2 * marker_cost, 0)  # content tokens for both sides
+
+    def bound(message: ChatMessage, room: int) -> tuple[ChatMessage, int]:
+        trimmed = _trim_to_tokens(message.content, room, measure)
+        if trimmed == message.content:
+            return message, measure(message.content)
+        content = trimmed + TRUNCATION_MARKER
+        return _detached_copy(message, content), measure(content)
+
+    user_cost, assistant_cost = measure(user.content), measure(assistant.content)
+    if user_cost >= assistant_cost:
+        bounded_user, user_cost = bound(user, max(allowance - assistant_cost, 0))
+        bounded_assistant, assistant_cost = bound(assistant, max(cap - marker_cost - user_cost, 0))
+    else:
+        bounded_assistant, assistant_cost = bound(assistant, max(allowance - user_cost, 0))
+        bounded_user, user_cost = bound(user, max(cap - marker_cost - assistant_cost, 0))
+    return bounded_user, bounded_assistant, user_cost + assistant_cost
+
+
+def select_history_window(
+    messages: Sequence[ChatMessage],
+    *,
+    budget: int,
+    measure: Callable[[str], int],
+    per_turn_cap: int,
+) -> list[ChatMessage]:
+    """Pick the newest complete turns whose combined token cost fits `budget`.
 
     Input is newest-first (the repository's bounded read); the walk takes
     whole turns while they fit and stops at the first one that does not —
-    no orphan half-turns. If even the newest turn exceeds the budget the
-    result is empty: the question stands alone. Output is oldest-first,
-    ready to become `message_history`.
+    no orphan half-turns. `measure` (text -> tokens) is injected so the
+    selection stays a pure, offline-testable function. A turn costing more
+    than `per_turn_cap` is bounded first (truncated copies with a visible
+    marker, see `_bound_turn`), so one oversized turn cannot evict the whole
+    window — older turns still share the remaining budget. `per_turn_cap
+    <= 0` disables that guardrail (every turn stands whole). If even the
+    bounded newest turn exceeds `remaining`, the result is empty: the
+    question stands alone. Output is oldest-first, ready to become
+    `message_history`.
     """
     window: list[ChatMessage] = []
     remaining = budget
     for user, assistant in _complete_turns_newest_first(messages):
-        cost = len(user.content) + len(assistant.content)
-        if cost > remaining:
+        turn_cost = measure(user.content) + measure(assistant.content)
+        if 0 < per_turn_cap < turn_cost:
+            user, assistant, turn_cost = _bound_turn(user, assistant, per_turn_cap, measure)
+        if turn_cost > remaining:
             break
         # Newest-first append (assistant, then its user); reversed at the end.
         window.append(assistant)
         window.append(user)
-        remaining -= cost
+        remaining -= turn_cost
     window.reverse()
     return window
 
@@ -150,7 +243,9 @@ class ChatService:
         mode: SearchMode,
         extra_tools: Sequence[Tool[ChatDeps]] = (),
         session_factory: async_sessionmaker[AsyncSession] | None = None,
-        history_char_budget: int = 8000,
+        history_token_budget: int = 2000,
+        history_max_turn_fraction: float = 0.5,
+        token_counter: Callable[[str], int] | None = None,
         rewrite_model: Model | None = None,
         rewrite_history_turns: int = 3,
     ) -> None:
@@ -159,7 +254,17 @@ class ChatService:
         self._model = model
         # None = stateless mode: exactly the pre-session service, no DB writes.
         self._session_factory = session_factory
-        self._history_char_budget = history_char_budget
+        # History budget in TOKENS (the retired char budget mis-measured
+        # mixed CJK/English); the fraction caps one turn's share so a long
+        # pasted document cannot evict the rest of history (see
+        # `_per_turn_cap`).
+        self._history_token_budget = history_token_budget
+        self._history_max_turn_fraction = history_max_turn_fraction
+        # Token counter: injected (deterministic in tests) or built once on
+        # first history assembly from the chat model's name — lazy so
+        # stateless services never construct a tokenizer (tiktoken's first
+        # use may need its BPE data; `_token_measure` never raises).
+        self._token_counter = token_counter
         # History-aware query rewriting (multi-turn follow-ups): a separate
         # injected model lets tests script the rewrite call independently of
         # the stream-only QA fake; None disables the step entirely (first
@@ -169,6 +274,25 @@ class ChatService:
         # Wrapped MCP tools arrive here (wired once per process in deps.py);
         # the default empty sequence keeps the agent identical to pre-MCP.
         self._agent = build_qa_agent(model, extra_tools=extra_tools)
+
+    def _token_measure(self) -> Callable[[str], int]:
+        """The injected counter, or the tiktoken-backed one built once from
+        the chat model's name (never raises; offline-safe heuristic fallback
+        in `app.llm.tokens`)."""
+        if self._token_counter is None:
+            self._token_counter = build_token_counter(self._model.model_name)
+        return self._token_counter
+
+    def _per_turn_cap(self) -> int:
+        """Max tokens one history turn may contribute before bounding.
+
+        A fraction of the budget so the two knobs scale together; a fraction
+        `>= 1.0` returns 0, the sentinel that disables the guardrail in
+        `select_history_window` (turns stand whole — the old all-or-nothing
+        walk)."""
+        if self._history_max_turn_fraction >= 1.0:
+            return 0
+        return round(self._history_token_budget * self._history_max_turn_fraction)
 
     async def ask(
         self, question: str, *, limit: int = 8, session_id: UUID | None = None
@@ -327,7 +451,9 @@ class ChatService:
         `NotFoundError` (missing/soft-deleted). The user message is durable
         before the run starts — a failed run leaves it as the honest record.
         History is read BEFORE the user message is added: the current
-        question reaches the model as the run prompt, not as history.
+        question reaches the model as the run prompt, not as history. The
+        window is bounded in tokens; an oversized turn is admitted
+        truncated-with-marker (copies only — rows keep full content).
         """
         if self._session_factory is None:
             return None
@@ -347,8 +473,24 @@ class ChatService:
                 chat_session = existing
                 history_rows = select_history_window(
                     await messages.list_recent_for_session(session_id, limit=HISTORY_READ_LIMIT),
-                    budget=self._history_char_budget,
+                    budget=self._history_token_budget,
+                    measure=self._token_measure(),
+                    per_turn_cap=self._per_turn_cap(),
                 )
+                if history_rows:
+                    # Numbers only — history contents are user data. The
+                    # truncated count is what makes an oversized-turn
+                    # bounding observable in ops, not silent.
+                    measure = self._token_measure()
+                    logger.info(
+                        "history_selected",
+                        session_id=str(session_id),
+                        history_turns=len(history_rows) // 2,
+                        history_tokens=sum(measure(message.content) for message in history_rows),
+                        truncated_messages=sum(
+                            1 for message in history_rows if TRUNCATION_MARKER in message.content
+                        ),
+                    )
             await messages.add(
                 ChatMessage(session_id=chat_session.id, role=MessageRole.USER, content=question)
             )

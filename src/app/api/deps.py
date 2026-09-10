@@ -226,7 +226,11 @@ def build_chat_service(settings: Settings) -> ChatService:
         # Session persistence: the process-lifetime service opens one session
         # per ask() via the factory (the SummarizeService lifetime pattern).
         session_factory=SessionFactory,
-        history_char_budget=settings.CHAT_HISTORY_CHAR_BUDGET,
+        # Token-based history budget + per-turn guardrail fraction; the
+        # token counter is built (once, lazily) from CHAT_MODEL inside the
+        # service — production never injects one.
+        history_token_budget=settings.CHAT_HISTORY_TOKEN_BUDGET,
+        history_max_turn_fraction=settings.CHAT_HISTORY_MAX_TURN_FRACTION,
         # Follow-up rewrite shares the single chat model/SDK client; the
         # Settings flag is the runtime kill switch (false = no rewrite at all).
         rewrite_model=model if settings.CHAT_QUERY_REWRITE_ENABLED else None,
