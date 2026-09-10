@@ -1,0 +1,7 @@
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Verify offline determinism (no network for tiktoken in tests), toolchain gates green, and the review checklist for the selection/guardrail change"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "Verify the tokenizer stays in llm/ (convention #7) and select_history_window stays a pure function with the measure injected"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Verify only counts/numbers are logged for history/token stats; no user content leaks"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Config rename spans config->deps->service->tests; verify every consumer is updated, the breaking-change is documented, and defaults keep old call sites valid"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "Verify no dangling old-setting references remain and no duplicate token-counting helper was introduced"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "Verify `_bound_turn`'s detached copies never attach to a session (no flush path) and no schema/query change slipped in"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Verify the never-raises token-counter contract and that no new exception surfaces bypass the AppError taxonomy"}

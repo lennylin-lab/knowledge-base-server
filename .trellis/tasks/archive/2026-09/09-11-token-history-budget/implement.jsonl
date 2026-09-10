@@ -1,0 +1,5 @@
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "Convention #7 (llm/ is the only layer touching provider SDKs/tokenizers): build_token_counter belongs in llm/, services/ receives a plain Callable; layering matrix"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Offline test strategy — tests must not hit the network; tiktoken first-use download risk drives the injectable-counter + heuristic-fallback design; toolchain gates"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "History/token counts may be logged as numbers only; question/answer text must never be logged"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "Pre-modification rule: grep every CHAT_HISTORY_CHAR_BUDGET / history_char_budget reference before renaming the setting; reuse the injectable-collaborator pattern already used for rewrite_model"}
+{"file": ".trellis/tasks/archive/2026-09/09-02-chat-sessions/design.md", "reason": "Origin of select_history_window, HISTORY_READ_LIMIT, the whole-turn/no-orphan rule, and persist-full-content contract this task must preserve"}
