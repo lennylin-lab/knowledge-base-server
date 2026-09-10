@@ -1,0 +1,5 @@
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "SQLAlchemy 2.0 async model column + Alembic migration 0007 (add/drop nullable columns) patterns for chat_sessions.rolling_summary/summarized_through_id"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "Convention #6 (agents never import services) for the new conversation-summary agent; layering matrix for where summary maintenance/repo/agent code lives"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Streaming rule: _maybe_update_rolling_summary runs after a successful turn and must never raise into ask or emit a terminal error; no LLM call inside an open transaction"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Summary and question text are user-derived; log only lengths/counts/error_class, never content"}
+{"file": ".trellis/tasks/archive/2026-09/09-02-chat-sessions/design.md", "reason": "Origin of chat_sessions/messages, _prepare_turn transaction boundaries, select_history_window, and HISTORY_READ_LIMIT this task extends"}

@@ -1,0 +1,5 @@
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Offline AI test strategy (FunctionModel + disposable DB), toolchain gates, migration up/down verification, review checklist"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Verify best-effort summary maintenance never raises into the stream / never becomes a terminal error; turn still reaches DoneEvent on maintenance failure (AC5)"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "Verify migration 0007 correctness (nullable, up/down), no ORM-row rewrites (AC6), and transaction boundaries (no LLM call in an open txn)"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Verify no summary/question text reaches logs; counts/lengths/error_class only (AC7)"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Feature spans model->migration->repo->agent->service->config->deps; verify every layer/consumer updated and the disabled path stays byte-identical to today"}
