@@ -285,6 +285,9 @@ async def db_chat_client(app: FastAPI, db_engine: AsyncEngine) -> AsyncIterator[
         scripted_chat_model(answer_parts=["Grounded answer."]),
         mode="hybrid",
         session_factory=factory,
+        # Continuation turns assemble history; the injected counter keeps
+        # that offline (a real tokenizer is never built in the suite).
+        token_counter=len,
     )
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as ac:

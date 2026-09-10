@@ -10,6 +10,7 @@ production lifetime pattern.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from uuid import UUID, uuid4
 
 import httpx
@@ -42,11 +43,12 @@ from app.schemas.chat import (
     RunStartedEvent,
     SourcesEvent,
 )
-from app.services.chat import ChatService
+from app.services.chat import TRUNCATION_MARKER, ChatService
 from app.services.session import derive_title
 from fakes import (
     FakeMcpManager,
     StubRetriever,
+    hermetic_settings,
     retrieved_chunk,
     scripted_chat_model,
     scripted_rewrite_model,
@@ -499,16 +501,23 @@ def _persisted_service(
     factory: async_sessionmaker[AsyncSession],
     model=None,
     *,
-    budget: int = 8000,
+    budget: int = 2000,
+    fraction: float = 0.5,
+    token_counter: Callable[[str], int] = len,
 ) -> ChatService:
     """ChatService wired exactly like production: stub retriever, scripted
-    model, one DB session per ask() via the injected factory."""
+    model, one DB session per ask() via the injected factory. The counter is
+    injected (default `len`) so budget behavior is deterministic and the
+    suite never constructs a real tokenizer; `fraction >= 1.0` disables the
+    per-turn guardrail for all-or-nothing budget tests."""
     return ChatService(
         StubRetriever(),
         model if model is not None else scripted_chat_model(answer_parts=list(ANSWER_PARTS)),
         mode="hybrid",
         session_factory=factory,
-        history_char_budget=budget,
+        history_token_budget=budget,
+        history_max_turn_fraction=fraction,
+        token_counter=token_counter,
     )
 
 
@@ -633,7 +642,9 @@ async def test_failed_run_persists_user_message_only_and_session_continues(sessi
 
 @pytest.mark.db
 async def test_history_budget_drops_oldest_complete_turns(session_factory):
-    # Each scripted turn costs exactly 4 chars ("u1"+"a1", "u2"+"a2").
+    # Each scripted turn costs exactly 4 tokens under the `len` counter
+    # ("u1"+"a1", "u2"+"a2"); fraction=1.0 disables the guardrail so the
+    # all-or-nothing budget walk is what is under test.
     service1 = _persisted_service(session_factory, scripted_chat_model(answer_parts=["a1"]))
     events = await _collect(service1, "u1")
     session_id = events[0].session_id
@@ -647,6 +658,7 @@ async def test_history_budget_drops_oldest_complete_turns(session_factory):
         session_factory,
         scripted_chat_model(answer_parts=["a3"], histories=histories),
         budget=4,
+        fraction=1.0,
     )
     await _collect(service3, "u3", session_id=session_id)
 
@@ -682,6 +694,151 @@ async def test_history_read_limit_drops_older_turns_even_under_budget(session_fa
     for messages in histories:
         assert _user_prompts(messages) == ["u2", "u3"]
         assert _assistant_texts(messages) == ["a2"]
+
+
+@pytest.mark.db
+async def test_token_measure_drops_oldest_turn_that_char_budget_would_keep(session_factory):
+    # AC1: under the injected word-counting counter the older turn no longer
+    # fits the token budget, although its characters would — the injected
+    # measure, not len(), decides what reaches the model.
+    async def seed_session() -> UUID:
+        service1 = _persisted_service(
+            session_factory,
+            scripted_chat_model(answer_parts=["seven eight nine ten"]),
+        )
+        events = await _collect(service1, "one two three four five six")
+        session_id = events[0].session_id
+        assert session_id is not None
+        service2 = _persisted_service(session_factory, scripted_chat_model(answer_parts=["no"]))
+        await _collect(service2, "yes", session_id=session_id)
+        return session_id
+
+    def _word_count(text: str) -> int:
+        return len(text.split())
+
+    # Session A, word counter (budget 10): the newest turn costs 2 tokens
+    # ("yes"+"no") and the older one 10 ("one two... six" + "seven...ten") —
+    # only the newest turn fits beside it.
+    session_a = await seed_session()
+    histories_a: list[list[ModelMessage]] = []
+    word_counter = _persisted_service(
+        session_factory,
+        scripted_chat_model(answer_parts=["a3"], histories=histories_a),
+        budget=10,
+        fraction=1.0,
+        token_counter=_word_count,
+    )
+    await _collect(word_counter, "u3", session_id=session_a)
+    assert histories_a
+    for messages in histories_a:
+        assert _user_prompts(messages) == ["yes", "u3"]
+        assert _assistant_texts(messages) == ["no"]
+
+    # Session B, same turns under the `len` counter (budget 60 — the char
+    # proxy at a comparable operator scale): both turns fit, proving the
+    # budget followed the injected measure, not chars.
+    session_b = await seed_session()
+    histories_b: list[list[ModelMessage]] = []
+    len_counter = _persisted_service(
+        session_factory,
+        scripted_chat_model(answer_parts=["a3"], histories=histories_b),
+        budget=60,
+        fraction=1.0,
+    )
+    await _collect(len_counter, "u3", session_id=session_b)
+    assert histories_b
+    for messages in histories_b:
+        assert _user_prompts(messages) == ["one two three four five six", "yes", "u3"]
+        assert _assistant_texts(messages) == ["seven eight nine ten", "no"]
+
+
+@pytest.mark.db
+async def test_oversized_turn_truncated_in_history_and_persisted_full(session_factory):
+    # AC2/AC3: a long pasted-document turn is admitted truncated-with-marker
+    # and an older turn survives beside it (no silent single-turn collapse),
+    # while the stored rows keep FULL content — bounding only shapes the
+    # assembled history copy, never the persistence record.
+    service1 = _persisted_service(session_factory, scripted_chat_model(answer_parts=["a1"]))
+    events = await _collect(service1, "u1")
+    session_id = events[0].session_id
+    assert session_id is not None
+
+    long_document = "word " * 200  # 1000 chars, far over the per-turn cap below
+    async with session_factory() as session:
+        repo = ChatMessageRepository(session)
+        await repo.add(
+            ChatMessage(session_id=session_id, role=MessageRole.USER, content=long_document)
+        )
+        await repo.add(ChatMessage(session_id=session_id, role=MessageRole.ASSISTANT, content="a2"))
+        await session.commit()
+
+    # Budget 200, default fraction 0.5 -> per-turn cap 100 under `len`.
+    histories: list[list[ModelMessage]] = []
+    bounded_service = _persisted_service(
+        session_factory,
+        scripted_chat_model(answer_parts=["a3"], histories=histories),
+        budget=200,
+    )
+    await _collect(bounded_service, "u3", session_id=session_id)
+
+    assert histories
+    for messages in histories:
+        prompts = _user_prompts(messages)
+        assert prompts[0] == "u1"  # the older turn survived the oversized one
+        bounded = prompts[1]
+        assert bounded.endswith(TRUNCATION_MARKER)
+        assert bounded.startswith("word word ")  # a prefix of the document
+        assert len(bounded) < len(long_document)
+        assert _assistant_texts(messages) == ["a1", "a2"]
+        assert prompts[-1] == "u3"
+
+    rows = await _session_messages(session_factory, session_id)
+    assert long_document in [message.content for message in rows]
+    assert not any(TRUNCATION_MARKER in message.content for message in rows)
+
+
+@pytest.mark.db
+async def test_guardrail_disabled_drops_oversized_turn_whole(session_factory):
+    # fraction >= 1.0 disables the guardrail: the oversized newest turn stops
+    # the walk whole (the char-budget-era all-or-nothing behavior) — no
+    # marker, no truncation, and no older turn beyond it either.
+    service1 = _persisted_service(session_factory, scripted_chat_model(answer_parts=["a1"]))
+    events = await _collect(service1, "u1")
+    session_id = events[0].session_id
+    assert session_id is not None
+
+    long_document = "word " * 200
+    async with session_factory() as session:
+        repo = ChatMessageRepository(session)
+        await repo.add(
+            ChatMessage(session_id=session_id, role=MessageRole.USER, content=long_document)
+        )
+        await repo.add(ChatMessage(session_id=session_id, role=MessageRole.ASSISTANT, content="a2"))
+        await session.commit()
+
+    histories: list[list[ModelMessage]] = []
+    disabled = _persisted_service(
+        session_factory,
+        scripted_chat_model(answer_parts=["a3"], histories=histories),
+        budget=200,
+        fraction=1.0,
+    )
+    await _collect(disabled, "u3", session_id=session_id)
+
+    assert histories
+    for messages in histories:
+        # The oversized turn + everything older were dropped whole.
+        assert _user_prompts(messages) == ["u3"]
+        assert _assistant_texts(messages) == []
+
+
+def test_history_budget_settings_defaults_are_pinned():
+    # The token-budget migration (breaking rename of CHAT_HISTORY_CHAR_BUDGET):
+    # defaults stay pinned so a silent change of the effective window is a
+    # reviewed event, not a surprise.
+    settings = hermetic_settings()
+    assert settings.CHAT_HISTORY_TOKEN_BUDGET == 2000
+    assert settings.CHAT_HISTORY_MAX_TURN_FRACTION == 0.5
 
 
 @pytest.mark.db
@@ -770,12 +927,14 @@ def _rewriting_service(
     qa_model=None,
 ) -> ChatService:
     """ChatService wired with a rewrite model: scripted QA model, recording
-    stub retriever, one DB session per ask() via the injected factory."""
+    stub retriever, one DB session per ask() via the injected factory. The
+    `len` counter keeps history assembly offline (no tokenizer built)."""
     return ChatService(
         retriever,
         qa_model if qa_model is not None else scripted_chat_model(answer_parts=["Turn answer."]),
         mode="hybrid",
         session_factory=factory,
+        token_counter=len,
         rewrite_model=rewrite_model,
     )
 
@@ -906,6 +1065,7 @@ async def test_rewrite_keeps_original_question_persisted_and_in_history(session_
         scripted_chat_model(answer_parts=["Third."], histories=histories),
         mode="hybrid",
         session_factory=session_factory,
+        token_counter=len,
     )
     await _collect(plain, "third question", session_id=session_id)
 
@@ -931,6 +1091,7 @@ async def test_rewrite_disabled_construction_passes_raw_questions(session_factor
         ),
         mode="hybrid",
         session_factory=session_factory,
+        token_counter=len,
     )
     events1 = await _collect(turn1, TOPIC_QUESTION)
     session_id = events1[0].session_id
@@ -945,6 +1106,7 @@ async def test_rewrite_disabled_construction_passes_raw_questions(session_factor
         ),
         mode="hybrid",
         session_factory=session_factory,
+        token_counter=len,
     )
     events2 = await _collect(turn2, ANAPHORIC_FOLLOWUP, session_id=session_id)
 

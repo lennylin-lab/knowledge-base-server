@@ -8,7 +8,7 @@ from uuid import uuid4
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
 
 from app.models.chat import ChatMessage, MessageRole
-from app.services.chat import select_history_window, to_message_history
+from app.services.chat import TRUNCATION_MARKER, select_history_window, to_message_history
 from app.services.session import derive_title
 
 
@@ -33,13 +33,30 @@ def _contents(messages: list[ChatMessage]) -> list[str]:
     return [message.content for message in messages]
 
 
+def _select(
+    messages: list[ChatMessage], *, budget: int, per_turn_cap: int = 0
+) -> list[ChatMessage]:
+    """select_history_window with the offline `len` measure; the default
+    `per_turn_cap <= 0` disables the guardrail — the all-or-nothing walk the
+    original selection tests pin."""
+    return select_history_window(messages, budget=budget, measure=len, per_turn_cap=per_turn_cap)
+
+
+def _cjk_aware_measure(text: str) -> int:
+    """Deterministic fake token measure with real mixed-script shape: CJK
+    characters cost one token each, other text one per four characters."""
+    cjk = sum(1 for char in text if ord(char) >= 0x2E80)
+    other = len(text) - cjk
+    return cjk + (other + 3) // 4
+
+
 # --- select_history_window ---
 
 
 def test_all_turns_within_budget_returned_oldest_first():
     messages = _newest_first(("q1", "a1"), ("q2", "a2"))
 
-    window = select_history_window(messages, budget=1000)
+    window = _select(messages, budget=1000)
 
     assert _contents(window) == ["q1", "a1", "q2", "a2"]
     assert [message.role for message in window] == [
@@ -54,7 +71,7 @@ def test_budget_exhaustion_drops_oldest_turns_whole():
     # Each turn costs 4 chars (2 + 2).
     messages = _newest_first(("q1", "a1"), ("q2", "a2"))
 
-    window = select_history_window(messages, budget=4)
+    window = _select(messages, budget=4)
 
     assert _contents(window) == ["q2", "a2"]
 
@@ -64,7 +81,7 @@ def test_no_orphan_half_turn_is_ever_included():
     # walk stops at the turn boundary instead of including its user half.
     messages = _newest_first(("q1", "a1"), ("q2", "a2"))
 
-    window = select_history_window(messages, budget=7)
+    window = _select(messages, budget=7)
 
     assert _contents(window) == ["q2", "a2"]
 
@@ -72,7 +89,7 @@ def test_no_orphan_half_turn_is_ever_included():
 def test_newest_turn_over_budget_means_no_history():
     messages = _newest_first(("q1", "a1"), ("q2", "a2"))
 
-    window = select_history_window(messages, budget=3)
+    window = _select(messages, budget=3)
 
     assert window == []
 
@@ -80,19 +97,19 @@ def test_newest_turn_over_budget_means_no_history():
 def test_turn_cost_exactly_equal_to_budget_is_included():
     messages = _newest_first(("q1", "a1"))
 
-    window = select_history_window(messages, budget=4)
+    window = _select(messages, budget=4)
 
     assert _contents(window) == ["q1", "a1"]
 
 
 def test_zero_budget_returns_no_history():
-    window = select_history_window(_newest_first(("q1", "a1")), budget=0)
+    window = _select(_newest_first(("q1", "a1")), budget=0)
 
     assert window == []
 
 
 def test_empty_input_returns_empty_window():
-    assert select_history_window([], budget=1000) == []
+    assert _select([], budget=1000) == []
 
 
 def test_trailing_unpaired_user_message_is_not_a_turn():
@@ -100,13 +117,13 @@ def test_trailing_unpaired_user_message_is_not_a_turn():
     # window alone nor consume budget.
     messages = _newest_first(("q1", "a1"), trailing_user="unanswered")
 
-    window = select_history_window(messages, budget=4)
+    window = _select(messages, budget=4)
 
     assert _contents(window) == ["q1", "a1"]
 
 
 def test_only_an_unpaired_user_message_returns_no_history():
-    window = select_history_window([_msg(MessageRole.USER, "q1")], budget=1000)
+    window = _select([_msg(MessageRole.USER, "q1")], budget=1000)
 
     assert window == []
 
@@ -120,9 +137,97 @@ def test_malformed_sequence_stops_the_walk():
         _msg(MessageRole.ASSISTANT, "a0"),
     ]
 
-    window = select_history_window(messages, budget=1000)
+    window = _select(messages, budget=1000)
 
     assert window == []
+
+
+# --- token measure + long-document guardrail ---
+
+
+def test_char_fitting_session_drops_oldest_turn_under_token_measure():
+    # AC1: both turns fit a 50-char budget, but under the token measure the
+    # CJK-heavy newest turn costs 13 tokens and the older English turn 10 —
+    # a 20-token budget keeps only the newest turn, where the char budget
+    # kept both. The injected measure, not len(), decides.
+    messages = _newest_first(
+        ("what are the pros", "several pros here"),
+        ("那它的缺点呢", "主要缺点有三点"),
+    )
+
+    char_window = _select(messages, budget=50)
+    token_window = select_history_window(
+        messages, budget=20, measure=_cjk_aware_measure, per_turn_cap=0
+    )
+
+    assert len("".join(_contents(char_window))) <= 50
+    assert len(char_window) == 4
+    assert _contents(token_window) == ["那它的缺点呢", "主要缺点有三点"]
+
+
+def test_oversized_turn_is_bounded_so_an_older_turn_survives():
+    # AC2: the newest turn alone exceeds the per-turn cap; it is admitted
+    # truncated-with-marker so an older fitting turn keeps its budget share —
+    # no silent single-turn collapse.
+    messages = _newest_first(("old question", "old answer"), ("q", "x" * 500))
+
+    window = select_history_window(messages, budget=400, measure=len, per_turn_cap=200)
+
+    contents = _contents(window)
+    assert contents[:2] == ["old question", "old answer"]  # older turn survives
+    assert contents[2] == "q"  # the short side of the oversized turn stands whole
+    bounded = contents[3]
+    assert bounded.endswith(TRUNCATION_MARKER)
+    assert bounded.startswith("x")  # a prefix, not the whole document
+    assert len(bounded) < 500
+
+
+def test_bounding_never_mutates_the_input_rows():
+    # The bounded carriers are detached copies; the rows read from the DB
+    # (the persisted record) keep their full content after selection.
+    messages = _newest_first(("q", "x" * 500))
+
+    window = select_history_window(messages, budget=400, measure=len, per_turn_cap=200)
+
+    assert messages[0].content == "x" * 500  # untouched ORM row
+    assert messages[1].content == "q"
+    assert window[-1] is not messages[0]
+    assert window[-1].content.endswith(TRUNCATION_MARKER)
+
+
+def test_bounded_turn_still_over_budget_means_no_history():
+    # Even bounded, a turn that does not fit the remaining budget stops the
+    # walk: the question stands alone (never a silent partial window).
+    messages = _newest_first(("q", "x" * 500))
+
+    window = select_history_window(messages, budget=100, measure=len, per_turn_cap=200)
+
+    assert window == []
+
+
+def test_per_turn_cap_zero_disables_the_guardrail():
+    # `per_turn_cap <= 0` (fraction >= 1.0 in Settings): the old
+    # all-or-nothing walk — an oversized turn stops it whole, unbounded.
+    messages = _newest_first(("old question", "old answer"), ("q", "x" * 500))
+
+    window = _select(messages, budget=400)
+
+    assert window == []
+
+
+def test_both_sides_oversized_stays_within_the_cap():
+    # A turn where user AND assistant exceed the cap: both copies are
+    # bounded, each carrying the marker, and the bounded cost measures at or
+    # under the cap with the same injected measure.
+    messages = _newest_first(("y" * 500, "x" * 500))
+
+    window = select_history_window(messages, budget=400, measure=len, per_turn_cap=300)
+
+    contents = _contents(window)
+    assert contents[0].endswith(TRUNCATION_MARKER)
+    assert contents[1].endswith(TRUNCATION_MARKER)
+    assert len(contents[0]) + len(contents[1]) <= 300
+    assert len(contents[1]) > len(contents[0])  # the costlier side keeps less
 
 
 # --- to_message_history ---
