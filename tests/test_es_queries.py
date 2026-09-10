@@ -23,12 +23,14 @@ def test_query_shape_without_tag():
                 "should": [
                     # Group 1 — document identity, max WITHIN the group:
                     # heading_path textually contains title, so additive
-                    # scoring here would double-count a title match.
+                    # scoring here would double-count a title match. Threads
+                    # the same term-coverage gate as the prose leaf.
                     {
                         "multi_match": {
                             "query": "zorblat notes",
                             "fields": ["title^2", "heading_path^1.5"],
                             "type": "best_fields",
+                            "minimum_should_match": DEFAULT_BM25_MIN_COVERAGE,
                         }
                     },
                     # Group 2 — prose body (IK-analyzed), carrying the
@@ -73,26 +75,59 @@ def test_identity_group_takes_max_not_sum():
 # --- coverage gate (SEARCH_BM25_MIN_COVERAGE) ---
 
 
-def test_coverage_gate_applies_to_prose_leaf_only():
-    # The percentage is defined by the prose field's IK tokenization; on
-    # chunk_text.code it would mean something different (that analyzer keeps
-    # the English stopwords IK drops), and on the identity group it would
-    # penalize short breadcrumbs.
+def test_coverage_gate_applies_to_prose_and_identity_not_code():
+    # The percentage is defined by IK tokenization (prose text, titles,
+    # breadcrumbs); on chunk_text.code it would mean something different
+    # (that analyzer keeps the English stopwords IK drops). The identity
+    # group threads the same gate: without it a lone function-word title hit
+    # would satisfy the outer minimum_should_match: 1 and activate the leg.
     should = _boolean(bm25_chunk_query("notes", size=5, min_coverage="60%"))["should"]
 
+    assert should[0]["multi_match"]["minimum_should_match"] == "60%"
     assert should[1]["match"]["chunk_text"]["minimum_should_match"] == "60%"
-    assert "minimum_should_match" not in should[0]["multi_match"]
     assert "minimum_should_match" not in should[2]["match"]["chunk_text.code"]
 
 
 def test_coverage_sentinel_omits_key_and_keeps_outer_or():
-    # "" disables the gate: the key is omitted entirely (pre-gate hit counts,
-    # the "none" column of the D6 table), while the outer bool stays a plain
-    # OR across the three groups.
+    # "" disables the gate everywhere: the key is omitted entirely on the
+    # prose leaf AND the identity group (pre-gate hit counts, the "none"
+    # column of the D6 table), while the outer bool stays a plain OR across
+    # the three groups.
     should = _boolean(bm25_chunk_query("notes", size=5, min_coverage=""))["should"]
 
+    assert "minimum_should_match" not in should[0]["multi_match"]
     assert "minimum_should_match" not in should[1]["match"]["chunk_text"]
     assert _boolean(bm25_chunk_query("notes", size=5, min_coverage=""))["minimum_should_match"] == 1
+
+
+def test_identity_group_carries_minimum_should_match_when_coverage_set():
+    # The identity group must not be activatable by a single function-word
+    # title hit inside a multi-token query — it threads the same coverage
+    # value as the prose leaf (70% by default).
+    identity = _boolean(bm25_chunk_query("notes", size=5, min_coverage="70%"))["should"][0]
+
+    assert identity["multi_match"]["minimum_should_match"] == "70%"
+
+
+def test_four_token_query_cannot_activate_identity_with_one_stopword_hit():
+    # ES rounds percentage coverage DOWN per field: "量子力学薛定谔的猫"
+    # tokenizes into 4 terms, so the identity group requires
+    # floor(4 * 70%) = 2 of them in title (or in heading_path). A lone "的"
+    # title hit is 1 < 2, so the group fails and cannot activate the BM25
+    # leg above genuine prose evidence (the 09-10 noise hole).
+    identity = _boolean(bm25_chunk_query("量子力学薛定谔的猫", size=5))["should"][0]
+
+    assert identity["multi_match"]["minimum_should_match"] == DEFAULT_BM25_MIN_COVERAGE
+
+
+def test_single_term_identifier_query_unaffected_by_identity_coverage():
+    # A one-term query ("redis") has exactly one term per identity field and
+    # that lone term is always required (1 of 1 satisfies any percentage),
+    # so the coverage gate cannot suppress identifier searches.
+    identity = _boolean(bm25_chunk_query("redis", size=5))["should"][0]
+
+    assert identity["multi_match"]["query"] == "redis"
+    assert identity["multi_match"]["minimum_should_match"] == DEFAULT_BM25_MIN_COVERAGE
 
 
 def test_query_with_tag_adds_keyword_filter_without_touching_should():

@@ -61,14 +61,19 @@ def bm25_chunk_query(
     not silently require `should` matches).
 
     `min_coverage` applies an ES `minimum_should_match` to the `chunk_text`
-    leaf ONLY — the prose field whose IK tokenization defines the query's
-    terms. On `chunk_text.code` a percentage would mean something different
-    (that analyzer keeps the English stopwords IK drops), and on the
-    title/heading group it would penalize short breadcrumbs. This term-
+    leaf and to the title/heading identity group — both IK-tokenized, so a
+    percentage of the query's terms is well-defined there. On the identity
+    group it stops a single ubiquitous function word (a lone "的" title hit)
+    from satisfying the outer `minimum_should_match: 1` and activating the
+    whole BM25 leg above genuine prose evidence; ES rounds the percentage
+    down per field, so single-term identifier queries (`redis`) are
+    unaffected — the lone term is always required. On `chunk_text.code` a
+    percentage would mean something different (that analyzer keeps the
+    English stopwords IK drops), so that group stays uncovered. This term-
     coverage gate is the scale-free noise guard: BM25 `_score` is query-
     dependent, so no absolute floor separates weak-but-real hits from noise.
     Defaults to `DEFAULT_BM25_MIN_COVERAGE`; an empty string omits the key
-    entirely (gate disabled).
+    entirely (gate disabled, identity group included).
 
     An optional `tags` keyword filter rides as a `filter` clause: applied
     without affecting BM25 scoring. Bounded `size`, source retrieval
@@ -81,15 +86,16 @@ def bm25_chunk_query(
     prose_match: dict[str, Any] = {"query": q}
     if min_coverage:
         prose_match["minimum_should_match"] = min_coverage
+    identity_match: dict[str, Any] = {
+        "query": q,
+        "fields": _IDENTITY_FIELDS,
+        "type": "best_fields",
+    }
+    if min_coverage:
+        identity_match["minimum_should_match"] = min_coverage
     boolean: dict[str, Any] = {
         "should": [
-            {
-                "multi_match": {
-                    "query": q,
-                    "fields": _IDENTITY_FIELDS,
-                    "type": "best_fields",
-                }
-            },
+            {"multi_match": identity_match},
             {"match": {"chunk_text": prose_match}},
             {"match": {"chunk_text.code": {"query": q, "boost": _CODE_BOOST}}},
         ],
