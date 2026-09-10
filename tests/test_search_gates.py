@@ -1,8 +1,9 @@
 """Relevance gate units: pure helper behavior, offline (no db/es).
 
 Covers the post-fusion relative floor, the per-leg absolute gates, the
-two-tier vector rescue gate with its on-domain trigger, the query length
-cap, and the Settings/Retriever default drift guard.
+two-tier vector rescue gate with its BM25-empty lexical-failure backstop
+and on-domain trigger, the query length cap, and the Settings/Retriever
+default drift guard.
 """
 
 from __future__ import annotations
@@ -146,6 +147,7 @@ def test_rescue_gate_primary_survivors_skip_rescue():
         rescue_margin=0.15,
         rescue_max_distance=0.85,
         rescue_trigger_max_distance=DEFAULT_VECTOR_RESCUE_TRIGGER_MAX_DISTANCE,
+        bm25_leg_empty=True,
     )
 
     assert [row.distance for row in kept] == [0.1]
@@ -160,11 +162,31 @@ def test_rescue_gate_admits_clustered_head_when_primary_empties():
         rescue_margin=0.15,
         rescue_max_distance=0.85,
         rescue_trigger_max_distance=DEFAULT_VECTOR_RESCUE_TRIGGER_MAX_DISTANCE,
+        bm25_leg_empty=True,
     )
 
     # Window = min(0.50 + 0.15, 0.85) = 0.65: the clustered head, not the tail.
     assert [row.distance for row in kept] == [0.50, 0.55]
     assert rescued == 2
+
+
+def test_rescue_gate_suppressed_when_bm25_leg_has_survivors():
+    rows = [_row(0.50), _row(0.55), _row(0.80)]
+    kept, rescued = filter_vector_rows_with_rescue(
+        rows,
+        max_distance=0.45,
+        rescue_margin=0.15,
+        rescue_max_distance=0.85,
+        rescue_trigger_max_distance=DEFAULT_VECTOR_RESCUE_TRIGGER_MAX_DISTANCE,
+        bm25_leg_empty=False,
+    )
+
+    # Same clustered head as the rescue case above, but the BM25 leg already
+    # answered lexically: rescue is the lexical-failure backstop, so the
+    # emptied primary tier stays empty even though leg_min 0.50 is on-domain
+    # (inside the trigger) — the `q=python` topical-neighbor leak shape.
+    assert kept == []
+    assert rescued == 0
 
 
 def test_rescue_gate_cap_binds_the_window():
@@ -177,6 +199,7 @@ def test_rescue_gate_cap_binds_the_window():
         # Trigger sentinel 2.0: isolate the cap's window arithmetic from the
         # on-domain trigger (leg_min 0.70 would otherwise trip it first).
         rescue_trigger_max_distance=2.0,
+        bm25_leg_empty=True,
     )
 
     # Window = min(0.85, 0.85): both rows exactly at the cap survive.
@@ -194,6 +217,7 @@ def test_rescue_gate_cap_keeps_high_leg_min_silent():
         # Trigger sentinel 2.0: isolate the cap (the trigger would otherwise
         # silence this leg first — see the off-domain-band test below).
         rescue_trigger_max_distance=2.0,
+        bm25_leg_empty=True,
     )
 
     # leg_min 0.90 puts the whole window above the cap: rare-term keywords
@@ -210,6 +234,7 @@ def test_rescue_gate_off_domain_leg_above_trigger_stays_empty():
         rescue_margin=0.15,
         rescue_max_distance=0.85,
         rescue_trigger_max_distance=DEFAULT_VECTOR_RESCUE_TRIGGER_MAX_DISTANCE,
+        bm25_leg_empty=True,
     )
 
     # leg_min 0.70 sits in the measured off-domain band: the window
@@ -227,6 +252,7 @@ def test_rescue_gate_leg_min_exactly_at_trigger_still_rescued():
         rescue_margin=0.15,
         rescue_max_distance=0.85,
         rescue_trigger_max_distance=DEFAULT_VECTOR_RESCUE_TRIGGER_MAX_DISTANCE,
+        bm25_leg_empty=True,
     )
 
     # The trigger is inclusive: leg_min == trigger is plausibly on-domain.
@@ -242,6 +268,7 @@ def test_rescue_gate_in_domain_leg_between_ceiling_and_trigger_still_rescued():
         rescue_margin=0.15,
         rescue_max_distance=0.85,
         rescue_trigger_max_distance=DEFAULT_VECTOR_RESCUE_TRIGGER_MAX_DISTANCE,
+        bm25_leg_empty=True,
     )
 
     # leg_min 0.55: beyond the primary ceiling, inside the trigger — the
@@ -258,6 +285,7 @@ def test_rescue_gate_trigger_sentinel_reproduces_pre_task_behavior():
         rescue_margin=0.15,
         rescue_max_distance=0.85,
         rescue_trigger_max_distance=2.0,
+        bm25_leg_empty=True,
     )
 
     # `>= 2.0` disables the trigger: a leg no sane trigger would admit still
@@ -274,6 +302,7 @@ def test_rescue_gate_margin_sentinel_disables_rescue():
         rescue_margin=0.0,
         rescue_max_distance=0.85,
         rescue_trigger_max_distance=DEFAULT_VECTOR_RESCUE_TRIGGER_MAX_DISTANCE,
+        bm25_leg_empty=True,
     )
 
     assert kept == []
@@ -288,6 +317,7 @@ def test_rescue_gate_cap_sentinel_disables_rescue():
         rescue_margin=0.15,
         rescue_max_distance=0.0,
         rescue_trigger_max_distance=DEFAULT_VECTOR_RESCUE_TRIGGER_MAX_DISTANCE,
+        bm25_leg_empty=True,
     )
 
     assert kept == []
@@ -302,6 +332,7 @@ def test_rescue_gate_row_without_distance_passes_primary():
         rescue_margin=0.15,
         rescue_max_distance=0.85,
         rescue_trigger_max_distance=DEFAULT_VECTOR_RESCUE_TRIGGER_MAX_DISTANCE,
+        bm25_leg_empty=True,
     )
 
     # The fail-open row survives the primary tier, so the rescue branch —
@@ -318,6 +349,7 @@ def test_rescue_gate_full_ceiling_sentinel_disables_everything():
         rescue_margin=0.15,
         rescue_max_distance=0.85,
         rescue_trigger_max_distance=DEFAULT_VECTOR_RESCUE_TRIGGER_MAX_DISTANCE,
+        bm25_leg_empty=True,
     )
 
     assert kept == rows
@@ -331,6 +363,7 @@ def test_rescue_gate_empty_input_passes_through():
         rescue_margin=0.15,
         rescue_max_distance=0.85,
         rescue_trigger_max_distance=DEFAULT_VECTOR_RESCUE_TRIGGER_MAX_DISTANCE,
+        bm25_leg_empty=True,
     ) == ([], 0)
 
 

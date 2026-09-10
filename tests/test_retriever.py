@@ -326,7 +326,7 @@ async def test_rescued_vector_head_restores_short_query_recall(
     outcome = await retriever.retrieve(SHIFTED_QUERY)
 
     assert outcome.mode == "hybrid"
-    assert outcome.es_hits == 0  # no term overlap: the vector leg decides alone
+    assert outcome.es_hits == 0  # BM25 empty: the lexical-failure path rescue exists for
     assert outcome.vector_hits == 2
     assert outcome.vector_gated == 0  # the rescue tier admitted the shifted head
     assert outcome.vector_rescued == 2
@@ -343,6 +343,31 @@ async def test_rescued_vector_head_restores_short_query_recall(
     assert all(distance == pytest.approx(SHIFTED_DISTANCE, abs=1e-3) for distance in distances)
     assert all(distance > DEFAULT_VECTOR_MAX_DISTANCE for distance in distances)
     assert all(distance <= DEFAULT_VECTOR_RESCUE_TRIGGER_MAX_DISTANCE for distance in distances)
+
+
+async def test_bm25_hits_suppress_rescue_when_primary_vector_empties(
+    seed_indexed, session_factory, es_client, es_index_name
+):
+    provider = shifted_scripted_provider()
+    # "zorblat" ranks Kotlin on BM25 while riding the same shifted band as
+    # the short-keyword query: distance 0.55, beyond the primary ceiling yet
+    # inside the on-domain trigger — the exact shape where rescue used to
+    # fire and leak the vector-only cluster.
+    provider.vectors["zorblat"] = provider.vectors[SHIFTED_QUERY]
+    await seed_corpus(seed_indexed, provider)
+    retriever = make_retriever(session_factory, es_client, es_index_name, provider)
+
+    outcome = await retriever.retrieve("zorblat")
+
+    assert outcome.mode == "hybrid"
+    assert outcome.es_hits == 1  # BM25 already answered lexically: Kotlin matches
+    # Rescue is the lexical-failure backstop, so the emptied primary tier
+    # stays empty — the BM25 ranking fuses alone, zero vector-only leaks.
+    assert outcome.vector_rescued == 0
+    assert outcome.vector_gated == 2
+    assert [item.document_title for item in outcome.items] == ["Kotlin Notes"]
+    assert outcome.items[0].es_rank == 1
+    assert outcome.items[0].vector_rank is None
 
 
 async def test_rescue_cap_keeps_rare_term_query_es_dominated(
