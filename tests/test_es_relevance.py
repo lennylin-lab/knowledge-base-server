@@ -5,6 +5,12 @@ Two worlds:
 - D1/D2 tests are corpus-pinned to the dev `kb_documents` index (rebuilt by
   this task's migration, see README runbook): they pin measured rank
   orderings and hit counts against the real Chinese programming corpus.
+  Re-anchored 2026-09-10 (task 09-10-irrelevant-query-noise-gates) after the
+  dev corpus was replaced: D2 identifier anchors are now `useState`
+  (CamelCase) / `lru_cache` (snake_case) and D1's both-halves chunk is the
+  React 渲染与并发 chunk — the 09-08 anchors (ConnectionPool, async_bulk,
+  BLoC/Widget) no longer exist. Presence and rank order are the invariants;
+  hit totals are not pinned (totals track the corpus, not the query path).
 - The C1 test builds its own disposable index with a synthetic two-document
   corpus so title-vs-body scoring is exactly comparable.
 
@@ -45,48 +51,81 @@ async def _search_hydrated(
 
 
 # --- D2: identifier queries must not silently become phrase queries ---
+# Re-anchored 2026-09-10 (task 09-10-irrelevant-query-noise-gates): the dev
+# corpus was replaced after 09-08 and the original anchors (ConnectionPool /
+# async_bulk) no longer exist. Same naming-convention coverage on the current
+# corpus: CamelCase `useState` (React 渲染与并发 chunk) and snake_case
+# `lru_cache` (Python 装饰器 chunk) — both verified present in chunk bodies.
 
 
 async def test_identifier_query_matches_by_parts(es_client):
     # Pre-fix, the search-side token graph stacked alternatives at one
-    # position and Lucene compiled them into an adjacency phrase: both
-    # queries returned 0 hits against a corpus that holds both identifiers.
+    # position and Lucene compiled them into an adjacency phrase: identifier
+    # queries returned 0 hits against a corpus that holds the identifiers
+    # (09-08 measured ConnectionPool/async_bulk; re-anchored 09-10 to
+    # useState/lru_cache — one anchor per naming convention).
     index = get_settings().ES_INDEX
 
-    connection_pool = await _search_hydrated(es_client, index, "ConnectionPool")
-    async_bulk = await _search_hydrated(es_client, index, "async_bulk")
+    use_state = await _search_hydrated(es_client, index, "useState")
+    lru_cache = await _search_hydrated(es_client, index, "lru_cache")
 
-    assert len(connection_pool) >= 1
-    assert len(async_bulk) >= 1
+    assert len(use_state) >= 1
+    assert len(lru_cache) >= 1
 
 
 async def test_plain_words_still_match_identifier_documents(es_client):
-    # The reverse direction (`connection pool` -> ConnectionPool documents)
-    # must survive the analyzer split: the flat search stream is a plain OR
-    # over the split parts.
+    # The reverse direction (`use state` -> the useState chunk, `lru cache`
+    # -> the lru_cache chunk) must survive the analyzer split: the flat
+    # search stream is a plain OR over the split parts.
+    #
+    # 09-08 pinned an exact total (`== 2`); that pin rotted when the dev
+    # corpus was replaced (09-10) — hit totals track the corpus, not the
+    # query path. The invariant is presence of the identifier-bearing chunks
+    # (the heading breadcrumbs below are unique in the current 37-chunk
+    # corpus); re-calibrate totals on corpus growth instead of pinning them.
     index = get_settings().ES_INDEX
 
-    hits = await _search_hydrated(es_client, index, "connection pool")
+    use_state = await _search_hydrated(es_client, index, "use state")
+    lru_cache = await _search_hydrated(es_client, index, "lru cache")
 
-    assert len(hits) == 2
+    assert any("渲染与并发" in hit["heading"] for hit in use_state), (
+        "plain `use state` must reach the useState chunk via its split parts"
+    )
+    assert any("装饰器" in hit["heading"] for hit in lru_cache), (
+        "plain `lru cache` must reach the lru_cache chunk via its split parts"
+    )
 
 
 # --- D1: cross-field evidence must rank the both-halves chunk first ---
+# Re-anchored 2026-09-10: the BLoC/Widget pair is gone from the corpus. The
+# same shape holds on the current data — the React 渲染与并发 chunk (heading
+# breadcrumb carries 状态管理 AND body carries setState) vs the React
+# doc-root chunk (title carries 状态管理, no setState in its body). The
+# Flutter doc is NOT a single-side candidate anymore: its root chunk now
+# mentions setState in its body, making it a both-halves chunk too.
 
 
 async def test_cross_field_evidence_outscales_single_field_match(es_client):
-    # Query `setState 状态管理`: the BLoC chunk (matches the Chinese topic in
-    # its breadcrumb AND the setState identifier in its body) previously lost
-    # to the Widget chunk (strong single-field match only) because
-    # best_fields kept just the best field score. Additive groups invert the
-    # ordering.
+    # Query `setState 状态管理`: the 渲染与并发 chunk (matches the Chinese
+    # topic in its breadcrumb AND the setState identifier in its body) must
+    # outrank the doc-root chunk (strong single-field match on the Chinese
+    # topic only) — additive groups sum cross-field evidence where
+    # best_fields kept just the best field score. Measured 2026-09-10 on the
+    # current corpus: 18.84 (rank 1) vs 16.03 (rank 4); the 09-08 anchors
+    # measured 39.99/30.99 vs 15.67 (BLoC both-halves vs Widget title-only).
     index = get_settings().ES_INDEX
 
     hits = await _search_hydrated(es_client, index, "setState 状态管理")
 
-    bloc_rank = next(rank for rank, hit in enumerate(hits, 1) if "BLoC" in hit["heading"])
-    widget_rank = next(rank for rank, hit in enumerate(hits, 1) if "Widget 体系" in hit["title"])
-    assert bloc_rank < widget_rank
+    both_halves_rank = next(
+        rank for rank, hit in enumerate(hits, 1) if "渲染与并发" in hit["heading"]
+    )
+    title_only_rank = next(
+        rank
+        for rank, hit in enumerate(hits, 1)
+        if hit["heading"] == hit["title"] and "React" in hit["title"]
+    )
+    assert both_halves_rank < title_only_rank
 
 
 # --- G3 calibration gates: coverage silences noise, keeps relevance ---
