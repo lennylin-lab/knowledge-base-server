@@ -1,0 +1,8 @@
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "Verify migration 0008 (nullable, up/down) and that only services/ writes the sources column"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "Verify layering: agents/qa.py only gains a collector accessor; no services imports in agents/; prompt edited as versioned file"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Verify SSE order with the carried first batch; sources persist inside the streaming try; no new raise surface"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Verify carried_sources count-only; no source text in any log event"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Verify offline determinism, toolchain gates, migration round-trip, review checklist"}
+{"file": ".trellis/spec/backend/chat-guidelines.md", "reason": "Verify the new feature composes with token-budget (carried blocks not budgeted, per design) and rolling summary (prefix order) scenarios; disabled path byte-identical"}
+{"file": ".trellis/spec/backend/search-guidelines.md", "reason": "Verify SSE/sources wire shapes unchanged (SearchHit/SourcesEvent) and no retrieval/gate behavior change"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Verify config->deps->service->agents->tests all consistent; grep for stale assumptions about run-local sources (docstrings, specs)"}
