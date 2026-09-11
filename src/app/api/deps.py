@@ -240,6 +240,9 @@ def build_chat_service(settings: Settings) -> ChatService:
         # no summary consulted, computed, or injected).
         summary_model=model if settings.CHAT_ROLLING_SUMMARY_ENABLED else None,
         summary_max_tokens=settings.CHAT_SUMMARY_MAX_TOKENS,
+        # Carry prior-run sources into follow-ups; the flag is the runtime
+        # kill switch (false = no sources write, emission, or preamble).
+        carry_sources_forward=settings.CHAT_SOURCES_CARRY_ENABLED,
     )
 
 

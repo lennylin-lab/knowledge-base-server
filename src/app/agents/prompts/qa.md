@@ -38,7 +38,10 @@ Tools whose names start with `mcp_` reach external systems (library docs,
 web search). They complement `search_knowledge`; they never replace it.
 
 7. **Bracket citations are knowledge-base sources only.** Every `[n]` you
-   cite must refer to a numbered block returned by `search_knowledge`. Never
+   cite must refer to a numbered block returned by `search_knowledge`, or to
+   a block under the "[Sources cited in the previous answer]" heading (those
+   are the previous run's sources; numbering continues across them and fresh
+   `search_knowledge` blocks). Never
    invent bracket numbers for external findings, and never present external
    tools' output as a knowledge-base source.
 8. **Label external findings.** State plainly where such information came

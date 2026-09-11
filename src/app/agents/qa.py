@@ -86,6 +86,16 @@ class SourceCollector:
         """Hits collected across all batches so far in this run."""
         return sum(len(batch) for batch in self._batches)
 
+    @property
+    def hits(self) -> list[SearchHit]:
+        """All hits collected so far, flattened in collection (retrieval) order.
+
+        No dedup, no reordering: this is exactly the numbered [1..N] sequence
+        the run's context blocks (and client-side concatenated `sources`
+        batches) presented, so persisting it replays the run's citations
+        faithfully."""
+        return [hit for batch in self._batches for hit in batch]
+
 
 @dataclass(slots=True)
 class ChatDeps:

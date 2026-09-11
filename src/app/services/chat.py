@@ -36,6 +36,7 @@ from __future__ import annotations
 import time
 from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass
+from dataclasses import field as dataclasses_field
 from uuid import UUID, uuid4
 
 import openai
@@ -56,7 +57,12 @@ from app.agents.conversation_summary import (
     build_conversation_summary_agent,
     render_fold_prompt,
 )
-from app.agents.qa import ChatDeps, SourceCollector, build_qa_agent
+from app.agents.qa import (
+    ChatDeps,
+    SourceCollector,
+    build_qa_agent,
+    format_context_blocks,
+)
 from app.agents.rewrite import build_rewrite_agent
 from app.core.exceptions import (
     AppError,
@@ -258,6 +264,30 @@ def summary_prefix(summary: str) -> list[ModelMessage]:
     ]
 
 
+# Label opening the injected carried-sources preamble so the model reads the
+# numbered blocks under it as the previous answer's citable context. Part of
+# the assembled-history contract (tests pin it); never persisted.
+CARRIED_SOURCES_LABEL = "[Sources cited in the previous answer]"
+_CARRIED_ACKNOWLEDGEMENT = "Noted — I'll treat these numbered sources as citable context."
+
+
+def carried_prefix(hits: list[SearchHit]) -> list[ModelMessage]:
+    """The previous run's sources as a labeled synthetic exchange leading the
+    history.
+
+    Same mechanism as `summary_prefix`: a request/response pair carrying the
+    blocks numbered `[1..k]` — the exact numbers the previous answer cited —
+    so a follow-up can read and re-cite them. Pure function of the hits;
+    never persisted and not part of history budget accounting (same class as
+    tool results).
+    """
+    blocks = format_context_blocks(hits, start=1)
+    return [
+        ModelRequest(parts=[UserPromptPart(content=f"{CARRIED_SOURCES_LABEL}\n{blocks}")]),
+        ModelResponse(parts=[TextPart(content=_CARRIED_ACKNOWLEDGEMENT)]),
+    ]
+
+
 def select_turns_to_fold(
     messages: Sequence[ChatMessage],
     *,
@@ -300,10 +330,16 @@ def select_turns_to_fold(
 
 @dataclass(slots=True)
 class _ChatTurn:
-    """Persistence context for one `ask` run (absent in stateless mode)."""
+    """Persistence context for one `ask` run (absent in stateless mode).
+
+    `carried` is the previous run's persisted sources (empty when there is
+    nothing to carry or the feature is off) — read in the prelude, re-emitted
+    as the run's first `sources` batch and injected as leading context.
+    """
 
     session_id: UUID
     history: list[ModelMessage]
+    carried: list[SearchHit] = dataclasses_field(default_factory=list)
 
 
 class ChatService:
@@ -324,6 +360,7 @@ class ChatService:
         rewrite_history_turns: int = 3,
         summary_model: Model | None = None,
         summary_max_tokens: int = 400,
+        carry_sources_forward: bool = False,
     ) -> None:
         self._retriever = retriever
         self._mode = mode
@@ -356,6 +393,13 @@ class ChatService:
             build_conversation_summary_agent(summary_model) if summary_model else None
         )
         self._summary_max_tokens = summary_max_tokens
+        # Carry the previous run's sources into follow-up turns: persisted
+        # sources are re-emitted as the run's FIRST `sources` batch (seeding
+        # the collector so fresh numbering continues after them) and injected
+        # as a labeled leading context pair. False (the constructor default)
+        # is byte-identical to the pre-carry service — no write, no emission,
+        # no preamble, no seeding.
+        self._carry_sources_forward = carry_sources_forward
         # Wrapped MCP tools arrive here (wired once per process in deps.py);
         # the default empty sequence keeps the agent identical to pre-MCP.
         self._agent = build_qa_agent(model, extra_tools=extra_tools)
@@ -407,8 +451,10 @@ class ChatService:
         calls) carries it; a resolved session adds its id. The question text
         itself is never logged. With `session_id`: the turn is persisted and
         history informs the model (it never enters `sources` — citations stay
-        run-local). Without a wired session factory, nothing here touches
-        the database.
+        run-local in numbering; the one deliberate exception is the carried
+        FIRST `sources` batch, the previous run's persisted sources, emitted
+        right after `run_started` when carry-sources-forward is on). Without
+        a wired session factory, nothing here touches the database.
         """
         run_id = uuid4().hex
         structlog.contextvars.bind_contextvars(run_id=run_id)
@@ -430,6 +476,16 @@ class ChatService:
         yield RunStartedEvent(
             run_id=run_id, mode=self._mode, session_id=turn.session_id if turn else None
         )
+
+        # Carried sources (previous run's persisted hits) go out as the FIRST
+        # `sources` batch, before any fresh retrieval — and seeding the
+        # collector here makes every fresh batch number after them, so prompt
+        # numbering == client numbering for the whole run.
+        carried = turn.carried if turn is not None and self._carry_sources_forward else []
+        if carried:
+            collector.append(carried)
+            for batch in _drain(pending):
+                yield SourcesEvent(items=batch)
 
         # Best-effort history-aware rewrite of the run prompt (`_rewrite_query`
         # never raises): a follow-up question reaches the agent — and through
@@ -468,7 +524,10 @@ class ChatService:
             # no assistant message, session continuable.
             if turn is not None:
                 await self._persist_assistant_message(
-                    turn, content="".join(answer_parts), run_id=run_id
+                    turn,
+                    content="".join(answer_parts),
+                    run_id=run_id,
+                    sources=collector.hits if self._carry_sources_forward else [],
                 )
         except Exception as exc:
             failure = _as_app_error(exc)
@@ -493,6 +552,7 @@ class ChatService:
             latency_ms=latency_ms,
             input_tokens=usage_input_tokens,
             output_tokens=usage_output_tokens,
+            **({"carried_sources": len(carried)} if self._carry_sources_forward else {}),
         )
         # Rolling-summary maintenance runs only once the turn has fully
         # succeeded (answer streamed AND persisted) and outside the try above:
@@ -567,7 +627,12 @@ class ChatService:
         truncated-with-marker (copies only — rows keep full content). With a
         summary agent wired, a non-empty rolling summary reserves its slice
         of the budget and leads the assembled history as a labeled synthetic
-        exchange; without one the summary column is never consulted.
+        exchange; without one the summary column is never consulted. With
+        carry-sources-forward on, the newest assistant row's persisted
+        `sources` (if any) ride on the turn: re-emitted by `ask` as the
+        first `sources` batch and injected as a labeled leading pair after
+        the summary prefix — pure local computation on rows already read,
+        no new I/O, cannot raise into the stream.
         """
         if self._session_factory is None:
             return None
@@ -575,6 +640,7 @@ class ChatService:
             sessions = ChatSessionRepository(session)
             messages = ChatMessageRepository(session)
             summary: str | None = None
+            carried: list[SearchHit] = []
             if session_id is None:
                 chat_session = await sessions.create(ChatSession(title=derive_title(question)))
                 logger.info(
@@ -588,12 +654,23 @@ class ChatService:
                 chat_session = existing
                 if self._summary_agent is not None:
                     summary = existing.rolling_summary or None
+                rows = await messages.list_recent_for_session(session_id, limit=HISTORY_READ_LIMIT)
                 history_rows = select_history_window(
-                    await messages.list_recent_for_session(session_id, limit=HISTORY_READ_LIMIT),
+                    rows,
                     budget=self._turn_budget(summary),
                     measure=self._token_measure(),
                     per_turn_cap=self._per_turn_cap(),
                 )
+                # Carried sources: ONLY the immediately previous assistant
+                # turn's (newest-first scan, first assistant row wins); NULL
+                # or empty carries nothing. Old sessions and failed runs have
+                # no such row — nothing to carry.
+                if self._carry_sources_forward:
+                    for row in rows:
+                        if row.role is MessageRole.ASSISTANT:
+                            if row.sources:
+                                carried = [SearchHit.model_validate(item) for item in row.sources]
+                            break
                 if summary:
                     # Numbers only — the summary is user-derived content.
                     logger.info(
@@ -628,14 +705,24 @@ class ChatService:
                 content_length=len(question),
             )
             history = to_message_history(history_rows)
+            if carried:
+                # Leading context, after the summary prefix and before the
+                # in-window turns: the previous run's blocks numbered [1..k].
+                history = carried_prefix(carried) + history
             if summary:
                 history = summary_prefix(summary) + history
-            return _ChatTurn(session_id=chat_session.id, history=history)
+            return _ChatTurn(session_id=chat_session.id, history=history, carried=carried)
 
     async def _persist_assistant_message(
-        self, turn: _ChatTurn, *, content: str, run_id: str
+        self, turn: _ChatTurn, *, content: str, run_id: str, sources: list[SearchHit]
     ) -> None:
-        """Persist the complete assistant answer (own transaction, on done)."""
+        """Persist the complete assistant answer (own transaction, on done).
+
+        `sources` is the run's collected hits in retrieval order — stored as
+        a JSON list so the next turn can re-cite them; empty stores NULL
+        (no retrieval, or the carry feature disabled). User messages and
+        failed runs never write the column.
+        """
         if self._session_factory is None:
             # Unreachable from `ask` (a turn exists only with a factory); the
             # guard keeps the method total rather than asserting.
@@ -648,6 +735,7 @@ class ChatService:
                     role=MessageRole.ASSISTANT,
                     content=content,
                     run_id=UUID(hex=run_id),
+                    sources=[hit.model_dump(mode="json") for hit in sources] or None,
                 )
             )
             await ChatSessionRepository(session).touch(turn.session_id)

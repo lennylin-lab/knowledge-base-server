@@ -43,7 +43,14 @@ from app.schemas.chat import (
     RunStartedEvent,
     SourcesEvent,
 )
-from app.services.chat import SUMMARY_PREFIX_LABEL, TRUNCATION_MARKER, ChatService
+from app.schemas.search import SearchHit
+from app.services.chat import (
+    CARRIED_SOURCES_LABEL,
+    SUMMARY_PREFIX_LABEL,
+    TRUNCATION_MARKER,
+    ChatService,
+    carried_prefix,
+)
 from app.services.session import derive_title
 from fakes import (
     FakeMcpManager,
@@ -1557,3 +1564,331 @@ async def test_stateless_service_never_folds_a_summary():
 
     assert isinstance(events[-1], DoneEvent)
     assert fold_prompts == []
+
+
+# --- carry prior-run sources into follow-up turns (scripted model; disposable DB) ---
+
+
+def _two_hit_retriever() -> StubRetriever:
+    return StubRetriever(
+        outcome=SearchOutcome(
+            mode="hybrid",
+            items=[
+                retrieved_chunk(content="alpha content", document_title="Alpha Doc"),
+                retrieved_chunk(chunk_index=1, content="beta content", document_title="Beta Doc"),
+            ],
+            es_hits=2,
+            vector_hits=2,
+        )
+    )
+
+
+def _carrying_service(
+    factory: async_sessionmaker[AsyncSession],
+    retriever: StubRetriever,
+    qa_model,
+    *,
+    carry: bool = True,
+) -> ChatService:
+    """ChatService wired with carry-sources-forward: scripted QA model, stub
+    retriever, one DB session per ask() via the injected factory, `len`
+    counter (history assembly stays offline)."""
+    return ChatService(
+        retriever,
+        qa_model,
+        mode="hybrid",
+        session_factory=factory,
+        token_counter=len,
+        carry_sources_forward=carry,
+    )
+
+
+async def _assistant_row(
+    factory: async_sessionmaker[AsyncSession], session_id: UUID
+) -> ChatMessage:
+    messages = await _session_messages(factory, session_id)
+    assistant = [m for m in messages if m.role is MessageRole.ASSISTANT]
+    assert assistant
+    return assistant[-1]
+
+
+def test_collector_hits_flatten_batches_in_order_without_dedup():
+    # The persistence view of a run: batches flattened in retrieval order,
+    # duplicates kept — replay must preserve the original [1..N] mapping.
+    collector = SourceCollector()
+    hit = SearchHit(
+        document_id=uuid4(),
+        document_title="Doc",
+        document_tags=[],
+        chunk_index=0,
+        content="same content",
+        score=0.5,
+        es_rank=1,
+        vector_rank=None,
+    )
+    collector.append([hit])
+    collector.append([hit])
+
+    assert collector.hits == [hit, hit]
+    assert collector.total_hits == 2
+
+
+def test_carried_prefix_renders_numbered_labeled_pair():
+    hits = [
+        SearchHit.model_validate(
+            {
+                "document_id": str(uuid4()),
+                "document_title": "Alpha Doc",
+                "document_tags": [],
+                "chunk_index": 0,
+                "content": "alpha content",
+                "score": 0.5,
+                "es_rank": 1,
+                "vector_rank": 1,
+            }
+        )
+    ]
+    pair = carried_prefix(hits)
+
+    assert isinstance(pair[0], ModelRequest)
+    assert isinstance(pair[1], ModelResponse)
+    request_text = pair[0].parts[0].content
+    assert request_text.startswith(CARRIED_SOURCES_LABEL)
+    assert "[1] Alpha Doc" in request_text
+    assert "alpha content" in request_text
+    assert pair[1].parts[0].content  # the acknowledgement keeps alternation
+
+
+@pytest.mark.db
+async def test_sources_persist_on_assistant_row_in_retrieval_order(session_factory):
+    # AC1/AC4: after a retrieval turn the assistant row's `sources` holds the
+    # run's hits exactly as retrieved — full SearchHits, order preserved, no
+    # dedup; user rows stay NULL.
+    retriever = _two_hit_retriever()
+    service = _carrying_service(
+        session_factory,
+        retriever,
+        scripted_chat_model(tool_calls=["alpha"], answer_parts=["Answer [1]."]),
+    )
+    events = await _collect(service, QUESTION)
+    session_id = events[0].session_id
+    assert session_id is not None
+
+    messages = await _session_messages(session_factory, session_id)
+    assert messages[0].sources is None  # the user row never carries sources
+    row = await _assistant_row(session_factory, session_id)
+    assert row.sources is not None
+    hits = [SearchHit.model_validate(item) for item in row.sources]
+    assert [(hit.document_title, hit.content, hit.chunk_index) for hit in hits] == [
+        ("Alpha Doc", "alpha content", 0),
+        ("Beta Doc", "beta content", 1),
+    ]
+
+
+@pytest.mark.db
+async def test_followup_reemits_carried_sources_as_first_batch_and_leading_pair(
+    session_factory,
+):
+    # AC2/AC3/AC4: the follow-up turn emits the previous run's sources as the
+    # FIRST `sources` batch (right after run_started, before fresh batches),
+    # seeds the collector so fresh numbering continues after them, and shows
+    # the model a labeled carried pair numbered [1..k] ahead of fresh blocks.
+    turn1_model = scripted_chat_model(
+        tool_calls=["alpha"],
+        answer_parts=["Answer [1]."],
+        tool_results=[],
+    )
+    events1 = await _collect(
+        _carrying_service(session_factory, _two_hit_retriever(), turn1_model), QUESTION
+    )
+    session_id = events1[0].session_id
+    assert session_id is not None
+
+    tool_results: list[str] = []
+    qa_histories: list[list[ModelMessage]] = []
+    retriever = _two_hit_retriever()
+    turn2_model = scripted_chat_model(
+        tool_calls=["follow-up"],
+        answer_parts=["Follow-up answer [3]."],
+        tool_results=tool_results,
+        histories=qa_histories,
+    )
+    with capture_logs() as logs:
+        events2 = await _collect(
+            _carrying_service(session_factory, retriever, turn2_model),
+            "tell me more about [1]",
+            session_id=session_id,
+        )
+
+    # First batch immediately after run_started; fresh batch after it.
+    assert _names(events2) == [
+        "RunStartedEvent",
+        "SourcesEvent",
+        "SourcesEvent",
+        "AnswerDeltaEvent",
+        "DoneEvent",
+    ]
+    first, fresh = (event for event in events2 if isinstance(event, SourcesEvent))
+    assert [hit.document_title for hit in first.items] == ["Alpha Doc", "Beta Doc"]
+    assert [hit.content for hit in first.items] == ["alpha content", "beta content"]
+    # AC4: carried content/order is exactly the previous run's citations
+    # (turn 1's row — turn 2's row carries carried + fresh, 4 hits).
+    messages = await _session_messages(session_factory, session_id)
+    turn1_sources = next(
+        m.sources for m in messages if m.role is MessageRole.ASSISTANT and m.sources
+    )
+    assert first.items == [SearchHit.model_validate(item) for item in turn1_sources]
+    row = await _assistant_row(session_factory, session_id)
+    assert row.sources is not None and len(row.sources) == 4
+    # Fresh retrieval returned the same two hits, numbered [3] and [4].
+    assert [hit.document_title for hit in fresh.items] == ["Alpha Doc", "Beta Doc"]
+    assert tool_results[0].startswith("[3] Alpha Doc")
+
+    # AC3: the model's prompt opens with the labeled carried pair ([1..2]),
+    # then the current prompt; the fresh tool result continued at [3].
+    assert qa_histories
+    for messages in qa_histories:
+        prompts = _user_prompts(messages)
+        assert prompts[0].startswith(CARRIED_SOURCES_LABEL)
+        assert "[1] Alpha Doc" in prompts[0]
+        assert "[2] Beta Doc" in prompts[0]
+        assert isinstance(messages[0], ModelRequest)
+        assert isinstance(messages[1], ModelResponse)
+        assert messages[1].parts[0].content  # acknowledgement keeps alternation
+        # The run prompt follows the carried pair (history precedes it).
+        assert prompts[-1] == "tell me more about [1]"
+
+    # AC7: counts only — no source or question text in the logs; the run
+    # reports the carried count.
+    assert "alpha content" not in str(logs)
+    assert "tell me more about [1]" not in str(logs)
+    finished = next(entry for entry in logs if entry["event"] == "agent_run_finished")
+    assert finished["carried_sources"] == 2
+
+
+@pytest.mark.db
+async def test_carry_disabled_keeps_old_behavior_byte_identical(session_factory):
+    # AC5: without the flag (the constructor default and the Settings-off
+    # wiring) nothing is written, emitted, or prepended — the two turns are
+    # exactly the pre-carry service, including the log surface.
+    turn1_model = scripted_chat_model(
+        tool_calls=["alpha"], answer_parts=["Answer [1]."], tool_results=[]
+    )
+    events1 = await _collect(
+        _carrying_service(session_factory, _two_hit_retriever(), turn1_model, carry=False),
+        QUESTION,
+    )
+    session_id = events1[0].session_id
+    assert session_id is not None
+
+    tool_results: list[str] = []
+    qa_histories: list[list[ModelMessage]] = []
+    turn2_model = scripted_chat_model(
+        tool_calls=["follow-up"],
+        answer_parts=["Follow-up answer."],
+        tool_results=tool_results,
+        histories=qa_histories,
+    )
+    with capture_logs() as logs:
+        events2 = await _collect(
+            _carrying_service(session_factory, _two_hit_retriever(), turn2_model, carry=False),
+            "tell me more",
+            session_id=session_id,
+        )
+
+    # One fresh sources batch only — no carried batch ahead of it.
+    assert _names(events2) == [
+        "RunStartedEvent",
+        "SourcesEvent",
+        "AnswerDeltaEvent",
+        "DoneEvent",
+    ]
+    assert tool_results[0].startswith("[1] Alpha Doc")  # numbering restarts at 1
+    assert qa_histories
+    for messages in qa_histories:
+        assert all(
+            not (isinstance(part, UserPromptPart) and isinstance(part.content, str))
+            or not part.content.startswith(CARRIED_SOURCES_LABEL)
+            for message in messages
+            for part in message.parts
+        )
+    # Nothing was persisted and the finished log carries no carried count.
+    row = await _assistant_row(session_factory, session_id)
+    assert row.sources is None
+    finished = next(entry for entry in logs if entry["event"] == "agent_run_finished")
+    assert "carried_sources" not in finished
+
+
+@pytest.mark.db
+async def test_null_sources_prior_turn_carries_nothing(session_factory):
+    # AC6: a prior turn from before the feature (or with empty sources) is
+    # simply not carried — the next carry-enabled turn behaves like a first.
+    turn1_model = scripted_chat_model(
+        tool_calls=["alpha"], answer_parts=["Answer [1]."], tool_results=[]
+    )
+    events1 = await _collect(
+        _carrying_service(session_factory, _two_hit_retriever(), turn1_model, carry=False),
+        QUESTION,
+    )
+    session_id = events1[0].session_id
+    assert session_id is not None
+
+    tool_results: list[str] = []
+    qa_histories: list[list[ModelMessage]] = []
+    turn2_model = scripted_chat_model(
+        tool_calls=["follow-up"],
+        answer_parts=["Follow-up answer."],
+        tool_results=tool_results,
+        histories=qa_histories,
+    )
+    events2 = await _collect(
+        _carrying_service(session_factory, _two_hit_retriever(), turn2_model),
+        "tell me more",
+        session_id=session_id,
+    )
+
+    # Flag is ON here, but there was nothing to carry: one fresh batch only.
+    assert _names(events2) == [
+        "RunStartedEvent",
+        "SourcesEvent",
+        "AnswerDeltaEvent",
+        "DoneEvent",
+    ]
+    assert tool_results[0].startswith("[1] Alpha Doc")
+    assert qa_histories
+    for messages in qa_histories:
+        assert not _user_prompts(messages)[0].startswith(CARRIED_SOURCES_LABEL)
+
+
+async def test_stateless_service_never_carries_or_prepends():
+    # AC6: without a session factory nothing is ever carried (and nothing is
+    # persisted) — the stateless stream is unchanged by the feature.
+    qa_histories: list[list[ModelMessage]] = []
+    service = ChatService(
+        _two_hit_retriever(),
+        scripted_chat_model(
+            tool_calls=["zorblat"],
+            answer_parts=ANSWER_PARTS,
+            histories=qa_histories,
+        ),
+        mode="hybrid",
+        carry_sources_forward=True,
+    )
+
+    events = await _collect(service, QUESTION)
+
+    assert _names(events) == [
+        "RunStartedEvent",
+        "SourcesEvent",
+        "AnswerDeltaEvent",
+        "AnswerDeltaEvent",
+        "DoneEvent",
+    ]
+    assert qa_histories
+    for messages in qa_histories:
+        assert not _user_prompts(messages)[0].startswith(CARRIED_SOURCES_LABEL)
+
+
+def test_sources_carry_settings_defaults_are_pinned():
+    settings = hermetic_settings()
+    assert settings.CHAT_SOURCES_CARRY_ENABLED is True

@@ -12,7 +12,7 @@ from enum import StrEnum
 
 from sqlalchemy import DateTime, ForeignKey, Index, Text, func, text
 from sqlalchemy import Enum as SAEnum
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -87,6 +87,11 @@ class ChatMessage(Base):
     content: Mapped[str] = mapped_column(Text, nullable=False)
     # Agent run that produced an assistant message (None for user messages).
     run_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    # Sources the run's answer cited (migration 0008): the full SearchHit list
+    # in retrieval order, as JSON — derived, additional state so a follow-up
+    # turn can re-emit and re-cite the previous run's numbered blocks.
+    # NULL = nothing carried (user messages, failed runs, pre-feature rows).
+    sources: Mapped[list[dict[str, object]] | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
