@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 13
-- **Last Active**: 2026-09-11
+- **Total Sessions**: 14
+- **Last Active**: 2026-09-12
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~300 | Active |
+| `journal-1.md` | ~324 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 14 | 2026-09-12 | Carry prior-run sources into follow-up turns | `a197744`, `8497f67`, `19a7e05` | `feat/sources-carry-forward` |
 | 13 | 2026-09-11 | Follow-up residual-noise evaluation (direction #4, no-go) | `998cf21` | `main` |
 | 12 | 2026-09-11 | Rolling conversation summary beyond the history window | `19bcc6f`, `f410869`, `33c14c1`, `b000064` | `main` |
 | 11 | 2026-09-11 | Token-based history budget + long-document guardrail | `c990389`, `eda8061`, `d2103b5`, `07cdc0b` | `main` |

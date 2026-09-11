@@ -298,3 +298,27 @@ Executed 09-11-followup-noise-eval against the live 15-doc corpus (37+2 chunks; 
 ### Status
 
 [OK] **Completed**
+
+
+## Session 14: Carry prior-run sources into follow-up turns
+<!-- trellis-session: v=2 fp=3c0b09d6260c1014 -->
+
+**Date**: 2026-09-12
+**Task**: Carry prior-run sources into follow-up turns
+**Branch**: `feat/sources-carry-forward`
+
+### Summary
+
+Implemented sources carry-forward: nullable JSONB chat_messages.sources (migration 0008), carried SSE first batch + collector seeding + labeled synthetic pair in services/chat.py, qa.md citation carve-out, CHAT_SOURCES_CARRY_ENABLED flag with byte-identical disabled path. Ruff/mypy clean, 476 tests pass, migration round-trip verified. Spec scenario added to chat-guidelines.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `a197744` | feat(chat): carry prior-run sources into follow-up turns |
+| `8497f67` | docs(spec): carried-sources scenario in chat guidelines |
+| `19a7e05` | chore(task): plan artifacts for 09-11-sources-carry-forward |
+
+### Status
+
+[OK] **Completed**
