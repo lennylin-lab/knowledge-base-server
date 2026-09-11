@@ -322,3 +322,24 @@ Implemented sources carry-forward: nullable JSONB chat_messages.sources (migrati
 ### Status
 
 [OK] **Completed**
+
+
+## Session 15: Redis cache layer for embeddings, agents, and search
+<!-- trellis-session: v=2 fp=bc88d38e3bb44e72 -->
+
+**Date**: 2026-09-12
+**Task**: Redis cache layer for embeddings, agents, and search
+
+### Summary
+
+Implemented the opt-in Redis cache task 09-12-redis-cache-layer: Cache Protocol/NullCache/RedisCache primitive in core/cache.py (only redis-importing module), CachingEmbeddingProvider with byte-exact float64 vectors, summarize/association result caching preserving the 404-before-lookup contract, search outcome caching with post-commit epoch invalidation, best-effort degradation with keys never logged. Gates passed (ruff/mypy/511 tests, zero Redis offline). Added .trellis/spec/backend/cache-guidelines.md spec scenario.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `1d3dbff` | feat(cache): opt-in Redis cache for embeddings, agent results, and search |
+
+### Status
+
+[OK] **Completed**
