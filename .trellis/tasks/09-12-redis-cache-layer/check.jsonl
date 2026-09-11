@@ -1,0 +1,6 @@
+{"file": ".trellis/spec/backend/directory-structure.md", "type": "file", "reason": "verify cache primitive lives in core/cache.py, redis import confined there, deps.py owns wiring, no layering violation (llm/services/rag import only core/)"}
+{"file": ".trellis/spec/backend/error-handling.md", "type": "file", "reason": "verify every cache op degrades (no 5xx / broken stream on Redis fault), errors never cached, disabled-mode byte-identical to today"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "type": "file", "reason": "verify cache_hit/miss/error fields, counts + error_class only, zero key/query/content leakage"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "type": "file", "reason": "verify gates green, zero Redis in default suite, live_redis deselected, .env.example complete, redis dependency floor matches imported API"}
+{"file": ".trellis/spec/backend/search-guidelines.md", "type": "file", "reason": "verify cached SearchOutcome preserves gate/hydration contracts and epoch invalidation prevents serving soft-deleted/stale content; key built after truncate_query"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "type": "file", "reason": "verify no schema drift, content_hash keying (null ⇒ skip), epoch bump strictly after commit"}
