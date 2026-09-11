@@ -12,6 +12,7 @@ import structlog
 import yaml
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.cache import SEARCH_EPOCH_KEY, Cache
 from app.core.exceptions import NotFoundError, ValidationError
 from app.models.document import Document, IndexStatus
 from app.repositories.document import DocumentRepository
@@ -85,10 +86,20 @@ def _parse_front_matter(content: str, request_title: str | None) -> tuple[str, l
 class DocumentService:
     """Orchestrates front-matter parsing, repository calls, and commits."""
 
-    def __init__(self, session: AsyncSession, enqueuer: ReindexEnqueuer | None = None) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        enqueuer: ReindexEnqueuer | None = None,
+        cache: Cache | None = None,
+    ) -> None:
         self._session = session
         self._repo = DocumentRepository(session)
         self._enqueuer = enqueuer
+        # Optional best-effort cache handle: every committed write bumps the
+        # global search epoch, invalidating the whole search-result cache
+        # (coarse but always correct — see the cache task design). None =
+        # no-op, the pre-cache behavior.
+        self._cache = cache
 
     def _enqueue_indexing(self, doc_id: UUID, updated_at: datetime) -> None:
         """Schedule re-indexing; `None` enqueuer (default) is a no-op.
@@ -99,6 +110,20 @@ class DocumentService:
         """
         if self._enqueuer is not None:
             self._enqueuer(doc_id, updated_at)
+
+    async def _bump_search_epoch(self) -> None:
+        """Bump the search-cache epoch AFTER commit — a rolled-back write must
+        never bust the cache. The `Cache` contract never raises, but the bump
+        stays best-effort regardless: a failure only costs one stale window,
+        never a failed write."""
+        if self._cache is None:
+            return
+        try:
+            await self._cache.incr(SEARCH_EPOCH_KEY)
+        except Exception as exc:
+            logger.warning(
+                "cache_error", domain="search", op="incr", error_class=type(exc).__name__
+            )
 
     async def create_document(self, payload: DocumentCreate) -> DocumentRead:
         """Persist a new document derived from its front matter."""
@@ -114,6 +139,7 @@ class DocumentService:
         logger.info("document_created", document_id=str(document.id), title=document.title)
         # After commit only — a rolled-back write must never be indexed.
         self._enqueue_indexing(document.id, document.updated_at)
+        await self._bump_search_epoch()
         return DocumentRead.model_validate(document)
 
     async def get_document(self, doc_id: UUID) -> DocumentReadDetail:
@@ -198,6 +224,7 @@ class DocumentService:
         )
         if reindex:
             self._enqueue_indexing(document.id, document.updated_at)
+        await self._bump_search_epoch()
         return DocumentRead.model_validate(document)
 
     async def delete_document(self, doc_id: UUID) -> None:
@@ -206,6 +233,7 @@ class DocumentService:
         await self._repo.soft_delete(document)
         await self._session.commit()
         logger.info("document_deleted", document_id=str(document.id))
+        await self._bump_search_epoch()
 
     async def _get_or_raise(self, doc_id: UUID) -> Document:
         document = await self._repo.get_by_id(doc_id)

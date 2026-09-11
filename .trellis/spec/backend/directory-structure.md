@@ -109,6 +109,10 @@ Key points:
 - **`rag/` owns the retrieval pipeline**: chunking, embedding, hybrid search
   (ES BM25 + pgvector cosine), RRF fusion. `search/` and `repositories/` are
   its data-access backends.
+- **`redis` (redis-py) is imported only in `core/cache.py`** (2026-09-12,
+  cache task) — the domain-confined-infra-import convention (`arq` in
+  `rag/worker.py`, provider SDKs in `llm/`). Every other layer sees only the
+  `Cache` Protocol / `NullCache` from that module.
 - **Chunking is fence-aware, not line-aware** (2026-09-06). `rag/chunker.py`
   threads a fence state machine through every structural split: a `#` line
   inside a ` ``` `/`~~~` fence is never a heading, in-fence content is

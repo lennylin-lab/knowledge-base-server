@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.deps import close_arq_pool
+from app.api.deps import close_arq_pool, close_cache
 from app.api.v1.router import api_v1_router
 from app.core.config import get_settings
 from app.core.exceptions import register_exception_handlers
@@ -24,7 +24,8 @@ async def app_lifespan(app: FastAPI) -> AsyncIterator[None]:
     not, so an MCP-less deployment is byte-identical to before). Shared ARQ
     pool: closed at shutdown when this process routed indexing through
     Redis — also a no-op in BackgroundTasks mode, where the pool never gets
-    built.
+    built. Shared cache client: closed when caching is enabled — a no-op in
+    NullCache mode.
     """
     manager = get_mcp_manager()
     if manager.configured:
@@ -35,6 +36,7 @@ async def app_lifespan(app: FastAPI) -> AsyncIterator[None]:
         if manager.configured:
             await manager.stop()
         await close_arq_pool()
+        await close_cache()
 
 
 def create_app() -> FastAPI:

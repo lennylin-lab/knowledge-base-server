@@ -14,10 +14,11 @@ from arq.connections import ArqRedis, RedisSettings
 from fastapi import BackgroundTasks, Depends
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.core.cache import Cache, NullCache, RedisCache
 from app.core.config import Settings, get_settings
 from app.core.database import SessionFactory, get_db
 from app.core.exceptions import ChatUnavailableError
-from app.llm.embeddings import OpenAIEmbeddingProvider
+from app.llm.embeddings import CachingEmbeddingProvider, EmbeddingProvider, OpenAIEmbeddingProvider
 from app.llm.models import get_chat_model
 from app.mcp.manager import get_mcp_manager
 from app.mcp.tools import build_agent_tools
@@ -41,8 +42,42 @@ def get_document_service(session: SessionDep, background_tasks: BackgroundTasks)
 
     The FastAPI adapter for the write-path indexing trigger: the service only
     sees an injected enqueuer; this is the sole place BackgroundTasks appears.
+    The cache handle is process-lifetime and only used for the best-effort
+    search-epoch bump after each committed write.
     """
-    return DocumentService(session, enqueuer=make_index_enqueuer(background_tasks))
+    return DocumentService(
+        session, enqueuer=make_index_enqueuer(background_tasks), cache=get_cache()
+    )
+
+
+# --- shared cache handle (opt-in, best-effort Redis) ---
+
+_shared_cache: Cache | None = None
+
+
+def get_cache() -> Cache:
+    """The one cache per process, built lazily (the `_get_shared_arq_pool`
+    pattern). Effective enable = CACHE_ENABLED AND non-empty REDIS_URL — the
+    default empty REDIS_URL wires a shared `NullCache`: no redis client is
+    ever constructed and behavior is byte-identical to no cache. Tests may
+    pre-set the module global to inject a stub."""
+    global _shared_cache
+    if _shared_cache is None:
+        settings = get_settings()
+        if settings.CACHE_ENABLED and settings.REDIS_URL:
+            _shared_cache = RedisCache.from_url(settings.REDIS_URL)
+        else:
+            _shared_cache = NullCache()
+    return _shared_cache
+
+
+async def close_cache() -> None:
+    """App-shutdown hook: close the shared cache client if this process
+    built one (a no-op in NullCache mode)."""
+    global _shared_cache
+    if _shared_cache is not None:
+        await _shared_cache.aclose()
+        _shared_cache = None
 
 
 # --- indexing enqueue transport (BackgroundTasks | ARQ) ---
@@ -134,19 +169,31 @@ def get_chat_session_service(session: SessionDep) -> ChatSessionService:
 ChatSessionServiceDep = Annotated[ChatSessionService, Depends(get_chat_session_service)]
 
 
-def embedding_provider_from_settings(settings: Settings) -> OpenAIEmbeddingProvider | None:
+def embedding_provider_from_settings(settings: Settings) -> EmbeddingProvider | None:
     """Build the embedding provider only when an API key is configured.
 
     `None` means BM25-only search — a user-visible degradation mode, not a
     failure (see design.md); the accompanying warning is emitted by
-    `build_search_service` so it fires once per construction.
+    `build_search_service` so it fires once per construction. When the cache
+    is effectively enabled the provider is wrapped in the caching decorator
+    (per-text vectors, covering search-query and indexing embedding alike);
+    the disabled mode returns the raw provider — byte-identical call path.
     """
-    if settings.EMBEDDING_API_KEY.get_secret_value():
-        return OpenAIEmbeddingProvider.from_settings(settings)
-    return None
+    if not settings.EMBEDDING_API_KEY.get_secret_value():
+        return None
+    provider: EmbeddingProvider = OpenAIEmbeddingProvider.from_settings(settings)
+    if settings.CACHE_ENABLED and settings.REDIS_URL:
+        provider = CachingEmbeddingProvider(
+            provider,
+            get_cache(),
+            model=settings.EMBEDDING_MODEL,
+            dim=settings.EMBEDDING_DIM,
+            ttl_seconds=settings.CACHE_EMBEDDING_TTL_S,
+        )
+    return provider
 
 
-def _build_retriever(settings: Settings, provider: OpenAIEmbeddingProvider | None) -> Retriever:
+def _build_retriever(settings: Settings, provider: EmbeddingProvider | None) -> Retriever:
     """Shared retriever wiring for every retrieval-backed service.
 
     The relevance gate thresholds flow from Settings so operators can tune
@@ -167,6 +214,8 @@ def _build_retriever(settings: Settings, provider: OpenAIEmbeddingProvider | Non
         vector_rescue_trigger_max_distance=settings.SEARCH_VECTOR_RESCUE_TRIGGER_MAX_DISTANCE,
         rrf_min_relative=settings.SEARCH_RRF_MIN_RELATIVE,
         max_query_length=settings.SEARCH_MAX_QUERY_LENGTH,
+        cache=get_cache(),
+        cache_ttl_seconds=settings.CACHE_SEARCH_TTL_S,
     )
 
 
@@ -275,6 +324,8 @@ def build_summarize_service(settings: Settings) -> SummarizeService:
         get_chat_model(settings),
         settings.CHAT_MODEL,
         session_factory=SessionFactory,
+        cache=get_cache(),
+        cache_ttl_seconds=settings.CACHE_SUMMARY_TTL_S,
     )
 
 
@@ -306,6 +357,8 @@ def build_association_service(settings: Settings) -> AssociationService:
         get_chat_model(settings),
         settings.CHAT_MODEL,
         session_factory=SessionFactory,
+        cache=get_cache(),
+        cache_ttl_seconds=settings.CACHE_ASSOCIATION_TTL_S,
     )
 
 

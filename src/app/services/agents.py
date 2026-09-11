@@ -39,6 +39,7 @@ from app.agents.summarize import (
     render_reduce_prompt,
 )
 from app.agents.writing import WritingDeps, build_writing_agent, render_writing_prompt
+from app.core.cache import Cache, cache_key
 from app.core.exceptions import (
     AppError,
     LLMProviderError,
@@ -74,9 +75,17 @@ class SummarizeService:
         model_name: str,
         *,
         session_factory: async_sessionmaker[AsyncSession],
+        cache: Cache | None = None,
+        cache_ttl_seconds: int = 0,
     ) -> None:
         self._model_name = model_name
         self._session_factory = session_factory
+        # Optional best-effort result cache (None = today's behavior): the
+        # computed summary is keyed on the document's content_hash, so an
+        # edit self-invalidates — no active deletion needed. A NULL hash
+        # (pre-backfill document) simply never caches.
+        self._cache = cache
+        self._cache_ttl_seconds = cache_ttl_seconds
         # Built once per process (the service itself is process-lifetime);
         # per-request state rides in SummarizeDeps, never on the agent.
         self._agent = build_summarize_agent(model)
@@ -95,6 +104,18 @@ class SummarizeService:
         # without a model call, and the run log needs the id bound.
         document = await self._load_document(doc_id)
         log = logger.bind(document_id=str(doc_id), run_id=uuid4().hex)
+        # The document load above is the correctness gate (404 on missing);
+        # the cache only ever short-circuits the expensive LLM run. Lookup
+        # happens before chunking so a hit skips all model passes.
+        cached = await self._cache_get(document, started=started)
+        if cached is not None:
+            log.info(
+                "cache_hit",
+                domain="summary",
+                model=self._model_name,
+                latency_ms=round((time.perf_counter() - started) * 1000, 2),
+            )
+            return cached
         deps = SummarizeDeps(title=document.title, tags=list(document.tags))
         # Front-matter-only (or whitespace-only) bodies chunk to nothing; the
         # degenerate path summarizes the RAW stored content in one pass. Raw is
@@ -155,11 +176,39 @@ class SummarizeService:
             input_tokens=input_tokens,
             output_tokens=output_tokens,
         )
-        return SummaryResult(
+        result = SummaryResult(
             document_id=doc_id,
             summary=summary,
             model=self._model_name,
             latency_ms=latency_ms,
+        )
+        await self._cache_put(document, result)
+        return result
+
+    async def _cache_get(self, document: Document, *, started: float) -> SummaryResult | None:
+        """Cached summary lookup; only successful results are ever stored.
+        `None` content_hash (pre-backfill) or no cache = always a miss."""
+        if self._cache is None or document.content_hash is None:
+            return None
+        key = cache_key("summary", document.id, document.content_hash, self._model_name)
+        raw = await self._cache.get(key)
+        if raw is None:
+            return None
+        try:
+            result = SummaryResult.model_validate_json(raw)
+        except ValueError:
+            return None  # unusable payload (e.g. pre-bump format): recompute
+        # latency_ms reflects the (cheap) cache path, not the original run.
+        return result.model_copy(
+            update={"latency_ms": round((time.perf_counter() - started) * 1000, 2)}
+        )
+
+    async def _cache_put(self, document: Document, result: SummaryResult) -> None:
+        if self._cache is None or document.content_hash is None:
+            return
+        key = cache_key("summary", document.id, document.content_hash, self._model_name)
+        await self._cache.set(
+            key, result.model_dump_json().encode("utf-8"), ttl_seconds=self._cache_ttl_seconds
         )
 
     async def _load_document(self, doc_id: UUID) -> Document:
@@ -223,9 +272,17 @@ class AssociationService:
         model_name: str,
         *,
         session_factory: async_sessionmaker[AsyncSession],
+        cache: Cache | None = None,
+        cache_ttl_seconds: int = 0,
     ) -> None:
         self._model_name = model_name
         self._session_factory = session_factory
+        # Optional best-effort result cache (None = today's behavior). The
+        # short TTL is the staleness bound: association depends on OTHER
+        # documents (tag overlap + vector neighbors), so the source's
+        # content_hash cannot capture every invalidation.
+        self._cache = cache
+        self._cache_ttl_seconds = cache_ttl_seconds
         # Built once per process (the service itself is process-lifetime);
         # per-request state rides in AssociationDeps, never on the agent.
         self._agent = build_association_agent(model)
@@ -245,6 +302,17 @@ class AssociationService:
         started = time.perf_counter()
         document, candidates, excerpt = await self._gather(doc_id)
         log = logger.bind(document_id=str(doc_id), run_id=uuid4().hex)
+        # The gather above is the correctness gate (404 on missing); the
+        # cache only ever short-circuits the expensive LLM run.
+        cached = await self._cache_get(document, started=started)
+        if cached is not None:
+            log.info(
+                "cache_hit",
+                domain="association",
+                model=self._model_name,
+                latency_ms=round((time.perf_counter() - started) * 1000, 2),
+            )
+            return cached
         if not candidates:
             # No signal to curate: skip the run (and its lifecycle events)
             # rather than logging a run that never happened.
@@ -296,11 +364,40 @@ class AssociationService:
             selected_count=len(items),
             dropped_count=dropped,
         )
-        return AssociationsResult(
+        associations_result = AssociationsResult(
             document_id=doc_id,
             associations=items,
             model=self._model_name,
             latency_ms=latency_ms,
+        )
+        await self._cache_put(document, associations_result)
+        return associations_result
+
+    async def _cache_get(self, document: Document, *, started: float) -> AssociationsResult | None:
+        """Cached association lookup; only successful non-empty results are
+        stored (the no-candidates path stays a cheap always-miss). `None`
+        content_hash (pre-backfill) or no cache = always a miss."""
+        if self._cache is None or document.content_hash is None:
+            return None
+        key = cache_key("assoc", document.id, document.content_hash, self._model_name)
+        raw = await self._cache.get(key)
+        if raw is None:
+            return None
+        try:
+            result = AssociationsResult.model_validate_json(raw)
+        except ValueError:
+            return None  # unusable payload (e.g. pre-bump format): recompute
+        # latency_ms reflects the (cheap) cache path, not the original run.
+        return result.model_copy(
+            update={"latency_ms": round((time.perf_counter() - started) * 1000, 2)}
+        )
+
+    async def _cache_put(self, document: Document, result: AssociationsResult) -> None:
+        if self._cache is None or document.content_hash is None:
+            return
+        key = cache_key("assoc", document.id, document.content_hash, self._model_name)
+        await self._cache.set(
+            key, result.model_dump_json().encode("utf-8"), ttl_seconds=self._cache_ttl_seconds
         )
 
     async def _gather(self, doc_id: UUID) -> tuple[Document, list[AssociationCandidate], str]:

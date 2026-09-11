@@ -44,6 +44,7 @@ spec on purpose.
 | [Search Guidelines](./search-guidelines.md) | ES image + analysis-ik plugin build, mapping analyzers, index lifecycle; retrieval-quality contracts (BM25 shape, gates, vector rescue) + chat query rewrite | Filled |
 | [Chat Guidelines](./chat-guidelines.md) | conversation-history contracts: token budget, long-turn guardrail, rolling summary, offline token counter | Filled |
 | [Quality Guidelines](./quality-guidelines.md) | toolchain gates, offline AI test strategy, review checklist, forbidden patterns | Filled |
+| [Cache Guidelines](./cache-guidelines.md) | opt-in Redis cache: Cache/NullCache/RedisCache primitive, key shapes, best-effort degradation, epoch invalidation | Filled |
 
 ---
 

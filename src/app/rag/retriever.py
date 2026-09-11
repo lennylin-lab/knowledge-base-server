@@ -26,6 +26,8 @@ absolute backstop.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -36,6 +38,7 @@ import structlog
 from elasticsearch import AsyncElasticsearch
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.core.cache import SEARCH_EPOCH_KEY, Cache, cache_key
 from app.core.exceptions import LLMProviderError, LLMRateLimitedError
 from app.llm.embeddings import EmbeddingProvider
 from app.repositories.document_chunk import ChunkRow, DocumentChunkRepository
@@ -286,6 +289,67 @@ class SearchOutcome:
     fused_gated: int = 0
     vector_rescued: int = 0
 
+    def to_json(self) -> bytes:
+        """Explicit JSON serialization for the result cache: frozen
+        dataclasses with UUIDs/enums never pickle into the cache — the
+        field set is pinned by a round-trip test."""
+        return json.dumps(
+            {
+                "mode": self.mode,
+                "items": [
+                    {
+                        "document_id": str(item.key.document_id),
+                        "chunk_index": item.key.chunk_index,
+                        "score": item.score,
+                        "es_rank": item.es_rank,
+                        "vector_rank": item.vector_rank,
+                        "content": item.content,
+                        "document_title": item.document_title,
+                        "document_tags": item.document_tags,
+                        "es_score": item.es_score,
+                        "vector_distance": item.vector_distance,
+                    }
+                    for item in self.items
+                ],
+                "es_hits": self.es_hits,
+                "vector_hits": self.vector_hits,
+                "es_gated": self.es_gated,
+                "vector_gated": self.vector_gated,
+                "fused_gated": self.fused_gated,
+                "vector_rescued": self.vector_rescued,
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
+
+    @classmethod
+    def from_json(cls, raw: bytes) -> SearchOutcome:
+        """Inverse of `to_json`; raises ValueError on an unusable payload
+        (the caller recomputes)."""
+        payload = json.loads(raw)
+        return cls(
+            mode=payload["mode"],
+            items=[
+                RetrievedChunk(
+                    key=ChunkKey(UUID(item["document_id"]), item["chunk_index"]),
+                    score=item["score"],
+                    es_rank=item["es_rank"],
+                    vector_rank=item["vector_rank"],
+                    content=item["content"],
+                    document_title=item["document_title"],
+                    document_tags=item["document_tags"],
+                    es_score=item["es_score"],
+                    vector_distance=item["vector_distance"],
+                )
+                for item in payload["items"]
+            ],
+            es_hits=payload["es_hits"],
+            vector_hits=payload["vector_hits"],
+            es_gated=payload["es_gated"],
+            vector_gated=payload["vector_gated"],
+            fused_gated=payload["fused_gated"],
+            vector_rescued=payload["vector_rescued"],
+        )
+
 
 @dataclass(frozen=True)
 class _VectorLeg:
@@ -318,6 +382,8 @@ class Retriever:
         vector_rescue_trigger_max_distance: float = DEFAULT_VECTOR_RESCUE_TRIGGER_MAX_DISTANCE,
         rrf_min_relative: float = DEFAULT_RRF_MIN_RELATIVE,
         max_query_length: int = DEFAULT_MAX_QUERY_LENGTH,
+        cache: Cache | None = None,
+        cache_ttl_seconds: int = 0,
     ) -> None:
         self._session_factory = session_factory
         self._es_client = es_client
@@ -331,6 +397,12 @@ class Retriever:
         self._vector_rescue_trigger_max_distance = vector_rescue_trigger_max_distance
         self._rrf_min_relative = rrf_min_relative
         self._max_query_length = max_query_length
+        # Optional best-effort result cache (None = today's behavior). The
+        # epoch rides IN the key and every document write bumps it, so a
+        # cached outcome can only be served while the corpus is unchanged —
+        # soft-deleted or edited content can never surface stale.
+        self._cache = cache
+        self._cache_ttl_seconds = cache_ttl_seconds
 
     async def retrieve(
         self, query: str, *, limit: int = 10, tag: str | None = None
@@ -355,6 +427,19 @@ class Retriever:
         the raw caller-provided length — truncation is retriever-internal.
         """
         query = truncate_query(query, max_length=self._max_query_length)
+        cache_key_search = await self._search_cache_key(query, limit=limit, tag=tag)
+        if cache_key_search is not None and self._cache is not None:
+            raw = await self._cache.get(cache_key_search)
+            outcome: SearchOutcome | None = None
+            if raw is not None:
+                try:
+                    outcome = SearchOutcome.from_json(raw)
+                except (ValueError, KeyError, TypeError):
+                    outcome = None  # unusable payload (e.g. pre-bump format)
+            if outcome is not None:
+                logger.info("cache_hit", domain="search")
+                return outcome
+            logger.info("cache_miss", domain="search")
         body = bm25_chunk_query(
             query,
             size=CANDIDATE_POOL,
@@ -429,7 +514,7 @@ class Retriever:
                 )
             )
         mode: SearchMode = "hybrid" if vector_leg.ran else "bm25"
-        return SearchOutcome(
+        outcome = SearchOutcome(
             mode=mode,
             items=items,
             es_hits=len(es_hits),
@@ -439,6 +524,29 @@ class Retriever:
             fused_gated=len(fused) - len(floored),
             vector_rescued=vector_rescued,
         )
+        if cache_key_search is not None and self._cache is not None:
+            await self._cache.set(
+                cache_key_search,
+                outcome.to_json(),
+                ttl_seconds=self._cache_ttl_seconds,
+            )
+        return outcome
+
+    async def _search_cache_key(
+        self, truncated_query: str, *, limit: int, tag: str | None
+    ) -> str | None:
+        """Cache key built AFTER `truncate_query` (the key must match what the
+        legs would see). The epoch comes from the same cache handle; a cache
+        fault or caching-off returns `None` (compute path, no caching)."""
+        if self._cache is None:
+            return None
+        epoch_raw = await self._cache.get(SEARCH_EPOCH_KEY)
+        try:
+            epoch = int(epoch_raw) if epoch_raw is not None else 0
+        except ValueError:
+            epoch = 0
+        digest = hashlib.sha256(truncated_query.encode("utf-8")).hexdigest()
+        return cache_key("search", epoch, digest, limit, tag if tag is not None else "-")
 
     async def _vector_leg(self, query: str, *, tag: str | None) -> _VectorLeg:
         """Embed the query and search pgvector, hydrated against live documents.

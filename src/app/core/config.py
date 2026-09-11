@@ -94,6 +94,27 @@ class Settings(BaseSettings):
     # paths resolve against the working directory. Missing file = no servers.
     MCP_CONFIG_PATH: str = "mcp.json"
 
+    # --- cache (opt-in, best-effort Redis) ---
+    # Master switch for the cache layer (core/cache.py). Effective enable =
+    # CACHE_ENABLED AND non-empty REDIS_URL, so the default (empty REDIS_URL)
+    # stays a no-op NullCache — byte-identical to pre-cache behavior, zero
+    # Redis connections. A deployment with Redis configured for the ARQ queue
+    # can still turn caching off here without unsetting KB_REDIS_URL.
+    CACHE_ENABLED: bool = True
+    # Embedding vector cache (per text): deterministic outputs, so a long TTL
+    # is safe. 0 = no expiry (the key version bump / eviction clears it).
+    CACHE_EMBEDDING_TTL_S: int = 2592000  # 30 days
+    # Summarize result cache: keyed on content_hash (self-invalidating on
+    # edit), so no expiry is needed. 0 = no expiry.
+    CACHE_SUMMARY_TTL_S: int = 0
+    # Association result cache: depends on OTHER documents (a neighbor may
+    # change without touching this one's hash), so a short TTL is the
+    # staleness bound.
+    CACHE_ASSOCIATION_TTL_S: int = 600  # 10 minutes
+    # Search outcome cache: invalidated by the global search epoch (bumped on
+    # every document write); the TTL is a secondary backstop.
+    CACHE_SEARCH_TTL_S: int = 60
+
     # --- indexing queue (ARQ + Redis) ---
     # Empty (default) = indexing runs as in-process background tasks after
     # each write; local development stays zero-dependency. Set to the compose

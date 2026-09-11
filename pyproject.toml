@@ -19,6 +19,7 @@ dependencies = [
     "mcp>=2.0",
     "openai>=1.40",
     "pgvector>=0.3",
+    "redis>=5.0",
     "pydantic-ai-slim[openai]>=1.0",
     "pydantic-settings>=2.4",
     "python-frontmatter>=1.1",
@@ -59,7 +60,7 @@ plugins = []
 
 # No stubs exist for these (see quality-guidelines.md); do not hunt for stubs.
 [[tool.mypy.overrides]]
-module = ["frontmatter", "yaml"]
+module = ["frontmatter", "yaml", "redis"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
@@ -70,7 +71,7 @@ addopts = "-m 'not live_llm and not live_mcp and not live_redis'"
 markers = [
     "live_llm: tests that call a real LLM provider (excluded from the default run)",
     "live_mcp: tests that connect to real MCP servers from mcp.json (excluded from the default run)",
-    "live_redis: tests that connect to a real Redis for the ARQ queue round trip (excluded from the default run)",
+    "live_redis: tests that connect to a real Redis for the ARQ queue or cache round trips (excluded from the default run)",
     "db: tests that need the disposable PostgreSQL test database (auto-skip when PG is unreachable)",
     "es: tests that need the local Elasticsearch node (auto-skip when ES is unreachable)",
 ]

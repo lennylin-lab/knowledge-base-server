@@ -10,6 +10,7 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, Literal
 from uuid import UUID
 
+import structlog
 from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
@@ -49,6 +50,8 @@ def vector_at_distance(base: list[float], other: list[float], distance: float) -
     sin = math.sqrt(max(0.0, 1.0 - cos * cos))
     return [cos * b + sin * o for b, o in zip(base, other, strict=True)]
 
+
+logger = structlog.get_logger(__name__)
 
 # Retriever constructor kwargs turning every relevance gate off (the
 # pre-gates behavior) for tests that exercise legacy retrieval semantics
@@ -519,3 +522,52 @@ def hermetic_settings(**overrides: object) -> Settings:
     from app.core.config import Settings
 
     return Settings(_env_file=None, **overrides)  # type: ignore[arg-type]
+
+
+class FakeCache:
+    """In-memory double for the `Cache` Protocol (offline cache tests).
+
+    Stores raw bytes like `RedisCache` and honors the best-effort contract:
+    `fail` injects a fault ("get" / "set" / "incr" / "all") that DEGRADES
+    exactly like `RedisCache` — get misses, set drops, incr returns the
+    sentinel — after logging a `cache_error` warning (error class only).
+    The raising-client degradation of `RedisCache` itself is tested with
+    `FakeRedisClient` in test_cache.py.
+    """
+
+    def __init__(self, *, fail: str | None = None) -> None:
+        self.store: dict[str, bytes] = {}
+        self.fail = fail
+        self.errors: list[str] = []
+        self.get_calls = 0
+        self.set_calls = 0
+        self.incr_calls = 0
+
+    def _fault(self, op: str) -> bool:
+        if self.fail not in (op, "all"):
+            return False
+        self.errors.append(op)
+        logger.warning("cache_error", domain="fake", op=op, error_class="ConnectionError")
+        return True
+
+    async def get(self, key: str) -> bytes | None:
+        self.get_calls += 1
+        if self._fault("get"):
+            return None
+        return self.store.get(key)
+
+    async def set(self, key: str, value: bytes, *, ttl_seconds: int) -> None:
+        self.set_calls += 1
+        if self._fault("set"):
+            return
+        self.store[key] = value
+
+    async def incr(self, key: str) -> int:
+        self.incr_calls += 1
+        if self._fault("incr"):
+            return -1
+        self.store[key] = str(int(self.store.get(key, b"0")) + 1).encode()
+        return int(self.store[key])
+
+    async def aclose(self) -> None:
+        return None

@@ -6,13 +6,16 @@ callers pass already-sized batches and get vectors back in input order.
 
 from __future__ import annotations
 
+import hashlib
 import time
+from array import array
 from typing import Protocol, runtime_checkable
 
 import openai
 import structlog
 from openai import AsyncOpenAI, Omit
 
+from app.core.cache import Cache, cache_key
 from app.core.config import Settings
 from app.core.exceptions import LLMProviderError, LLMRateLimitedError
 
@@ -110,3 +113,79 @@ class OpenAIEmbeddingProvider:
     async def aclose(self) -> None:
         """Close the underlying SDK client; owned by whoever constructed it."""
         await self._client.close()
+
+
+def _encode_vector(vector: list[float]) -> bytes:
+    """float64 little-endian bytes: round-trips the provider's Python floats
+    bit-exactly, so a cache hit returns the exact vector a miss would (a
+    lossy encoding would change pgvector distances depending on cache state)."""
+    return array("d", vector).tobytes()
+
+
+def _decode_vector(raw: bytes) -> list[float]:
+    """Inverse of `_encode_vector`."""
+    return list(array("d", raw))
+
+
+class CachingEmbeddingProvider:
+    """`EmbeddingProvider` decorator: per-text vector cache over any provider.
+
+    The single choke point for both search-query and indexing-time embedding.
+    Each text of a batch is checked individually; only the misses reach the
+    wrapped provider, and vectors are reassembled in input order (a fully
+    cached batch makes no provider call). Cache ops are best-effort by the
+    `Cache` contract — a Redis fault here is just a recompute.
+    """
+
+    def __init__(
+        self,
+        inner: EmbeddingProvider,
+        cache: Cache,
+        *,
+        model: str,
+        dim: int,
+        ttl_seconds: int,
+    ) -> None:
+        self._inner = inner
+        self._cache = cache
+        self._model = model
+        self._dim = dim
+        self._ttl_seconds = ttl_seconds
+
+    def _key(self, text: str) -> str:
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        # Model and dim are in the key: changing either changes the output
+        # (provider-config isolation lets the embedding model differ from the
+        # chat model).
+        return cache_key("emb", self._model, self._dim, digest)
+
+    async def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        """Cached batch embed: hits from the cache, misses from the provider."""
+        if not texts:
+            return []
+        keys = [self._key(text) for text in texts]
+        results: list[list[float]] = []
+        misses: list[int] = []
+        for index, key in enumerate(keys):
+            raw = await self._cache.get(key)
+            if raw is not None and len(raw) == self._dim * 8:
+                results.append(_decode_vector(raw))
+            else:
+                results.append([])
+                misses.append(index)
+        hits = len(texts) - len(misses)
+        if hits:
+            logger.info("cache_hit", domain="embedding", count=hits)
+        if misses:
+            logger.info("cache_miss", domain="embedding", count=len(misses))
+            vectors = await self._inner.embed_texts([texts[i] for i in misses])
+            if len(vectors) != len(misses):
+                # Surface the wrapped provider's contract violation as-is; the
+                # provider itself already validates its own outputs.
+                raise LLMProviderError("Embedding provider returned a mismatched number of vectors")
+            for index, vector in zip(misses, vectors, strict=True):
+                results[index] = vector
+                await self._cache.set(
+                    keys[index], _encode_vector(vector), ttl_seconds=self._ttl_seconds
+                )
+        return results
