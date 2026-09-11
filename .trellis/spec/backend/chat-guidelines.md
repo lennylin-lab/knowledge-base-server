@@ -260,4 +260,102 @@ if turn.assistant.id > summarized_through_id:
 
 ---
 
+## Scenario: Carried sources ground follow-up turns
+
+### 1. Scope / Trigger
+
+- Trigger: cross-layer contract change — schema addition on
+  `chat_messages` (migration `0008`: nullable JSONB `sources`), a
+  `SourceCollector` accessor, prompt rule change in `qa.md`, and SSE
+  batch re-emission in `services/chat.py::ask` (2026-09-11, task
+  `09-11-sources-carry-forward`). Any change to source persistence,
+  SSE batch order, prompt block numbering, or `qa.md` citation rules
+  must re-verify this scenario.
+
+### 2. Signatures
+
+- `models/chat.py`: `ChatMessage.sources: Mapped[list[dict] | None]` —
+  nullable JSONB, no default; derived state written only by
+  `services/chat.py::_persist_assistant_message` in the answer txn.
+- `alembic/versions/0008_chat_message_sources.py` — add/drop nullable
+  JSONB (revises 0007).
+- `agents/qa.py::SourceCollector.hits -> list[SearchHit]` — read-only
+  accessor flattening batches in retrieval order; NO dedup or
+  renumbering (replay must preserve the original `[1..N]` mapping).
+- `services/chat.py::carried_prefix(hits) -> list[ModelRequest/Response]`
+  — labeled synthetic pair (`CARRIED_SOURCES_LABEL`) carrying the prior
+  run's blocks numbered `[1..k]`; mirrors the `summary_prefix` pattern.
+- `ChatService(..., *, carry_sources_forward: bool = False)` — gated in
+  deps by `settings.CHAT_SOURCES_CARRY_ENABLED` (env
+  `KB_CHAT_SOURCES_CARRY_ENABLED`).
+
+### 3. Contracts
+
+- Persistence: the full `SearchHit` list (`model_dump(mode="json")`) in
+  retrieval order, on the assistant message only, in the same
+  transaction; empty/disabled → NULL. User messages and error paths
+  persist nothing.
+- SSE: on a follow-up turn whose newest assistant row carries sources,
+  the carried batch is the FIRST `SourcesEvent`, emitted immediately
+  after `RunStartedEvent` and before rewrite/fresh batches; the
+  collector is seeded (`total_hits`) so fresh blocks number `[k+1..]`.
+  Prompt numbering == client numbering because clients concatenate
+  batches. Wire shapes (`SearchHit`/`SourcesEvent`) unchanged.
+- Prompt: `qa.md` rule 7 carve-out — carried-source heading blocks are
+  legitimate citation targets alongside `search_knowledge` returns.
+- Assembly order: summary prefix → carried pair → in-window turns; the
+  carried pair is NOT counted against the token budget (same class as
+  `summary_prefix`/tool results).
+- Carry source: the already-read newest assistant row — no new I/O;
+  NULL sources or stateless mode carry nothing.
+- Logs: `agent_run_finished` gains `carried_sources` (count only, flag
+  on). NEVER source/question/summary text.
+- Disabled path: constructor default `False`; no write, no batch, no
+  preamble, no log key — byte-identical event sequence.
+
+### 4. Validation & Error Matrix
+
+- Carried emission is prelude-local computation inside the existing
+  streaming try; no new raise surface. Prior-run persist failure
+  (NULL sources) degrades to "carry nothing", never an error.
+
+### 5. Good/Base/Bad Cases
+
+- Good: follow-up "详细讲讲引用的那个方案" → model reads carried blocks
+  and cites `[n]` correctly without re-search.
+- Base: first turn of a session → nothing carried; identical to old
+  behavior.
+- Bad: dedup/filtering carried hits (breaks `[1..N]` replay mapping —
+  rejected); persisting sources on user messages; logging source text;
+  numbering fresh blocks from 1 while the client already saw `[1..k]`.
+
+### 6. Tests Required
+
+- `tests/test_chat_service.py` (DB-marked): persisted order == retrieval
+  order; carried batch first after RunStarted; collector seeding yields
+  fresh `[3]` after two carried hits; labeled pair `[1..k]` present in
+  recorded histories with exact content/order replay; disabled path pins
+  byte-identical events + NULL write + no log key; NULL-sources prior
+  turn and stateless carry nothing; no source/question text in logs;
+  Settings default pinned.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```python
+# Renumbering/dedup on replay: client numbering and prompt numbering diverge.
+hits = dedupe_by_url(previous.sources)
+```
+
+#### Correct
+
+```python
+# Replay verbatim; seed total_hits so fresh numbering continues after k.
+hits = previous.sources
+collector.seed(hits)  # fresh blocks number [k+1..]
+```
+
+---
+
 **Language**: All documentation is written in **English**.
