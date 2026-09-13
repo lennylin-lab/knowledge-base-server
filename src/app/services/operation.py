@@ -1,0 +1,382 @@
+"""Agent-operation business logic: drafts, resume, and the atomic apply.
+
+The service owns every transition of `OperationState` and the single
+transaction that publishes a draft: version check -> document write ->
+revision row -> `applied`, committed once, indexing enqueued only after
+commit. Stale versions and duplicate applies never mutate anything (the
+duplicate reads back the original revision instead of writing a second one).
+Drafts live only on `agent_operations` — nothing here touches
+`chat_messages`, so agent work can never leak into chat history.
+"""
+
+from __future__ import annotations
+
+from uuid import UUID
+
+import structlog
+from pydantic_ai import Agent
+from pydantic_ai.models import Model
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.agents.qa import SourceCollector
+from app.agents.writing import (
+    DraftOutput,
+    WritingDeps,
+    build_draft_agent,
+    render_writing_prompt,
+)
+from app.core.exceptions import (
+    ChatUnavailableError,
+    ConflictError,
+    NotFoundError,
+)
+from app.models.document import Document, IndexStatus
+from app.models.operation import AgentOperation, DocumentRevision, OperationState
+from app.rag.retriever import Retriever
+from app.repositories.document import DocumentRepository
+from app.repositories.operation import AgentOperationRepository, DocumentRevisionRepository
+from app.schemas.operation import (
+    ApplyRequest,
+    ApplyResult,
+    DocumentInResult,
+    DraftContent,
+    OperationCreate,
+    OperationReadDetail,
+    OperationTransition,
+    RevisionRead,
+)
+from app.services.agents import _as_app_error
+from app.services.document import ReindexEnqueuer, _content_hash, _parse_front_matter
+
+logger = structlog.get_logger(__name__)
+
+_APPLICABLE_STATES = (OperationState.COMPLETED, OperationState.INTERRUPTED)
+
+
+class AgentOperationService:
+    """Orchestrates operation creation, inspection, resume, and apply."""
+
+    def __init__(
+        self,
+        session: AsyncSession,
+        *,
+        enqueuer: ReindexEnqueuer | None = None,
+        model: Model | None = None,
+        retriever: Retriever | None = None,
+    ) -> None:
+        self._session = session
+        self._ops = AgentOperationRepository(session)
+        self._revisions = DocumentRevisionRepository(session)
+        self._documents = DocumentRepository(session)
+        self._enqueuer = enqueuer
+        # Optional LLM wiring for the structured draft run (`draft_document`);
+        # None = create/inspect/apply still work, drafting 503s at call time.
+        # The agent is built once per service alongside its model wiring;
+        # per-run state rides in WritingDeps, never on the agent.
+        self._agent: Agent[WritingDeps, DraftOutput] | None = (
+            build_draft_agent(model) if model is not None and retriever is not None else None
+        )
+        # Kept for the per-run WritingDeps construction in `draft_document`.
+        self._retriever = retriever
+
+    # --- create / inspect / resume ---
+
+    async def create_operation(self, payload: OperationCreate) -> OperationReadDetail:
+        """Persist one completed draft operation (explicit submission path).
+
+        Idempotent on `idempotency_key`: a retry resolves to the original
+        operation instead of duplicating a draft. The draft's front matter is
+        validated here — a submission that could never apply is rejected at
+        creation, not at apply time.
+        """
+        if payload.idempotency_key is not None:
+            existing = await self._ops.get_by_idempotency_key(payload.idempotency_key)
+            if existing is not None:
+                logger.info(
+                    "operation_idempotent_create",
+                    operation_id=str(existing.id),
+                    idempotency_key=payload.idempotency_key,
+                )
+                return OperationReadDetail.model_validate(existing)
+
+        document = await self._load_live_document(payload.document_id)
+        _parse_front_matter(payload.draft.content, payload.draft.title)  # validate early
+        operation = AgentOperation(
+            document_id=document.id,
+            base_document_version=payload.base_document_version,
+            state=OperationState.COMPLETED,
+            draft={"content": payload.draft.content, "title": payload.draft.title},
+            idempotency_key=payload.idempotency_key,
+        )
+        try:
+            operation = await self._ops.create(operation)
+            await self._session.commit()
+        except IntegrityError:
+            # Lost a create race on the same idempotency key: return the
+            # winner instead of a 500 (the unique index is the arbiter).
+            await self._session.rollback()
+            if payload.idempotency_key is None:
+                raise
+            existing = await self._ops.get_by_idempotency_key(payload.idempotency_key)
+            if existing is None:
+                raise
+            return OperationReadDetail.model_validate(existing)
+        logger.info(
+            "operation_created",
+            operation_id=str(operation.id),
+            document_id=str(document.id),
+            base_version=payload.base_document_version.isoformat(),
+        )
+        return OperationReadDetail.model_validate(operation)
+
+    async def get_operation(self, operation_id: UUID) -> OperationReadDetail:
+        """Inspect one operation, draft payload included."""
+        operation = await self._get_or_raise(operation_id)
+        return OperationReadDetail.model_validate(operation)
+
+    async def list_operations(self, document_id: UUID) -> list[OperationReadDetail]:
+        """One document's operations, newest first (explicit audit view)."""
+        await self._load_live_document(document_id)
+        rows = await self._ops.list_for_document(document_id)
+        return [OperationReadDetail.model_validate(row) for row in rows]
+
+    async def resume_operation(
+        self, operation_id: UUID, payload: OperationTransition
+    ) -> OperationReadDetail:
+        """Explicitly resume an interrupted (or failed) operation.
+
+        Marks it completed — optionally with an amended draft — so it becomes
+        applicable. Running and already-applied operations cannot resume.
+        """
+        operation = await self._get_or_raise(operation_id)
+        if operation.state not in (OperationState.INTERRUPTED, OperationState.FAILED):
+            raise ConflictError(
+                f"Operation {operation_id} cannot be resumed from state '{operation.state.value}'",
+                details={"state": operation.state.value},
+            )
+        if payload.draft is not None:
+            _parse_front_matter(payload.draft.content, payload.draft.title)
+            operation.draft = {"content": payload.draft.content, "title": payload.draft.title}
+        operation.state = OperationState.COMPLETED
+        operation.error = None
+        operation = await self._ops.update(operation)
+        await self._session.commit()
+        logger.info("operation_resumed", operation_id=str(operation.id))
+        return OperationReadDetail.model_validate(operation)
+
+    # --- apply (atomic, optimistic concurrency, idempotent) ---
+
+    async def apply_operation(self, operation_id: UUID, payload: ApplyRequest) -> ApplyResult:
+        """Publish a draft as one document revision — the only publish path.
+
+        Guards, in order, all before any mutation: the operation must be
+        completed or interrupted (a running/failed draft cannot publish); an
+        already-applied operation returns its original revision (duplicate
+        apply is idempotent, never a second revision); the live document's
+        `updated_at` must equal the draft's base version (stale apply is
+        rejected with a 409 and zero writes). The write itself is ONE
+        transaction: document update, revision row, and `applied` state
+        commit together; indexing is enqueued only after that commit, so an
+        enqueue failure leaves durable content `pending` for the retry sweep.
+        """
+        operation = await self._get_or_raise(operation_id)
+
+        if operation.state is OperationState.APPLIED:
+            return await self._applied_result(operation)
+
+        if operation.state not in _APPLICABLE_STATES:
+            raise ConflictError(
+                f"Operation {operation_id} is '{operation.state.value}' and cannot be applied",
+                details={"state": operation.state.value},
+            )
+        if operation.draft is None:
+            raise ConflictError(
+                f"Operation {operation_id} has no draft to apply",
+                details={"state": operation.state.value},
+            )
+        if (
+            payload.expected_base_document_version is not None
+            and payload.expected_base_document_version != operation.base_document_version
+        ):
+            raise ConflictError(
+                "Expected base version does not match the operation's recorded base",
+                details={
+                    "expected": payload.expected_base_document_version.isoformat(),
+                    "base": operation.base_document_version.isoformat()
+                    if operation.base_document_version
+                    else None,
+                },
+            )
+
+        document = await self._load_live_document(operation.document_id)
+        if (
+            operation.base_document_version is None
+            or document.updated_at != operation.base_document_version
+        ):
+            # Stale apply: the document moved on after the draft was made.
+            # Nothing has been written at this point — reject and mutate none.
+            logger.warning(
+                "operation_apply_stale",
+                operation_id=str(operation.id),
+                document_id=str(document.id),
+                base_version=operation.base_document_version.isoformat()
+                if operation.base_document_version
+                else None,
+                current_version=document.updated_at.isoformat(),
+            )
+            raise ConflictError(
+                "Document changed since the draft was created; re-draft or resume the operation",
+                details={
+                    "base_version": operation.base_document_version.isoformat()
+                    if operation.base_document_version
+                    else None,
+                    "current_version": document.updated_at.isoformat(),
+                },
+            )
+
+        draft = DraftContent.model_validate(operation.draft)
+        title, tags = _parse_front_matter(draft.content, draft.title)
+        document.content = draft.content
+        document.title = title
+        document.tags = tags
+        document.content_hash = _content_hash(draft.content)
+        document.index_status = IndexStatus.PENDING
+        await self._documents.update(document)
+
+        revision = await self._revisions.create(
+            DocumentRevision(
+                document_id=document.id,
+                operation_id=operation.id,
+                title=title,
+                content=draft.content,
+                tags=tags,
+            )
+        )
+        operation.state = OperationState.APPLIED
+        operation.result = {"revision_id": str(revision.id)}
+        operation = await self._ops.update(operation)
+
+        await self._session.commit()
+        logger.info(
+            "operation_applied",
+            operation_id=str(operation.id),
+            document_id=str(document.id),
+            revision_id=str(revision.id),
+            base_version=operation.base_document_version.isoformat()
+            if operation.base_document_version
+            else None,
+        )
+        # After commit only — a rolled-back apply must never be indexed. The
+        # document stays `pending` if enqueueing fails; the CLI reindex sweep
+        # (or a re-save) finishes it — durable content, never lost.
+        if self._enqueuer is not None:
+            self._enqueuer(document.id, document.updated_at)
+        return ApplyResult(
+            operation=OperationReadDetail.model_validate(operation),
+            revision=RevisionRead.model_validate(revision),
+            document=DocumentInResult.model_validate(document),
+        )
+
+    async def _applied_result(self, operation: AgentOperation) -> ApplyResult:
+        """Idempotent repeat of an already-applied operation: read back the
+        original revision; no second revision is ever created."""
+        revision_id = operation.result.get("revision_id") if operation.result else None
+        revision = (
+            await self._revisions.get_by_id(UUID(str(revision_id)))
+            if revision_id is not None
+            else None
+        )
+        if revision is None:
+            revision = await self._revisions.get_by_operation_id(operation.id)
+        if revision is None:
+            raise ConflictError(
+                f"Operation {operation.id} is applied but has no revision record",
+                details={"state": operation.state.value},
+            )
+        document = await self._load_live_document(operation.document_id)
+        logger.info("operation_apply_idempotent", operation_id=str(operation.id))
+        return ApplyResult(
+            operation=OperationReadDetail.model_validate(operation),
+            revision=RevisionRead.model_validate(revision),
+            document=DocumentInResult.model_validate(document),
+        )
+
+    # --- structured draft run (writing agent wiring) ---
+
+    async def draft_document(
+        self, document_id: UUID, instruction: str | None, *, limit: int = 8
+    ) -> OperationReadDetail:
+        """Run the writing agent's structured output against a live document
+        and persist the result as a draft operation.
+
+        Lifecycle: `running` row committed BEFORE the model call (so a lost
+        process leaves an inspectable, resumable `running`/`interrupted`
+        record, never a silent partial draft in chat) -> `completed` with the
+        structured draft on success -> `failed` with error details on
+        provider failure, then the mapped AppError re-raises.
+        """
+        if self._agent is None:
+            raise ChatUnavailableError(
+                "Drafting is not configured: set CHAT_API_KEY to enable it",
+            )
+        document = await self._load_live_document(document_id)
+        operation = await self._ops.create(
+            AgentOperation(
+                document_id=document.id,
+                base_document_version=document.updated_at,
+                state=OperationState.RUNNING,
+            )
+        )
+        await self._session.commit()
+        log = logger.bind(operation_id=str(operation.id), document_id=str(document.id))
+        log.info("operation_draft_started")
+
+        collector = SourceCollector()
+        assert self._retriever is not None  # guaranteed by the _agent wiring
+        deps = WritingDeps(retriever=self._retriever, limit=limit, collector=collector)
+        try:
+            result = await self._agent.run(
+                render_writing_prompt(document.content, instruction), deps=deps
+            )
+        except Exception as exc:
+            failure = _as_app_error(exc)
+            operation.state = OperationState.FAILED
+            operation.error = {"error_class": type(exc).__name__}
+            await self._ops.update(operation)
+            await self._session.commit()
+            log.exception(
+                "operation_draft_failed",
+                outcome=failure.code,
+                error_class=type(exc).__name__,
+            )
+            raise failure from exc
+
+        operation.draft = _draft_payload(result.output)
+        operation.state = OperationState.COMPLETED
+        operation = await self._ops.update(operation)
+        await self._session.commit()
+        log.info("operation_draft_finished", tool_calls=collector.tool_calls)
+        return OperationReadDetail.model_validate(operation)
+
+    # --- internals ---
+
+    async def _load_live_document(self, document_id: UUID | None) -> Document:
+        """Fetch one live document; soft-deleted counts as missing."""
+        if document_id is None:
+            raise NotFoundError("Operation has no target document")
+        document = await self._documents.get_by_id(document_id)
+        if document is None:
+            raise NotFoundError(f"Document {document_id} not found")
+        return document
+
+    async def _get_or_raise(self, operation_id: UUID) -> AgentOperation:
+        operation = await self._ops.get_by_id(operation_id)
+        if operation is None:
+            raise NotFoundError(f"Operation {operation_id} not found")
+        return operation
+
+
+def _draft_payload(output: DraftOutput) -> dict[str, object]:
+    """Structured agent output -> the operation's JSONB draft shape."""
+    return {"content": output.content, "title": output.title}

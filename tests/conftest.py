@@ -43,7 +43,7 @@ from sqlalchemy.ext.asyncio import (
 # Side-effect import: every table (documents, chunks, chat) registers on
 # Base.metadata, so schema creation and truncation always see the full set.
 import app.models
-from app.api.deps import SessionDep, get_document_service
+from app.api.deps import SessionDep, get_agent_operation_service, get_document_service
 from app.core.database import Base, get_db
 from app.llm.embeddings import EmbeddingProvider
 from app.main import create_app
@@ -51,6 +51,7 @@ from app.models.document import IndexStatus
 from app.rag.indexer import IndexingPipeline
 from app.schemas.document import DocumentCreate
 from app.services.document import DocumentService
+from app.services.operation import AgentOperationService
 from fakes import FakeEmbeddingProvider
 
 # Seeding callback: (provider, markdown content) -> created document id.
@@ -326,8 +327,15 @@ async def db_client(app: FastAPI, db_engine: AsyncEngine) -> AsyncIterator[Async
     async def override_get_document_service(session: SessionDep) -> DocumentService:
         return DocumentService(session)
 
+    async def override_get_operation_service(session: SessionDep) -> AgentOperationService:
+        # No enqueuer and no LLM wiring: contract tests must not fire
+        # background indexing or construct a model (same policy as the
+        # document-service override above).
+        return AgentOperationService(session)
+
     app.dependency_overrides[get_db] = override_get_db
     app.dependency_overrides[get_document_service] = override_get_document_service
+    app.dependency_overrides[get_agent_operation_service] = override_get_operation_service
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
         yield ac

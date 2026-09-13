@@ -17,6 +17,7 @@ def append_to(item, target=[]):
     target.append(item)
     return target
 
+
 # 正确写法
 def append_to(item, target=None):
     if target is None:
@@ -38,9 +39,9 @@ def append_to(item, target=None):
 import copy
 
 a = [[1, 2], [3, 4]]
-b = a                  # 引用,完全同一对象
-c = a[:]               # 浅拷贝:外层新建,内层元素仍是引用
-d = copy.deepcopy(a)   # 深拷贝:递归复制所有层级
+b = a  # 引用,完全同一对象
+c = a[:]  # 浅拷贝:外层新建,内层元素仍是引用
+d = copy.deepcopy(a)  # 深拷贝:递归复制所有层级
 ```
 
 ## 生成器与迭代器
@@ -52,6 +53,7 @@ def read_large(path):
     with open(path, encoding="utf-8") as f:
         for line in f:
             yield line.strip()
+
 
 lines = read_large("huge.log")
 first_error = next((l for l in lines if "ERROR" in l), None)
@@ -65,6 +67,7 @@ first_error = next((l for l in lines if "ERROR" in l), None)
 import functools
 import time
 
+
 def timed(func):
     @functools.wraps(func)  # 保留原函数 __name__/__doc__
     def wrapper(*args, **kwargs):
@@ -72,6 +75,7 @@ def timed(func):
         result = func(*args, **kwargs)
         print(f"{func.__name__} cost {time.perf_counter() - start:.3f}s")
         return result
+
     return wrapper
 ```
 
@@ -87,6 +91,7 @@ def timed(func):
 
 ```python
 from dataclasses import dataclass, field
+
 
 @dataclass(frozen=True, slots=True)
 class Point:
@@ -108,12 +113,15 @@ class Point:
 ```python
 import pytest
 
+
 @pytest.fixture
 def sample():
     return [1, 2, 3]
 
+
 def test_sum(sample):
     assert sum(sample) == 6
+
 
 @pytest.mark.parametrize("n, expected", [(1, 1), (2, 4), (3, 9)])
 def test_square(n, expected):

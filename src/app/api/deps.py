@@ -29,6 +29,7 @@ from app.search.es import get_shared_es_client
 from app.services.agents import AssociationService, SummarizeService, WritingService
 from app.services.chat import ChatService
 from app.services.document import DocumentService, ReindexEnqueuer
+from app.services.operation import AgentOperationService
 from app.services.search import SearchService
 from app.services.session import ChatSessionService
 
@@ -411,3 +412,31 @@ def get_writing_service() -> WritingService:
 
 
 WritingServiceDep = Annotated[WritingService, Depends(get_writing_service)]
+
+
+def get_agent_operation_service(
+    session: SessionDep, background_tasks: BackgroundTasks
+) -> AgentOperationService:
+    """One service per request, sharing the request's session.
+
+    Unlike chat/summarize/associations there is NO constructor gate: creating,
+    inspecting, resuming, and applying operations are non-LLM workflows that
+    must work with or without an API key. Only the structured draft run needs
+    the model/retriever, and that is wired here when CHAT_API_KEY is present —
+    an unconfigured deployment keeps every non-LLM operation endpoint and 503s
+    only `POST /operations/draft` at call time (`ChatUnavailableError`).
+    """
+    settings = get_settings()
+    model = get_chat_model(settings) if settings.CHAT_API_KEY.get_secret_value() else None
+    retriever = (
+        _build_retriever(settings, embedding_provider_from_settings(settings)) if model else None
+    )
+    return AgentOperationService(
+        session,
+        enqueuer=make_index_enqueuer(background_tasks),
+        model=model,
+        retriever=retriever,
+    )
+
+
+AgentOperationServiceDep = Annotated[AgentOperationService, Depends(get_agent_operation_service)]

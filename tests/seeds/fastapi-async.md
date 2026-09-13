@@ -19,9 +19,11 @@ from pydantic import BaseModel, Field
 
 app = FastAPI(title="Knowledge Base API")
 
+
 class DocumentCreate(BaseModel):
     title: str | None = Field(default=None, max_length=200)
     content: str = Field(min_length=1)
+
 
 @app.post("/documents", status_code=status.HTTP_201_CREATED)
 async def create_document(payload: DocumentCreate) -> dict:
@@ -40,13 +42,16 @@ async def create_document(payload: DocumentCreate) -> dict:
 from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
+
 async def get_db() -> AsyncIterator[AsyncSession]:
     async with SessionLocal() as session:
         yield session
 
-async def current_user(token: str = Depends(oauth2_scheme),
-                       db: AsyncSession = Depends(get_db)) -> User:
-    ...
+
+async def current_user(
+    token: str = Depends(oauth2_scheme), db: AsyncSession = Depends(get_db)
+) -> User: ...
+
 
 @app.get("/me")
 async def me(user: User = Depends(current_user)):
@@ -68,13 +73,16 @@ async def me(user: User = Depends(current_user)):
 ```python
 from contextlib import asynccontextmanager
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    app.state.es = AsyncElasticsearch()   # 启动时初始化
+    app.state.es = AsyncElasticsearch()  # 启动时初始化
     yield
-    await app.state.es.close()            # 优雅关闭
+    await app.state.es.close()  # 优雅关闭
+
 
 app = FastAPI(lifespan=lifespan)
+
 
 @app.middleware("http")
 async def add_trace_id(request, call_next):

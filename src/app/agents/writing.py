@@ -19,6 +19,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+from pydantic import BaseModel
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.models import Model
 from pydantic_ai.tools import Tool
@@ -103,4 +104,35 @@ def build_writing_agent(
         deps_type=WritingDeps,
         instructions=_WRITING_INSTRUCTIONS,
         tools=[search_knowledge, *extra_tools],
+    )
+
+
+class DraftOutput(BaseModel):
+    """Structured draft produced by the writing agent's output mode.
+
+    `content` is full proposed document markdown (front matter included);
+    `title` is optional and only consulted when the content's front matter
+    carries no title of its own. Lives in `agents/` (not schemas/) because it
+    is the agent's declared output_type — the same layer as the agent itself.
+    """
+
+    content: str
+    title: str | None = None
+
+
+def build_draft_agent(model: Model) -> Agent[WritingDeps, DraftOutput]:
+    """Construct the structured-output draft agent around an injected model.
+
+    Same toolset and instructions as `build_writing_agent` (retrieval stays
+    optional), but the run returns a validated `DraftOutput` instead of free
+    text — the structured shape the operation service persists as a draft.
+    Tests pass a `FunctionModel` with a matching output schema; production
+    passes the Settings-built model from `llm/models.py`.
+    """
+    return Agent(
+        model,
+        deps_type=WritingDeps,
+        instructions=_WRITING_INSTRUCTIONS,
+        tools=[search_knowledge],
+        output_type=DraftOutput,
     )
