@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "SQLAlchemy and Alembic persistence conventions"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Domain errors and API envelopes"}
