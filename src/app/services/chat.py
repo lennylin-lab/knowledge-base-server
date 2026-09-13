@@ -79,12 +79,15 @@ from app.schemas.chat import (
     ChatStreamEvent,
     DoneEvent,
     ErrorEvent,
+    QueryRewrittenEvent,
     RunStartedEvent,
     SearchMode,
     SourcesEvent,
+    StatusEvent,
 )
 from app.schemas.search import SearchHit
 from app.services.session import derive_title
+from app.services.stream_bridge import RunEventBridge
 
 logger = structlog.get_logger(__name__)
 
@@ -328,6 +331,18 @@ def select_turns_to_fold(
     return to_fold
 
 
+@dataclass(frozen=True, slots=True)
+class RewriteOutcome:
+    """Result of the best-effort rewrite resolution for one run.
+
+    `query` is the resolved run prompt (rewritten or original); `event` is
+    the wire event to emit — `None` when no `query_rewritten` is warranted
+    (rewrite skipped, degraded, empty, or unchanged text)."""
+
+    query: str
+    event: QueryRewrittenEvent | None = None
+
+
 @dataclass(slots=True)
 class _ChatTurn:
     """Persistence context for one `ask` run (absent in stateless mode).
@@ -487,15 +502,28 @@ class ChatService:
             for batch in _drain(pending):
                 yield SourcesEvent(items=batch)
 
-        # Best-effort history-aware rewrite of the run prompt (`_rewrite_query`
+        # Best-effort history-aware rewrite of the run prompt (`_resolve_rewrite`
         # never raises): a follow-up question reaches the agent — and through
         # it the retrieval — as a self-contained query, while the persisted
-        # message and the rebuilt history keep the original text.
-        retrieval_question = await self._rewrite_query(question, turn.history if turn else [])
+        # message and the rebuilt history keep the original text. The silent
+        # rewrite work is now observable: `status(rewriting_query)` before the
+        # rewrite call, `query_rewritten` when it changed the prompt.
+        will_rewrite = self._rewrite_agent is not None and bool(turn and turn.history)
+        if will_rewrite:
+            yield StatusEvent(phase="rewriting_query")
+        outcome = await self._resolve_rewrite(question, turn.history if turn else [])
+        if outcome.event is not None:
+            yield outcome.event
+        retrieval_question = outcome.query
 
         usage_input_tokens: int | None = None
         usage_output_tokens: int | None = None
         answer_parts: list[str] = []
+        generating_sent = False
+        # The bridge buffers tool lifecycle events from the agent run; the
+        # loop below drains them alongside the sources batches. Per-run state
+        # only — a fresh bridge every call.
+        bridge = RunEventBridge()
         try:
             async with self._agent.run_stream(
                 retrieval_question,
@@ -503,21 +531,38 @@ class ChatService:
                 # Empty history passes None: a first turn behaves exactly like
                 # the stateless service (no empty-sequence edge cases).
                 message_history=turn.history if turn and turn.history else None,
+                event_stream_handler=bridge.on_agent_event,
             ) as result:
                 async for delta in result.stream_text(delta=True, debounce_by=None):
                     # Tool calls (and their sources) can land between parts;
                     # drain before the part so sources always precede the text
-                    # they ground.
+                    # they ground. Per tool call the honest progress order is
+                    # started → sources → finished (the bridge keeps separate
+                    # started/finished queues so the sources flush, which
+                    # happens mid-call, slots between them).
+                    for started_event in bridge.drain_started():
+                        yield started_event
                     for batch in _drain(pending):
                         yield SourcesEvent(items=batch)
+                    for finished_event in bridge.drain_finished():
+                        yield finished_event
                     if delta:
+                        if not generating_sent:
+                            # Marks the transition from tool/retrieval work to
+                            # visible answer streaming — once per run.
+                            yield StatusEvent(phase="generating")
+                            generating_sent = True
                         answer_parts.append(delta)
                         yield AnswerDeltaEvent(text=delta)
                 usage = result.usage
                 usage_input_tokens = usage.input_tokens or None
                 usage_output_tokens = usage.output_tokens or None
+            for started_event in bridge.drain_started():
+                yield started_event
             for batch in _drain(pending):
                 yield SourcesEvent(items=batch)
+            for finished_event in bridge.drain_finished():
+                yield finished_event
             # Inside the try on purpose: the stream has started, so a persist
             # failure must become the terminal `error` event (never escape the
             # generator) — and it leaves the honest record: user message kept,
@@ -570,7 +615,7 @@ class ChatService:
             session_id=turn.session_id if turn else None,
         )
 
-    async def _rewrite_query(self, question: str, history: list[ModelMessage]) -> str:
+    async def _resolve_rewrite(self, question: str, history: list[ModelMessage]) -> RewriteOutcome:
         """Best-effort standalone-question rewrite; never raises.
 
         Runs only when a rewrite model was injected AND history is non-empty
@@ -584,9 +629,13 @@ class ChatService:
         rewrite problem must never turn a would-be answer into an error event.
         The original question stays the persisted message and the history
         entry; only the run prompt is rewritten.
+
+        The wire event is emitted only when the rewrite actually changed the
+        prompt (non-empty output differing from the original) — a skipped or
+        degraded or unchanged rewrite is silent, exactly as before.
         """
         if self._rewrite_agent is None or not history:
-            return question
+            return RewriteOutcome(query=question)
         recent = (
             history
             if self._rewrite_history_turns <= 0
@@ -612,7 +661,15 @@ class ChatService:
             original_length=len(question),
             rewritten_length=len(resolved),
         )
-        return resolved
+        event: QueryRewrittenEvent | None = None
+        if rewritten is not None and resolved != question:
+            event = QueryRewrittenEvent(
+                original=question,
+                rewritten=resolved,
+                applied=True,
+                changed=True,
+            )
+        return RewriteOutcome(query=resolved, event=event)
 
     async def _prepare_turn(self, question: str, session_id: UUID | None) -> _ChatTurn | None:
         """Resolve the session, assemble history, persist the user message.

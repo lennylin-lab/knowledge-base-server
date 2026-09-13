@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -75,5 +75,68 @@ class ErrorEvent(BaseModel):
     message: str
 
 
-ChatStreamEvent = RunStartedEvent | SourcesEvent | AnswerDeltaEvent | DoneEvent | ErrorEvent
+StatusPhase = Literal["rewriting_query", "generating"]
+"""Silent-work phases the service already performs, now observable.
+
+`rewriting_query` — a follow-up turn's best-effort rewrite LLM call is about
+to run. `generating` — the first answer text is about to stream (the
+tool/retrieval phase is over). Informational only: never replaces the
+terminal `done` / `error` semantics."""
+
+
+class StatusEvent(BaseModel):
+    """One phase transition of the run; purely informational progress."""
+
+    phase: StatusPhase
+
+
+class ToolCallStartedEvent(BaseModel):
+    """A tool call is about to execute.
+
+    `args` is the parsed JSON object the model sent (`search_knowledge`
+    additionally carries the `limit` resolved from run deps, so clients can
+    show "searching for X" without re-parsing anything)."""
+
+    call_id: str
+    tool_name: str
+    args: dict[str, Any]
+
+
+class ToolCallFinishedEvent(BaseModel):
+    """A tool call completed.
+
+    `status` is `failed` when the call degraded (an MCP wrapper's error
+    string returned to the model, or a retry prompt) — the run itself may
+    still complete with `done`."""
+
+    call_id: str
+    tool_name: str
+    status: Literal["success", "failed"]
+    latency_ms: float
+
+
+class QueryRewrittenEvent(BaseModel):
+    """The run prompt was rewritten from the raw follow-up question.
+
+    Emitted only when the rewrite ran, produced non-empty output, and the
+    result differs from the original (`applied` and `changed`). The
+    persisted message and history keep the original question either way."""
+
+    original: str
+    rewritten: str
+    applied: bool
+    changed: bool
+
+
+ChatStreamEvent = (
+    RunStartedEvent
+    | SourcesEvent
+    | AnswerDeltaEvent
+    | DoneEvent
+    | ErrorEvent
+    | StatusEvent
+    | ToolCallStartedEvent
+    | ToolCallFinishedEvent
+    | QueryRewrittenEvent
+)
 """Everything `ChatService.ask` can yield, in contract order."""

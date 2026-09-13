@@ -60,8 +60,10 @@ from app.schemas.chat import (
     RunStartedEvent,
     SearchMode,
     SourcesEvent,
+    StatusEvent,
 )
 from app.schemas.search import SearchHit
+from app.services.stream_bridge import RunEventBridge
 
 logger = structlog.get_logger(__name__)
 
@@ -570,23 +572,40 @@ class WritingService:
 
         usage_input_tokens: int | None = None
         usage_output_tokens: int | None = None
+        generating_sent = False
+        # Same bridge + drain idiom as chat: tool lifecycle events buffered
+        # by the handler, drained here around the sources batches (per tool
+        # call: started → sources → finished). No rewrite step exists in
+        # writing, so no rewrite/status(rewriting_query) events ever appear.
+        bridge = RunEventBridge()
         try:
             async with self._agent.run_stream(
-                render_writing_prompt(draft, instruction), deps=deps
+                render_writing_prompt(draft, instruction),
+                deps=deps,
+                event_stream_handler=bridge.on_agent_event,
             ) as result:
                 async for delta in result.stream_text(delta=True, debounce_by=None):
-                    # Tool calls (and their sources) can land between parts;
-                    # drain before the part so sources always precede the text
-                    # they ground.
+                    for started_event in bridge.drain_started():
+                        yield started_event
                     for batch in _drain(pending):
                         yield SourcesEvent(items=batch)
+                    for finished_event in bridge.drain_finished():
+                        yield finished_event
                     if delta:
+                        if not generating_sent:
+                            # Same phase signal as chat: answer streaming begins.
+                            yield StatusEvent(phase="generating")
+                            generating_sent = True
                         yield AnswerDeltaEvent(text=delta)
                 usage = result.usage
                 usage_input_tokens = usage.input_tokens or None
                 usage_output_tokens = usage.output_tokens or None
+            for started_event in bridge.drain_started():
+                yield started_event
             for batch in _drain(pending):
                 yield SourcesEvent(items=batch)
+            for finished_event in bridge.drain_finished():
+                yield finished_event
         except Exception as exc:
             failure = _as_app_error(exc)
             logger.exception(

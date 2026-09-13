@@ -22,8 +22,12 @@ from app.schemas.chat import (
     ChatStreamEvent,
     DoneEvent,
     ErrorEvent,
+    QueryRewrittenEvent,
     RunStartedEvent,
     SourcesEvent,
+    StatusEvent,
+    ToolCallFinishedEvent,
+    ToolCallStartedEvent,
 )
 
 router = APIRouter()
@@ -34,6 +38,10 @@ _EVENT_NAMES: dict[type[ChatStreamEvent], str] = {
     AnswerDeltaEvent: "answer_delta",
     DoneEvent: "done",
     ErrorEvent: "error",
+    StatusEvent: "status",
+    ToolCallStartedEvent: "tool_call_started",
+    ToolCallFinishedEvent: "tool_call_finished",
+    QueryRewrittenEvent: "query_rewritten",
 }
 
 
