@@ -359,3 +359,102 @@ collector.seed(hits)  # fresh blocks number [k+1..]
 ---
 
 **Language**: All documentation is written in **English**.
+
+---
+
+## Scenario: SSE progress events — additive ordering contracts
+
+### 1. Scope / Trigger
+
+- Trigger: cross-layer wire contract change — four additive SSE events
+  (`status`, `tool_call_started`, `tool_call_finished`, `query_rewritten`)
+  emitted from `services/chat.py` and `services/agents.py` via
+  `services/stream_bridge.py::RunEventBridge`. Payload definitions live in
+  the canonical SSE table in [Error Handling](./error-handling.md).
+
+### 2. Signatures
+
+- `RunEventBridge.on_agent_event(ctx: RunContext[Any], stream: AsyncIterable[AgentStreamEvent]) -> None`
+  — pydantic-ai `event_stream_handler`; buffers typed events in
+  `pending_tool_events`.
+- `ChatService._resolve_rewrite(...) -> RewriteOutcome` — dataclass with
+  `query: str` and `event: QueryRewrittenEvent | None` (`None` when no wire
+  event warranted).
+
+### 3. Contracts (event order)
+
+Canonical chat order:
+
+```
+run_started
+→ sources*                     # carried batch first when carry-forward on
+→ status(rewriting_query)?     # only when rewrite will run
+→ query_rewritten?             # only when changed
+→ [tool_call_started → sources → tool_call_finished]*
+→ status(generating)?          # once, before first answer_delta
+→ answer_delta* → sources* → done | error
+```
+
+Hard rules:
+1. Carried `sources` precedes all progress events; nothing between
+   `run_started` and the carried batch.
+2. `sources` still precedes the `answer_delta` that may cite it.
+3. `tool_call_started` precedes its matching `tool_call_finished`;
+   started → sources → finished is the honest acceptable order (sources
+   flush happens in `on_append`, finished arrives from pydantic-ai after
+   the tool returns).
+4. Progress events are informational only; `done`/`error` remain the
+   terminal semantics. MCP soft failures (error string returned to model,
+   run continues) → `tool_call_finished` with `status: "failed"`, stream
+   still reaches `done`.
+5. Rewrite skipped (first turn, stateless, flag off, no rewrite agent) or
+   degraded (failure, empty, unchanged text) → **no** rewrite events at all.
+6. Writing `/suggest` gets tool-call + `status(generating)` events; never
+   rewrite events.
+
+### 4. Validation & Error Matrix
+
+- Rewrite LLM failure → warn log, original query used, no `query_rewritten`
+- MCP tool error string result → `status: "failed"` on finished, not an
+  `error` terminal event
+- Any failure after first event yielded → terminal `error` event (never
+  raise out of the generator)
+
+### 5. Good/Base/Bad Cases
+
+- Good: follow-up turn with changed rewrite → full order above with
+  `query_rewritten` payload `{original, rewritten, applied, changed}`.
+- Base: first turn → only `tool_call_*` + `status(generating)` progress
+  events; no rewrite events.
+- Bad: emitting progress events between `run_started` and the carried
+  sources batch; emitting `query_rewritten` when text is unchanged; raising
+  from the generator after the first event.
+
+### 6. Tests Required
+
+- `tests/test_chat_service.py`: exact follow-up order incl. `query_rewritten`
+  payload; first-turn no-rewrite-events; unchanged-rewrite silent;
+  rewrite-failure degrade; carried-sources-first with no interleaved
+  progress events; MCP soft failure → failed + done.
+- `tests/test_stream_bridge.py`: `_parse_tool_args` (string/dict/malformed →
+  `{}`), MCP failure prefix detection, limit injection into
+  `search_knowledge` args.
+- `tests/test_chat_api.py` / `tests/test_writing_api.py`: wire-level event
+  names and payload shapes.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```python
+# Emitting rewrite events unconditionally; raising past the first event.
+yield QueryRewrittenEvent(original=q, rewritten=q, applied=False, changed=False)
+```
+
+#### Correct
+
+```python
+# Event only when rewrite actually changed the text; degrade silently otherwise.
+if outcome.event is not None:
+    yield outcome.event
+```

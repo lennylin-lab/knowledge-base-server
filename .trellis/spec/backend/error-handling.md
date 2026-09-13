@@ -142,7 +142,20 @@ stream. The client contract (frontend repo) treats `error` event as terminal.
 Canonical SSE event set (chat, implemented in `services/chat.py`):
 `run_started` (run_id, mode) → `sources` (SearchHit items, after each
 retrieval tool call) → `answer_delta` (text parts) → `done`
-(run_id, outcome, tool_calls, latency_ms) | `error` (terminal). The
+(run_id, outcome, tool_calls, latency_ms) | `error` (terminal), plus the
+**progress events** (additive, informational only — they never replace
+terminal `done`/`error` semantics; ignoring clients are unaffected):
+
+| Event | Payload | Emitted when |
+|-------|---------|--------------|
+| `status` | `{phase: "rewriting_query" \| "generating"}` | before `_rewrite_query` (only when rewrite will run), and once before the first `answer_delta` |
+| `tool_call_started` | `{call_id, tool_name, args}` | from pydantic-ai `FunctionToolCallEvent` via `event_stream_handler`; `search_knowledge` args include `query` + `limit` from deps |
+| `tool_call_finished` | `{call_id, tool_name, status: "success"\|"failed", latency_ms}` | from `FunctionToolResultEvent`; MCP soft failures (result content prefixed `"tool {name} failed:"` from `mcp/tools.py`) map to `failed` — the stream still reaches `done` |
+| `query_rewritten` | `{original, rewritten, applied, changed}` | only when rewrite ran and changed the text; skipped/degraded → no event |
+
+Tool-call observation lives in `services/stream_bridge.py` (`RunEventBridge`),
+which buffers pydantic-ai events; the main drain loop yields them alongside
+the sources drain. The
 service generator must never raise after the first event is yielded —
 everything becomes an `error` event; client disconnects
 (`CancelledError`/`GeneratorExit`) propagate for cancellation instead.
