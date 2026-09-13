@@ -1,0 +1,6 @@
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Verify SSE ordering, terminal error path, and backward compatibility of canonical event set"}
+{"file": ".trellis/spec/backend/chat-guidelines.md", "reason": "Verify carried-sources-first batch and citation order invariants still hold"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "SSE wire tests and offline test discipline"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Verify no sensitive text leaked to structlog in new code paths"}
+{"file": ".trellis/tasks/09-13-chat-sse-progress-events/prd.md", "reason": "Acceptance criteria AC1–AC8 checklist"}
+{"file": ".trellis/tasks/09-13-chat-sse-progress-events/design.md", "reason": "Event order contract and bridge architecture"}

@@ -1,0 +1,6 @@
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Canonical SSE event set and streaming failure rules — must extend without breaking terminal error contract"}
+{"file": ".trellis/spec/backend/chat-guidelines.md", "reason": "Carried-sources SSE ordering invariant and chat-path contracts to preserve during progress events"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "Layering: services own SSE mapping, agents stay stream-free"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "No question/tool-return text in logs; lengths and classes only"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "SSE test patterns via httpx + parse_sse helper"}
+{"file": ".trellis/tasks/09-13-chat-sse-progress-events/research/pydantic-ai-stream-events.md", "reason": "event_stream_handler + stream_text coexistence evidence"}
