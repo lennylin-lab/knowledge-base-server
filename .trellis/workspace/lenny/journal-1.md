@@ -367,3 +367,26 @@ Added four additive SSE progress events (status, tool_call_started, tool_call_fi
 ### Status
 
 [OK] **Completed**
+
+
+## Session 17: Agent document drafting and persistence
+<!-- trellis-session: v=2 fp=fbf1b8d118658571 -->
+
+**Date**: 2026-09-14
+**Task**: Agent document drafting and persistence
+**Branch**: `feat/agent-document-persistence`
+
+### Summary
+
+Implemented agent-operation domain: AgentOperation/DocumentRevision models with Alembic 0009, AgentOperationService with idempotent create, inspect/resume, and atomic optimistic-concurrency apply (version check before writes, single commit, post-commit indexing enqueue), /operations API with explicit draft/apply/resume. Drafts and interrupted runs stay out of chat history. trellis-check passed (ruff/mypy clean, 534 tests); captured atomic-apply pattern into database-guidelines spec.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `ddbc8b2` | feat(operations): agent document drafting with atomic optimistic-concurrency apply |
+| `8e0e32b` | docs(spec): atomic optimistic-concurrency apply pattern |
+
+### Status
+
+[OK] **Completed**
