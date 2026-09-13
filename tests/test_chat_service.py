@@ -40,8 +40,12 @@ from app.schemas.chat import (
     AnswerDeltaEvent,
     DoneEvent,
     ErrorEvent,
+    QueryRewrittenEvent,
     RunStartedEvent,
     SourcesEvent,
+    StatusEvent,
+    ToolCallFinishedEvent,
+    ToolCallStartedEvent,
 )
 from app.schemas.search import SearchHit
 from app.services.chat import (
@@ -105,7 +109,10 @@ async def test_ask_streams_run_started_sources_deltas_done_in_order():
 
     assert _names(events) == [
         "RunStartedEvent",
+        "ToolCallStartedEvent",
         "SourcesEvent",
+        "ToolCallFinishedEvent",
+        "StatusEvent",
         "AnswerDeltaEvent",
         "AnswerDeltaEvent",
         "DoneEvent",
@@ -115,10 +122,30 @@ async def test_ask_streams_run_started_sources_deltas_done_in_order():
     assert run_started.run_id
     assert run_started.mode == "hybrid"
 
-    sources = events[1]
+    started = events[1]
+    assert isinstance(started, ToolCallStartedEvent)
+    # Started args carry the model's query plus the run's limit from deps.
+    assert started.call_id
+    assert started.tool_name == "search_knowledge"
+    assert started.args == {"query": "zorblat", "limit": 8}
+
+    sources = events[2]
     assert isinstance(sources, SourcesEvent)
     assert sources.items[0].document_title == "Kotlin Notes"
     assert sources.items[0].content == "zorblat everywhere"
+
+    finished = events[3]
+    assert isinstance(finished, ToolCallFinishedEvent)
+    assert finished.call_id == started.call_id
+    assert finished.tool_name == "search_knowledge"
+    assert finished.status == "success"
+    assert finished.latency_ms >= 0
+
+    # `status(generating)` marks the first answer delta, exactly once.
+    status = events[4]
+    assert isinstance(status, StatusEvent)
+    assert status.phase == "generating"
+    assert [e for e in events if isinstance(e, StatusEvent)] == [status]
 
     # The tool forwarded the run's limit to the retriever.
     assert retriever.calls == [("zorblat", 8)]
@@ -144,8 +171,13 @@ async def test_each_tool_call_flushes_its_own_sources_event():
 
     assert _names(events) == [
         "RunStartedEvent",
+        "ToolCallStartedEvent",
+        "ToolCallStartedEvent",
         "SourcesEvent",
         "SourcesEvent",
+        "ToolCallFinishedEvent",
+        "ToolCallFinishedEvent",
+        "StatusEvent",
         "AnswerDeltaEvent",
         "AnswerDeltaEvent",
         "DoneEvent",
@@ -194,11 +226,15 @@ async def test_run_without_tool_calls_has_no_sources_event():
 
     assert _names(events) == [
         "RunStartedEvent",
+        "StatusEvent",
         "AnswerDeltaEvent",
         "DoneEvent",
     ]
     assert isinstance(events[0], RunStartedEvent)
     assert events[0].mode == "bm25"
+    # No tool work happened; `generating` is still the pre-answer signal.
+    assert isinstance(events[1], StatusEvent)
+    assert events[1].phase == "generating"
     assert isinstance(events[-1], DoneEvent)
     assert events[-1].tool_calls == 0
 
@@ -236,7 +272,15 @@ async def test_provider_failure_mid_stream_ends_with_terminal_error_event():
 
     events = await _collect(service, QUESTION)
 
-    assert _names(events) == ["RunStartedEvent", "SourcesEvent", "AnswerDeltaEvent", "ErrorEvent"]
+    assert _names(events) == [
+        "RunStartedEvent",
+        "ToolCallStartedEvent",
+        "SourcesEvent",
+        "ToolCallFinishedEvent",
+        "StatusEvent",
+        "AnswerDeltaEvent",
+        "ErrorEvent",
+    ]
     assert _answer_text(events) == "partial answer "
     error = events[-1]
     assert isinstance(error, ErrorEvent)
@@ -431,7 +475,18 @@ async def test_mcp_tool_call_streams_answer_and_counts_in_tool_calls() -> None:
     events = await _collect(service, QUESTION)
 
     # No `sources` event: external tools never emit KB sources (by design).
-    assert _names(events) == ["RunStartedEvent", "AnswerDeltaEvent", "DoneEvent"]
+    assert _names(events) == [
+        "RunStartedEvent",
+        "ToolCallStartedEvent",
+        "ToolCallFinishedEvent",
+        "StatusEvent",
+        "AnswerDeltaEvent",
+        "DoneEvent",
+    ]
+    # Progress events carry the MCP kwargs the model sent, untouched.
+    started = next(e for e in events if isinstance(e, ToolCallStartedEvent))
+    assert started.tool_name == "mcp_alpha_add"
+    assert started.args == {"a": 1, "b": 2}
     assert _answer_text(events) == "One plus two is 3 (external: alpha)."
     assert manager.calls == [("alpha", "add", {"a": 1, "b": 2})]
     done = events[-1]
@@ -461,7 +516,18 @@ async def test_mcp_tool_failure_mid_run_still_ends_with_done() -> None:
     # The degraded tool result reached the model; the run completed normally —
     # an external failure must never become a terminal error event.
     assert tool_results == ["tool mcp_alpha_add failed: RuntimeError"]
-    assert _names(events) == ["RunStartedEvent", "AnswerDeltaEvent", "DoneEvent"]
+    assert _names(events) == [
+        "RunStartedEvent",
+        "ToolCallStartedEvent",
+        "ToolCallFinishedEvent",
+        "StatusEvent",
+        "AnswerDeltaEvent",
+        "DoneEvent",
+    ]
+    # The soft failure is visible as progress (status: failed), not an error.
+    finished = next(e for e in events if isinstance(e, ToolCallFinishedEvent))
+    assert finished.status == "failed"
+    assert not any(isinstance(event, ErrorEvent) for event in events)
     done = events[-1]
     assert isinstance(done, DoneEvent)
     assert done.outcome == "success"
@@ -482,7 +548,10 @@ async def test_without_extra_tools_the_agent_behaves_as_before() -> None:
 
     assert _names(events) == [
         "RunStartedEvent",
+        "ToolCallStartedEvent",
         "SourcesEvent",
+        "ToolCallFinishedEvent",
+        "StatusEvent",
         "AnswerDeltaEvent",
         "AnswerDeltaEvent",
         "DoneEvent",
@@ -1002,6 +1071,116 @@ async def test_followup_turn_retrieves_on_rewritten_standalone_query(session_fac
 
 
 @pytest.mark.db
+async def test_followup_turn_emits_full_progress_order_with_query_rewritten(session_factory):
+    # AC1: canonical follow-up order — run_started → status(rewriting_query)
+    # → query_rewritten → tool_call_started → sources → tool_call_finished →
+    # status(generating) → answer_delta* → done, with the rewrite event
+    # carrying original/rewritten/applied/changed.
+    retriever = _make_retriever()
+    rewriter = scripted_rewrite_model([STANDALONE_QUERY])
+
+    turn1 = _rewriting_service(
+        session_factory,
+        retriever,
+        rewriter,
+        qa_model=scripted_chat_model(tool_calls=[TOPIC_QUESTION], answer_parts=["Turn answer."]),
+    )
+    events1 = await _collect(turn1, TOPIC_QUESTION)
+    session_id = events1[0].session_id
+    assert session_id is not None
+
+    turn2 = _rewriting_service(
+        session_factory,
+        retriever,
+        rewriter,
+        qa_model=scripted_chat_model(tool_calls=[STANDALONE_QUERY], answer_parts=["Turn answer."]),
+    )
+    events2 = await _collect(turn2, ANAPHORIC_FOLLOWUP, session_id=session_id)
+
+    assert _names(events2) == [
+        "RunStartedEvent",
+        "StatusEvent",
+        "QueryRewrittenEvent",
+        "ToolCallStartedEvent",
+        "SourcesEvent",
+        "ToolCallFinishedEvent",
+        "StatusEvent",
+        "AnswerDeltaEvent",
+        "DoneEvent",
+    ]
+    phases = [e.phase for e in events2 if isinstance(e, StatusEvent)]
+    assert phases == ["rewriting_query", "generating"]
+    rewritten = events2[2]
+    assert isinstance(rewritten, QueryRewrittenEvent)
+    assert rewritten.original == ANAPHORIC_FOLLOWUP
+    assert rewritten.rewritten == STANDALONE_QUERY
+    assert rewritten.applied is True
+    assert rewritten.changed is True
+    # The started event's query is the model's own (rewritten) retrieval query.
+    started = next(e for e in events2 if isinstance(e, ToolCallStartedEvent))
+    assert started.args["query"] == STANDALONE_QUERY
+
+
+@pytest.mark.db
+async def test_first_turn_emits_no_rewrite_events_but_tool_progress(session_factory):
+    # AC2: first turn with a rewrite agent wired — no rewriting_query status
+    # and no query_rewritten, but tool-call progress events still flow.
+    rewriter = scripted_rewrite_model([STANDALONE_QUERY])
+    service = _rewriting_service(
+        session_factory,
+        _make_retriever(),
+        rewriter,
+        qa_model=scripted_chat_model(
+            tool_calls=[ANAPHORIC_FOLLOWUP], answer_parts=["Turn answer."]
+        ),
+    )
+
+    events = await _collect(service, ANAPHORIC_FOLLOWUP)
+
+    assert _names(events) == [
+        "RunStartedEvent",
+        "ToolCallStartedEvent",
+        "SourcesEvent",
+        "ToolCallFinishedEvent",
+        "StatusEvent",
+        "AnswerDeltaEvent",
+        "DoneEvent",
+    ]
+    assert not any(isinstance(event, QueryRewrittenEvent) for event in events)
+    # The single status is the pre-answer `generating` phase.
+    assert [e.phase for e in events if isinstance(e, StatusEvent)] == ["generating"]
+
+
+@pytest.mark.db
+async def test_unchanged_rewrite_emits_no_query_rewritten(session_factory):
+    # A rewrite returning the original text unchanged is silent on the wire
+    # (the event gate requires `changed`), and the run completes normally.
+    rewriter = scripted_rewrite_model([ANAPHORIC_FOLLOWUP])
+    turn1 = _rewriting_service(
+        session_factory,
+        _make_retriever(),
+        rewriter,
+        qa_model=scripted_chat_model(tool_calls=["x"], answer_parts=["Turn answer."]),
+    )
+    events1 = await _collect(turn1, TOPIC_QUESTION)
+    session_id = events1[0].session_id
+    assert session_id is not None
+
+    turn2 = _rewriting_service(
+        session_factory,
+        _make_retriever(),
+        rewriter,
+        qa_model=scripted_chat_model(
+            tool_calls=[ANAPHORIC_FOLLOWUP], answer_parts=["Turn answer."]
+        ),
+    )
+    events2 = await _collect(turn2, ANAPHORIC_FOLLOWUP, session_id=session_id)
+
+    assert not any(isinstance(event, QueryRewrittenEvent) for event in events2)
+    assert isinstance(events2[-1], DoneEvent)
+
+
+@pytest.mark.db
 async def test_first_turn_performs_no_rewrite_call(session_factory):
     # AC2: with history empty the rewrite step is skipped entirely — no
     # rewrite call, and the raw question reaches retriever and agent unchanged.
@@ -1169,13 +1348,22 @@ async def test_rewrite_failure_degrades_to_raw_query_and_still_completes(session
     with capture_logs() as logs:
         events2 = await _collect(turn2, ANAPHORIC_FOLLOWUP, session_id=session_id)
 
-    # The run completed normally, retrieving on the raw question.
+    # The run completed normally, retrieving on the raw question. The silent
+    # rewrite attempt is visible (`status(rewriting_query)`) but a degraded
+    # rewrite never emits `query_rewritten` (AC3).
     assert _names(events2) == [
         "RunStartedEvent",
+        "StatusEvent",
+        "ToolCallStartedEvent",
         "SourcesEvent",
+        "ToolCallFinishedEvent",
+        "StatusEvent",
         "AnswerDeltaEvent",
         "DoneEvent",
     ]
+    assert not any(isinstance(event, QueryRewrittenEvent) for event in events2)
+    statuses = [e for e in events2 if isinstance(e, StatusEvent)]
+    assert [status.phase for status in statuses] == ["rewriting_query", "generating"]
     done = events2[-1]
     assert isinstance(done, DoneEvent)
     assert done.outcome == "success"
@@ -1438,7 +1626,7 @@ async def test_summary_fold_failure_keeps_the_turn_successful_and_retries_later(
 
     # The fold was attempted and failed; the turn completed normally regardless.
     assert len(failed_prompts) == 1
-    assert _names(events3) == ["RunStartedEvent", "AnswerDeltaEvent", "DoneEvent"]
+    assert _names(events3) == ["RunStartedEvent", "StatusEvent", "AnswerDeltaEvent", "DoneEvent"]
     done = events3[-1]
     assert isinstance(done, DoneEvent)
     assert done.outcome == "success"
@@ -1720,11 +1908,15 @@ async def test_followup_reemits_carried_sources_as_first_batch_and_leading_pair(
             session_id=session_id,
         )
 
-    # First batch immediately after run_started; fresh batch after it.
+    # First batch immediately after run_started; fresh batch after it. No
+    # progress event may appear between run_started and the carried batch (AC5).
     assert _names(events2) == [
         "RunStartedEvent",
         "SourcesEvent",
+        "ToolCallStartedEvent",
         "SourcesEvent",
+        "ToolCallFinishedEvent",
+        "StatusEvent",
         "AnswerDeltaEvent",
         "DoneEvent",
     ]
@@ -1799,7 +1991,10 @@ async def test_carry_disabled_keeps_old_behavior_byte_identical(session_factory)
     # One fresh sources batch only — no carried batch ahead of it.
     assert _names(events2) == [
         "RunStartedEvent",
+        "ToolCallStartedEvent",
         "SourcesEvent",
+        "ToolCallFinishedEvent",
+        "StatusEvent",
         "AnswerDeltaEvent",
         "DoneEvent",
     ]
@@ -1850,7 +2045,10 @@ async def test_null_sources_prior_turn_carries_nothing(session_factory):
     # Flag is ON here, but there was nothing to carry: one fresh batch only.
     assert _names(events2) == [
         "RunStartedEvent",
+        "ToolCallStartedEvent",
         "SourcesEvent",
+        "ToolCallFinishedEvent",
+        "StatusEvent",
         "AnswerDeltaEvent",
         "DoneEvent",
     ]
@@ -1879,7 +2077,10 @@ async def test_stateless_service_never_carries_or_prepends():
 
     assert _names(events) == [
         "RunStartedEvent",
+        "ToolCallStartedEvent",
         "SourcesEvent",
+        "ToolCallFinishedEvent",
+        "StatusEvent",
         "AnswerDeltaEvent",
         "AnswerDeltaEvent",
         "DoneEvent",

@@ -69,7 +69,10 @@ async def test_suggest_streams_sse_content_type_and_event_sequence(writing_clien
     events = parse_sse(resp.text)
     assert [name for name, _ in events] == [
         "run_started",
+        "tool_call_started",
         "sources",
+        "tool_call_finished",
+        "status",
         "answer_delta",
         "answer_delta",
         "done",
@@ -78,7 +81,13 @@ async def test_suggest_streams_sse_content_type_and_event_sequence(writing_clien
     assert run_started["run_id"]
     assert run_started["mode"] == "hybrid"
 
-    sources = events[1][1]
+    # Writing shares chat's progress-event vocabulary (no rewrite events).
+    assert events[1][1]["tool_name"] == "search_knowledge"
+    assert events[1][1]["args"] == {"query": "zorblat", "limit": 8}
+    assert events[3][1]["status"] == "success"
+    assert events[4][1] == {"phase": "generating"}
+
+    sources = events[2][1]
     assert set(sources["items"][0]) == {
         "document_id",
         "document_title",
@@ -116,7 +125,12 @@ async def test_zero_tool_run_over_sse_has_no_sources_event(app):
 
     assert resp.status_code == 200
     events = parse_sse(resp.text)
-    assert [name for name, _ in events] == ["run_started", "answer_delta", "done"]
+    assert [name for name, _ in events] == [
+        "run_started",
+        "status",
+        "answer_delta",
+        "done",
+    ]
     assert events[0][1]["mode"] == "bm25"
     assert events[-1][1]["tool_calls"] == 0
     app.dependency_overrides.clear()

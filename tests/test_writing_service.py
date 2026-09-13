@@ -22,6 +22,7 @@ from app.schemas.chat import (
     ErrorEvent,
     RunStartedEvent,
     SourcesEvent,
+    ToolCallStartedEvent,
 )
 from app.services.agents import WritingService
 from fakes import StubRetriever, retrieved_chunk, scripted_chat_model
@@ -97,7 +98,10 @@ async def test_suggest_with_tool_call_streams_started_sources_deltas_done_in_ord
 
     assert _names(events) == [
         "RunStartedEvent",
+        "ToolCallStartedEvent",
         "SourcesEvent",
+        "ToolCallFinishedEvent",
+        "StatusEvent",
         "AnswerDeltaEvent",
         "AnswerDeltaEvent",
         "DoneEvent",
@@ -107,7 +111,13 @@ async def test_suggest_with_tool_call_streams_started_sources_deltas_done_in_ord
     assert run_started.run_id
     assert run_started.mode == "hybrid"
 
-    sources = events[1]
+    # The started event carries the retrieval args with the run's limit (5).
+    started = events[1]
+    assert isinstance(started, ToolCallStartedEvent)
+    assert started.tool_name == "search_knowledge"
+    assert started.args == {"query": "zorblat", "limit": 5}
+
+    sources = events[2]
     assert isinstance(sources, SourcesEvent)
     assert sources.items[0].document_title == "Kotlin Notes"
     assert sources.items[0].content == "zorblat everywhere"
@@ -137,7 +147,12 @@ async def test_suggest_instruction_reaches_the_model():
 
     events = await _collect(service, DRAFT, INSTRUCTION)
 
-    assert _names(events) == ["RunStartedEvent", "AnswerDeltaEvent", "DoneEvent"]
+    assert _names(events) == [
+        "RunStartedEvent",
+        "StatusEvent",
+        "AnswerDeltaEvent",
+        "DoneEvent",
+    ]
     assert prompts[0].count(INSTRUCTION) == 1
     assert DEFAULT_INSTRUCTION not in prompts[0]
 
@@ -152,7 +167,12 @@ async def test_suggest_without_tool_calls_has_no_sources_event():
     events = await _collect(service, DRAFT)
 
     # Retrieval is optional: a zero-tool run streams straight to text.
-    assert _names(events) == ["RunStartedEvent", "AnswerDeltaEvent", "DoneEvent"]
+    assert _names(events) == [
+        "RunStartedEvent",
+        "StatusEvent",
+        "AnswerDeltaEvent",
+        "DoneEvent",
+    ]
     assert isinstance(events[0], RunStartedEvent)
     assert events[0].mode == "bm25"
     done = events[-1]
@@ -186,8 +206,13 @@ async def test_each_retrieval_flushes_its_own_sources_event():
 
     assert _names(events) == [
         "RunStartedEvent",
+        "ToolCallStartedEvent",
+        "ToolCallStartedEvent",
         "SourcesEvent",
         "SourcesEvent",
+        "ToolCallFinishedEvent",
+        "ToolCallFinishedEvent",
+        "StatusEvent",
         "AnswerDeltaEvent",
         "AnswerDeltaEvent",
         "DoneEvent",
@@ -245,7 +270,15 @@ async def test_provider_failure_mid_stream_ends_with_terminal_error_event():
 
     events = await _collect(service, DRAFT)
 
-    assert _names(events) == ["RunStartedEvent", "SourcesEvent", "AnswerDeltaEvent", "ErrorEvent"]
+    assert _names(events) == [
+        "RunStartedEvent",
+        "ToolCallStartedEvent",
+        "SourcesEvent",
+        "ToolCallFinishedEvent",
+        "StatusEvent",
+        "AnswerDeltaEvent",
+        "ErrorEvent",
+    ]
     assert _answer_text(events) == "partial suggestion "
     error = events[-1]
     assert isinstance(error, ErrorEvent)

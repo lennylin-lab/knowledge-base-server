@@ -72,7 +72,10 @@ async def test_chat_streams_sse_content_type_and_event_sequence(chat_client):
     events = parse_sse(resp.text)
     assert [name for name, _ in events] == [
         "run_started",
+        "tool_call_started",
         "sources",
+        "tool_call_finished",
+        "status",
         "answer_delta",
         "answer_delta",
         "done",
@@ -81,7 +84,21 @@ async def test_chat_streams_sse_content_type_and_event_sequence(chat_client):
     assert run_started["run_id"]
     assert run_started["mode"] == "hybrid"
 
-    sources = events[1][1]
+    # New progress events carry their documented wire shapes.
+    tool_started = events[1][1]
+    assert tool_started["tool_name"] == "search_knowledge"
+    assert tool_started["call_id"]
+    assert tool_started["args"] == {"query": "zorblat", "limit": 8}
+
+    finished = events[3][1]
+    assert set(finished) == {"call_id", "tool_name", "status", "latency_ms"}
+    assert finished["status"] == "success"
+    assert finished["call_id"] == tool_started["call_id"]
+
+    status = events[4][1]
+    assert status == {"phase": "generating"}
+
+    sources = events[2][1]
     assert set(sources["items"][0]) == {
         "document_id",
         "document_title",
@@ -139,7 +156,10 @@ async def test_provider_failure_mid_stream_emits_terminal_error_event(app):
     events = parse_sse(resp.text)
     assert [name for name, _ in events] == [
         "run_started",
+        "tool_call_started",
         "sources",
+        "tool_call_finished",
+        "status",
         "answer_delta",
         "error",
     ]
