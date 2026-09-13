@@ -51,6 +51,40 @@ Rules:
 - `expire_on_commit=False` always — never re-touch attributes after commit
   in async code.
 
+### Pattern: atomic optimistic-concurrency apply
+
+Problem: a service must mutate an aggregate (e.g. document) only if the
+caller's base version is still current, record an immutable side artifact
+(e.g. revision), update a durable state row, and trigger post-commit side
+effects (e.g. indexing) — all-or-nothing, with side effects never firing for
+a rolled-back write.
+
+Solution (reference implementation: `services/operation.py::apply_operation`,
+task 09-13-agent-document-persistence):
+
+1. Guard on the state row's transition eligibility **before any write**
+   (wrong state -> 409 via AppError envelope).
+2. Idempotency read-back: if the state is already terminal-applied, return
+   the existing artifact without a second write (or rely on a partial unique
+   `idempotency_key` + `IntegrityError` catch for the create race).
+3. Optimistic check: compare the live row's `updated_at` (or explicit
+   version column) against the caller's base version **before mutating**;
+   on mismatch raise 409 with `base_version`/`current_version` details and
+   perform zero writes.
+4. Exactly **one commit** covering aggregate update + artifact row + state
+   flip; the side effect (enqueue) is issued only **after** that commit
+   returns. Post-commit enqueue failure must leave the aggregate durably
+   marked pending (e.g. `index_status='pending'`) so the existing retry
+   sweep recovers it — never enqueue before commit.
+
+Wrong: enqueue-then-commit (side effect fires for work that may roll back);
+check-then-write with a gap allowing stale publishes; commit per step
+(partial states visible on failure).
+
+Tests required: stale base rejected with document unchanged and zero
+artifact rows; duplicate apply returns the identical artifact (count stays
+1); enqueue failure leaves pending state recoverable by the sweep.
+
 ## Models (SQLAlchemy 2.0 style)
 
 ```python
