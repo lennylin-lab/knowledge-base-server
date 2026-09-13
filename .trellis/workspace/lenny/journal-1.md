@@ -343,3 +343,27 @@ Implemented the opt-in Redis cache task 09-12-redis-cache-layer: Cache Protocol/
 ### Status
 
 [OK] **Completed**
+
+
+## Session 16: Chat SSE progress events
+<!-- trellis-session: v=2 fp=1a46605382b9b869 -->
+
+**Date**: 2026-09-13
+**Task**: Chat SSE progress events
+**Branch**: `main`
+
+### Summary
+
+Added four additive SSE progress events (status, tool_call_started, tool_call_finished, query_rewritten) to chat and writing streaming via a new services/stream_bridge.py RunEventBridge over pydantic-ai event_stream_handler; rewrote _rewrite_query to _resolve_rewrite with RewriteOutcome; fixed _is_tool_failure reading event.part.content; preserved carried-sources-first and citation-order invariants; captured SSE vocabulary/ordering contracts into backend specs. All gates green: 522 tests, strict mypy, ruff. Also recovered the session's commits that were stranded on a detached HEAD by fast-forwarding main to 7cf770c.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `33ba8c9` | feat(chat): additive SSE progress events for status, tool calls, and query rewrite |
+| `657c8d0` | test(chat): progress-event order, wire shapes, and MCP soft-failure coverage |
+| `4483760` | docs(spec): SSE progress-event vocabulary and ordering contracts |
+
+### Status
+
+[OK] **Completed**

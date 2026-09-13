@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 15
-- **Last Active**: 2026-09-12
+- **Total Sessions**: 16
+- **Last Active**: 2026-09-13
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~345 | Active |
+| `journal-1.md` | ~369 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 16 | 2026-09-13 | Chat SSE progress events | `33ba8c9`, `657c8d0`, `4483760` | `main` |
 | 15 | 2026-09-12 | Redis cache layer for embeddings, agents, and search | `1d3dbff` | `-` |
 | 14 | 2026-09-12 | Carry prior-run sources into follow-up turns | `a197744`, `8497f67`, `19a7e05` | `feat/sources-carry-forward` |
 | 13 | 2026-09-11 | Follow-up residual-noise evaluation (direction #4, no-go) | `998cf21` | `main` |
