@@ -1,0 +1,8 @@
+{"file":".trellis/spec/backend/index.md","reason":"Quality review must verify the change stays within the existing provider boundary and does not expand the single-user MVP scope."}
+{"file":".trellis/spec/backend/directory-structure.md","reason":"Checks cross-layer ownership and that no Gateway/provider details leak into services, agents, repositories, or API schemas."}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"Required backend check context for preserving database/repository boundaries even though this integration should not change the server schema."}
+{"file":".trellis/spec/backend/error-handling.md","reason":"Checks Gateway failure classification and preservation of the server's standard error envelope/SSE terminal error contract."}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"Checks request/trace evidence and ensures no credential or user-content leakage in logs and task artifacts."}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Runs the complete server quality gate and verifies live integration tests remain opt-in and offline tests remain hermetic."}
+{"file":".trellis/spec/backend/chat-guidelines.md","reason":"Checks that the server's SSE contract and event ordering are not confused with the Gateway's OpenAI-compatible stream."}
+{"file":".trellis/spec/backend/search-guidelines.md","reason":"Checks that the known Gateway tools/MCP limitation is not misdiagnosed as a search or retrieval regression."}

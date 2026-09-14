@@ -1,0 +1,6 @@
+{"file":".trellis/spec/backend/index.md","reason":"Binding FastAPI layering, Settings/provider boundary, single-user MVP scope, and canonical backend conventions for the integration preparation."}
+{"file":".trellis/spec/backend/directory-structure.md","reason":"Keeps any compatibility fix at the llm/ boundary and prevents business services from depending on provider or transport details."}
+{"file":".trellis/spec/backend/error-handling.md","reason":"Defines the server error envelope and LLM/provider error taxonomy used when mapping Gateway failures."}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"Requires request-scoped correlation while prohibiting API keys, provider URLs, prompts, completions, and other sensitive data in evidence or logs."}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Defines uv/ruff/mypy/pytest gates, opt-in live tests, offline default behavior, and regression-test requirements."}
+{"file":".trellis/spec/backend/chat-guidelines.md","reason":"Defines server SSE event ordering and streaming failure semantics that must remain distinct from Gateway SSE during end-to-end verification."}

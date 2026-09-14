@@ -458,3 +458,28 @@ yield QueryRewrittenEvent(original=q, rewritten=q, applied=False, changed=False)
 if outcome.event is not None:
     yield outcome.event
 ```
+
+---
+
+## Convention: Gateway chat adapter boundary (verified 2026-09-15)
+
+**What**: When `KB_CHAT_BASE_URL` points at the knowledge-base-gateway
+(OpenAI-compatible proxy), only plain chat completions are functional end-to-end.
+The gateway tolerates a `tools` array but does **not** functionally forward
+tool-calling or MCP. Agents must not rely on tool execution through the
+gateway adapter; treat gateway-routed chat as tools-free.
+
+**Why**: Live integration verification (direct `gateway-echo` probes +
+server `/api/v1/chat` SSE smoke) confirmed this matches the gateway's
+documented contract. Assuming tool forwarding silently drops tool calls —
+RAG-through-gateway acceptance is blocked until the gateway lands
+tools/MCP forwarding.
+
+**Related facts from the same verification**:
+- Server SSE vocabulary (`run_started` → progress events → terminal
+  `done`/`error`) is distinct from gateway OpenAI `data:` frames; the
+  `llm/` adapter is the only layer that sees gateway frames.
+- Known gap: server request-id is not injected into the OpenAI client, so
+  gateway `X-Request-Id`/`X-Trace-Id` correlation is not yet propagated
+  from the server side (candidate future task).
+- Operational details live in `docs/gateway-integration.md`.
