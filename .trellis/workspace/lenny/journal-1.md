@@ -390,3 +390,25 @@ Implemented agent-operation domain: AgentOperation/DocumentRevision models with 
 ### Status
 
 [OK] **Completed**
+
+
+## Session 18: Gateway integration verified end-to-end
+<!-- trellis-session: v=2 fp=12049ab31bbc293d -->
+
+**Date**: 2026-09-15
+**Task**: Gateway integration verified end-to-end
+**Branch**: `main`
+
+### Summary
+
+Ran 09-15-gateway-integration to completion via trellis-implement/trellis-check sub-agents: direct gateway probes (healthz/readyz, gateway-echo non-stream + stream, key mint/revoke) and server e2e /api/v1/chat SSE smoke on a temp port-8010 instance with env-only KB_CHAT_* overrides both passed. No server or gateway defects; tools/MCP non-forwarding recorded as documented capability, no public issue filed. No server code changed, so quality gates not applicable. Spec: added gateway chat-adapter boundary convention to backend/chat-guidelines.md. Follow-ups flagged: gateway tools/MCP forwarding (blocks RAG-through-gateway), server request-id propagation into OpenAI client.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `ea58301` | chore(task): gateway integration verified; record gateway boundary spec |
+
+### Status
+
+[OK] **Completed**
