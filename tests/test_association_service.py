@@ -23,11 +23,17 @@ from structlog.testing import capture_logs
 from app.core.exceptions import AppError, LLMProviderError, NotFoundError
 from app.models.tenant import DEFAULT_TENANT_ID
 from app.repositories.document_chunk import DocumentChunkRepository
+from app.schemas.agent_stream import (
+    AgentDoneEvent,
+    AgentRunStartedEvent,
+    AssociationsResultEvent,
+    ErrorEvent,
+)
 from app.schemas.document import DocumentCreate
 from app.services.agents import AssociationService
 from app.services.document import DocumentService
 from corpus import KOTLIN_CONTENT, PYTHON_CONTENT, neighbor_scripted_provider, seed_corpus
-from fakes import basis_vector, scripted_association_model
+from fakes import FakeCache, basis_vector, scripted_association_model
 
 pytestmark = pytest.mark.db
 
@@ -374,3 +380,138 @@ async def test_provider_failure_wraps_into_llm_provider_error_and_logs_failure(
     assert failed["outcome"] == "llm_provider_error"
     assert failed["error_class"] == "APIStatusError"
     assert not any(entry["event"] == "agent_run_finished" for entry in logs)
+
+
+# --- stream contract (design: agent stream) ---
+
+
+async def drain(events):
+    """Collect a typed event stream into a list."""
+    return [event async for event in events]
+
+
+async def test_stream_success_emits_atomic_result_and_done(db_session, session_factory):
+    source = await make_document(db_session, ALPHA_SOURCE)
+    neighbor = await make_document(db_session, ALPHA_NEIGHBOR)
+    service = make_service(
+        session_factory, scripted_association_model([pick(neighbor.id, "Streamed reason.")])
+    )
+
+    events = await drain(service.associate_document_stream(source.id, tenant_id=DEFAULT_TENANT_ID))
+
+    # Atomic structured output: no partial association events, no progress.
+    assert [type(event) for event in events] == [
+        AgentRunStartedEvent,
+        AssociationsResultEvent,
+        AgentDoneEvent,
+    ]
+    run_started = events[0]
+    assert run_started.kind == "associations"
+    assert run_started.document_id == source.id
+    assert run_started.run_id
+    result = events[1]
+    assert [item.document_id for item in result.associations] == [neighbor.id]
+    assert result.associations[0].reason == "Streamed reason."
+    assert result.model == MODEL_NAME
+    assert result.latency_ms >= 0
+    done = events[2]
+    assert done.run_id == run_started.run_id
+    assert done.outcome == "success"
+    assert done.latency_ms == result.latency_ms
+
+
+async def test_stream_cache_hit_skips_model_call(db_session, session_factory):
+    prompts: list[str] = []
+    cache = FakeCache()
+    source = await make_document(db_session, ALPHA_SOURCE)
+    neighbor = await make_document(db_session, ALPHA_NEIGHBOR)
+    warming = AssociationService(
+        scripted_association_model([pick(neighbor.id)], prompts=prompts),
+        MODEL_NAME,
+        session_factory=session_factory,
+        cache=cache,
+        cache_ttl_seconds=600,
+    )
+    await warming.associate_document(source.id, tenant_id=DEFAULT_TENANT_ID)
+
+    events = await drain(warming.associate_document_stream(source.id, tenant_id=DEFAULT_TENANT_ID))
+
+    assert [type(event) for event in events] == [
+        AgentRunStartedEvent,
+        AssociationsResultEvent,
+        AgentDoneEvent,
+    ]
+    assert [item.document_id for item in events[1].associations] == [neighbor.id]
+    assert len(prompts) == 1  # the warm run only; the hit made no model call
+
+
+async def test_stream_no_candidates_returns_empty_result_without_llm_call(
+    db_session, session_factory
+):
+    created = await make_document(db_session, ALPHA_SOURCE)  # unique tag, no chunks
+    prompts: list[str] = []
+    service = make_service(
+        session_factory, scripted_association_model([pick(uuid4())], prompts=prompts)
+    )
+
+    events = await drain(service.associate_document_stream(created.id, tenant_id=DEFAULT_TENANT_ID))
+
+    assert [type(event) for event in events] == [
+        AgentRunStartedEvent,
+        AssociationsResultEvent,
+        AgentDoneEvent,
+    ]
+    assert events[1].associations == []
+    assert prompts == []  # zero model calls
+
+
+async def test_stream_provider_failure_emits_single_terminal_error(db_session, session_factory):
+    source = await make_document(db_session, ALPHA_SOURCE)
+    await make_document(db_session, ALPHA_NEIGHBOR)
+    service = make_service(
+        session_factory,
+        scripted_association_model(
+            [],
+            fail=openai.APIStatusError(
+                "upstream exploded with secret detail",
+                response=httpx.Response(
+                    500, request=httpx.Request("POST", "http://provider.test/v1/chat")
+                ),
+                body=None,
+            ),
+        ),
+    )
+
+    with capture_logs() as logs:
+        events = await drain(
+            service.associate_document_stream(source.id, tenant_id=DEFAULT_TENANT_ID)
+        )
+
+    # run_started stands, then exactly one terminal error and no done.
+    assert [type(event) for event in events] == [AgentRunStartedEvent, ErrorEvent]
+    assert events[-1].code == "llm_provider_error"
+    assert "upstream exploded" not in events[-1].message
+    assert not any(entry["event"] == "agent_run_finished" for entry in logs)
+
+
+async def test_stream_missing_document_raises_before_first_event(session_factory):
+    service = make_service(session_factory, scripted_association_model([pick(uuid4())]))
+
+    with pytest.raises(NotFoundError):
+        await drain(service.associate_document_stream(uuid4(), tenant_id=DEFAULT_TENANT_ID))
+
+
+async def test_wrapper_result_matches_stream_result_event(db_session, session_factory):
+    source = await make_document(db_session, ALPHA_SOURCE)
+    neighbor = await make_document(db_session, ALPHA_NEIGHBOR)
+    service = make_service(session_factory, scripted_association_model([pick(neighbor.id)]))
+
+    wrapper_result = await service.associate_document(source.id, tenant_id=DEFAULT_TENANT_ID)
+    stream_events = await drain(
+        service.associate_document_stream(source.id, tenant_id=DEFAULT_TENANT_ID)
+    )
+    stream_result = next(e for e in stream_events if isinstance(e, AssociationsResultEvent))
+
+    assert wrapper_result.model_dump(exclude={"latency_ms"}) == stream_result.model_dump(
+        exclude={"latency_ms"}
+    )

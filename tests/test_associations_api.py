@@ -12,16 +12,18 @@ from __future__ import annotations
 from collections.abc import Callable
 from uuid import UUID, uuid4
 
+import httpx
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from openai import APIStatusError
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.api.deps import build_association_service, get_association_service
 from app.repositories.document_chunk import DocumentChunkRepository
 from app.services.agents import AssociationService
-from fakes import basis_vector, hermetic_settings, scripted_association_model
+from fakes import basis_vector, hermetic_settings, parse_sse, scripted_association_model
 
 MODEL_NAME = "test-chat-model"
 MISSING_ID = "00000000-0000-0000-0000-000000000000"
@@ -67,7 +69,7 @@ async def seed_chunk(
 
 
 @pytest.mark.db
-async def test_associations_returns_200_with_candidate_metadata_only(
+async def test_associations_streams_result_with_candidate_metadata_only(
     db_client, session_factory, install_scripted_association
 ):
     kotlin = (await db_client.post("/api/v1/documents", json={"content": KOTLIN_DOC})).json()
@@ -87,7 +89,15 @@ async def test_associations_returns_200_with_candidate_metadata_only(
     resp = await db_client.post(f"/api/v1/documents/{kotlin['id']}/associations")
 
     assert resp.status_code == 200
-    body = resp.json()
+    assert resp.headers["content-type"].startswith("text/event-stream")
+    events = parse_sse(resp.text)
+    # Atomic structured output: no partial association events, no progress.
+    assert [name for name, _ in events] == ["run_started", "associations", "done"]
+    run_started = events[0][1]
+    assert run_started["kind"] == "associations"
+    assert run_started["document_id"] == kotlin["id"]
+    assert run_started["run_id"]
+    body = events[1][1]
     assert set(body) == {"document_id", "associations", "model", "latency_ms"}
     assert body["document_id"] == kotlin["id"]
     assert body["model"] == MODEL_NAME
@@ -102,6 +112,9 @@ async def test_associations_returns_200_with_candidate_metadata_only(
     assert item["tags"] == ["python"]
     assert item["reason"] == "Neighboring language notes."
     assert "cosine distance" in item["signal"]
+    done = events[2][1]
+    assert done["run_id"] == run_started["run_id"]
+    assert done["outcome"] == "success"
     assert len(prompts) == 1  # exactly one model call
 
 
@@ -158,3 +171,42 @@ async def test_build_association_service_with_key_returns_service():
     service = build_association_service(hermetic_settings(CHAT_API_KEY=SecretStr("test-key")))
 
     assert isinstance(service, AssociationService)
+
+
+@pytest.mark.db
+async def test_associations_stream_provider_failure_emits_single_terminal_error(
+    app, db_client, session_factory
+):
+    kotlin = (await db_client.post("/api/v1/documents", json={"content": KOTLIN_DOC})).json()
+    # A shared-tag neighbor guarantees the run reaches the model (candidates
+    # exist), so the scripted provider failure fires after run_started.
+    await db_client.post(
+        "/api/v1/documents",
+        json={"content": "---\ntitle: Kotlin Companion\ntags: [kotlin]\n---\n\nNeighbor body."},
+    )
+    prompts: list[str] = []
+    app.dependency_overrides[get_association_service] = lambda: AssociationService(
+        scripted_association_model(
+            [],
+            fail=APIStatusError(
+                "upstream exploded",
+                response=httpx.Response(
+                    500, request=httpx.Request("POST", "http://provider.test/v1/chat")
+                ),
+                body=None,
+            ),
+            prompts=prompts,
+        ),
+        MODEL_NAME,
+        session_factory=session_factory,
+    )
+
+    resp = await db_client.post(f"/api/v1/documents/{kotlin['id']}/associations")
+
+    # Streaming had already begun: run_started stands, one terminal error, no done.
+    assert resp.status_code == 200
+    events = parse_sse(resp.text)
+    assert [name for name, _ in events] == ["run_started", "error"]
+    assert events[-1][1]["code"] == "llm_provider_error"
+    assert "upstream exploded" not in events[-1][1]["message"]
+    app.dependency_overrides.clear()

@@ -9,16 +9,21 @@ document load or model call.
 from __future__ import annotations
 
 from collections.abc import Callable
+from uuid import UUID
 
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from pydantic import SecretStr
+from pydantic_ai.exceptions import ModelHTTPError
+from pydantic_ai.messages import ModelResponse
+from pydantic_ai.models.function import FunctionModel
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.api.deps import build_summarize_service, get_summarize_service
+from app.models.tenant import DEFAULT_TENANT_ID
 from app.services.agents import SummarizeService
-from fakes import hermetic_settings, scripted_summarize_model
+from fakes import FakeCache, hermetic_settings, parse_sse, scripted_summarize_model
 
 # Stands in for Settings.CHAT_MODEL at wiring time; deps.py passes that
 # setting into the service, and the response must echo it back.
@@ -56,24 +61,45 @@ def install_scripted_summary(
 
 
 @pytest.mark.db
-async def test_summary_returns_200_with_scripted_result(db_client, install_scripted_summary):
+async def test_summary_streams_scripted_result_and_terminal_done(
+    db_client, install_scripted_summary
+):
     prompts = install_scripted_summary(["Contract summary."])
     created = (await db_client.post("/api/v1/documents", json={"content": FM_DOC})).json()
 
     resp = await db_client.post(f"/api/v1/documents/{created['id']}/summary")
 
     assert resp.status_code == 200
-    body = resp.json()
-    assert set(body) == {"document_id", "summary", "model", "latency_ms"}
-    assert body["document_id"] == created["id"]
-    assert body["summary"] == "Contract summary."
-    assert body["model"] == MODEL_NAME
-    assert body["latency_ms"] >= 0
+    assert resp.headers["content-type"].startswith("text/event-stream")
+    events = parse_sse(resp.text)
+    # Fixed grammar: run_started → map_pass → reduce_pass → summary → done.
+    assert [name for name, _ in events] == [
+        "run_started",
+        "summary_progress",
+        "summary_progress",
+        "summary",
+        "done",
+    ]
+    run_started = events[0][1]
+    assert run_started["kind"] == "summary"
+    assert run_started["document_id"] == created["id"]
+    assert run_started["run_id"]
+    assert events[1][1] == {"phase": "map_pass", "pass_index": 1, "passes_total": 2}
+    assert events[2][1] == {"phase": "reduce_pass", "pass_index": 2, "passes_total": 2}
+    result = events[3][1]
+    assert set(result) == {"document_id", "summary", "model", "latency_ms"}
+    assert result["document_id"] == created["id"]
+    assert result["summary"] == "Contract summary."
+    assert result["model"] == MODEL_NAME
+    assert result["latency_ms"] >= 0
+    done = events[4][1]
+    assert done["run_id"] == run_started["run_id"]
+    assert done["outcome"] == "success"
     assert len(prompts) == 1  # short doc: exactly one model pass
 
 
 @pytest.mark.db
-async def test_summary_of_long_document_returns_the_combine_output(
+async def test_summary_of_long_document_streams_map_passes_then_reduce(
     db_client, install_scripted_summary
 ):
     prompts = install_scripted_summary(["s-one", "s-two", "s-three", "Final reduce."])
@@ -87,7 +113,24 @@ async def test_summary_of_long_document_returns_the_combine_output(
     resp = await db_client.post(f"/api/v1/documents/{created['id']}/summary")
 
     assert resp.status_code == 200
-    assert resp.json()["summary"] == "Final reduce."
+    events = parse_sse(resp.text)
+    assert [name for name, _ in events] == [
+        "run_started",
+        "summary_progress",
+        "summary_progress",
+        "summary_progress",
+        "summary_progress",
+        "summary",
+        "done",
+    ]
+    progress = [data for name, data in events if name == "summary_progress"]
+    assert [(p["phase"], p["pass_index"], p["passes_total"]) for p in progress] == [
+        ("map_pass", 1, 4),
+        ("map_pass", 2, 4),
+        ("map_pass", 3, 4),
+        ("reduce_pass", 4, 4),
+    ]
+    assert events[-2][1]["summary"] == "Final reduce."
     assert len(prompts) == 4  # 3 chunk passes + 1 combine through the endpoint
 
 
@@ -144,3 +187,64 @@ async def test_build_summarize_service_with_key_returns_service():
     service = build_summarize_service(hermetic_settings(CHAT_API_KEY=SecretStr("test-key")))
 
     assert isinstance(service, SummarizeService)
+
+
+@pytest.mark.db
+async def test_summary_stream_provider_failure_emits_single_terminal_error(
+    app, db_client, session_factory
+):
+    created = (await db_client.post("/api/v1/documents", json={"content": FM_DOC})).json()
+    prompts: list[str] = []
+
+    async def failing(messages, info) -> ModelResponse:
+        prompts.append("")
+        raise ModelHTTPError(
+            status_code=503, model_name="failing", body={"message": "upstream exploded"}
+        )
+
+    app.dependency_overrides[get_summarize_service] = lambda: SummarizeService(
+        FunctionModel(failing, model_name="failing"),
+        MODEL_NAME,
+        session_factory=session_factory,
+    )
+
+    resp = await db_client.post(f"/api/v1/documents/{created['id']}/summary")
+
+    # Streaming had already begun: run_started stands, one terminal error, no done.
+    assert resp.status_code == 200
+    events = parse_sse(resp.text)
+    assert [name for name, _ in events] == [
+        "run_started",
+        "summary_progress",
+        "error",
+    ]
+    assert events[-1][1]["code"] == "llm_provider_error"
+    assert "upstream exploded" not in events[-1][1]["message"]
+    app.dependency_overrides.clear()
+
+
+@pytest.mark.db
+async def test_summary_stream_cache_hit_skips_progress_and_model_call(
+    app, db_client, session_factory
+):
+    prompts: list[str] = []
+    cache = FakeCache()
+    created = (await db_client.post("/api/v1/documents", json={"content": FM_DOC})).json()
+    service = SummarizeService(
+        scripted_summarize_model(["Cached summary."], prompts=prompts),
+        MODEL_NAME,
+        session_factory=session_factory,
+        cache=cache,
+        cache_ttl_seconds=60,
+    )
+    app.dependency_overrides[get_summarize_service] = lambda: service
+    await service.summarize_document(UUID(created["id"]), tenant_id=DEFAULT_TENANT_ID)
+
+    resp = await db_client.post(f"/api/v1/documents/{created['id']}/summary")
+
+    assert resp.status_code == 200
+    events = parse_sse(resp.text)
+    assert [name for name, _ in events] == ["run_started", "summary", "done"]
+    assert events[1][1]["summary"] == "Cached summary."
+    assert len(prompts) == 1  # the warm run only; the hit made no model call
+    app.dependency_overrides.clear()

@@ -1,0 +1,6 @@
+{"file":".trellis/spec/backend/index.md","reason":"Review scope and layering conventions for the SSE conversion."}
+{"file":".trellis/spec/backend/error-handling.md","reason":"Verify pre-stream 404 envelope vs post-200 terminal error event behavior on both endpoints."}
+{"file":".trellis/spec/backend/chat-guidelines.md","reason":"Verify the new streams follow the documented SSE ordering and event grammar conventions without duplicating chat wire format."}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"Verify no document content, prompts, summaries, or association reasons in logs."}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Verify offline test coverage and toolchain gates (ruff/format/mypy/pytest) all pass."}
+{"file":".trellis/spec/backend/auth-tenancy.md","reason":"Verify tenant scoping and error semantics (404 vs 403 vs 401) unchanged on the converted routes."}

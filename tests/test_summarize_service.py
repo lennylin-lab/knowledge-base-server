@@ -21,10 +21,17 @@ from structlog.testing import capture_logs
 
 from app.core.exceptions import LLMProviderError, LLMRateLimitedError, NotFoundError
 from app.models.tenant import DEFAULT_TENANT_ID
+from app.schemas.agent_stream import (
+    AgentDoneEvent,
+    AgentRunStartedEvent,
+    ErrorEvent,
+    SummaryProgressEvent,
+    SummaryResultEvent,
+)
 from app.schemas.document import DocumentCreate
 from app.services.agents import SummarizeService
 from app.services.document import DocumentService
-from fakes import scripted_summarize_model
+from fakes import FakeCache, scripted_summarize_model
 
 pytestmark = pytest.mark.db
 
@@ -274,3 +281,139 @@ async def test_front_matter_only_document_summarizes_raw_content_in_one_pass(
     assert len(prompts) == 1
     assert "# Document: Only Front Matter" in prompts[0]
     assert "title: Only Front Matter" in prompts[0]
+
+
+# --- stream contract (design: agent stream) ---
+
+
+async def drain(events):
+    """Collect a typed event stream into a list."""
+    return [event async for event in events]
+
+
+async def test_stream_success_single_pass_emits_fixed_grammar(db_session, session_factory):
+    created = await make_document(db_session, SHORT_DOC)
+    service = make_service(session_factory, scripted_summarize_model(["Streamed summary."]))
+
+    events = await drain(service.summarize_document_stream(created.id, tenant_id=DEFAULT_TENANT_ID))
+
+    # Fixed grammar even for a single pass: one map + one reduce progress.
+    assert [type(event) for event in events] == [
+        AgentRunStartedEvent,
+        SummaryProgressEvent,
+        SummaryProgressEvent,
+        SummaryResultEvent,
+        AgentDoneEvent,
+    ]
+    run_started = events[0]
+    assert run_started.kind == "summary"
+    assert run_started.document_id == created.id
+    assert run_started.run_id
+    assert events[1].model_dump() == {"phase": "map_pass", "pass_index": 1, "passes_total": 2}
+    assert events[2].model_dump() == {"phase": "reduce_pass", "pass_index": 2, "passes_total": 2}
+    result = events[3]
+    assert result.summary == "Streamed summary."
+    assert result.document_id == created.id
+    assert result.model == MODEL_NAME
+    assert result.latency_ms >= 0
+    done = events[4]
+    assert done.run_id == run_started.run_id
+    assert done.outcome == "success"
+    assert done.latency_ms == result.latency_ms
+
+
+async def test_stream_multipass_progress_indices_follow_pass_order(db_session, session_factory):
+    created = await make_document(
+        db_session, f"---\ntitle: Long Note\ntags: [long]\n---\n\n{long_content(3)}"
+    )
+    service = make_service(
+        session_factory, scripted_summarize_model(["s-one", "s-two", "s-three", "Final reduce."])
+    )
+
+    events = await drain(service.summarize_document_stream(created.id, tenant_id=DEFAULT_TENANT_ID))
+
+    progress = [event for event in events if isinstance(event, SummaryProgressEvent)]
+    assert [(event.phase, event.pass_index, event.passes_total) for event in progress] == [
+        ("map_pass", 1, 4),
+        ("map_pass", 2, 4),
+        ("map_pass", 3, 4),
+        ("reduce_pass", 4, 4),
+    ]
+    # The final result still carries the reduce pass output.
+    assert events[-2].summary == "Final reduce."
+
+
+async def test_stream_cache_hit_skips_progress_events_and_model_call(db_session, session_factory):
+    prompts: list[str] = []
+    model = scripted_summarize_model(["Cached summary."], prompts=prompts)
+    cache = FakeCache()
+    created = await make_document(db_session, SHORT_DOC)
+    warming = SummarizeService(
+        model, MODEL_NAME, session_factory=session_factory, cache=cache, cache_ttl_seconds=60
+    )
+    await warming.summarize_document(created.id, tenant_id=DEFAULT_TENANT_ID)
+
+    events = await drain(warming.summarize_document_stream(created.id, tenant_id=DEFAULT_TENANT_ID))
+
+    assert [type(event) for event in events] == [
+        AgentRunStartedEvent,
+        SummaryResultEvent,
+        AgentDoneEvent,
+    ]
+    assert events[1].summary == "Cached summary."
+    assert len(prompts) == 1  # the warm run only; the hit made no model call
+
+
+async def test_stream_provider_failure_emits_single_terminal_error(db_session, session_factory):
+    created = await make_document(db_session, SHORT_DOC)
+
+    async def failing(messages: list[ModelMessage], info: object) -> ModelResponse:
+        raise ModelHTTPError(
+            status_code=503, model_name="failing", body={"message": "upstream exploded"}
+        )
+
+    service = SummarizeService(
+        FunctionModel(failing, model_name="failing"),
+        MODEL_NAME,
+        session_factory=session_factory,
+    )
+
+    with capture_logs() as logs:
+        events = await drain(
+            service.summarize_document_stream(created.id, tenant_id=DEFAULT_TENANT_ID)
+        )
+
+    # run_started stands, then one progress event, then exactly one terminal
+    # error event and no done.
+    assert [type(event) for event in events] == [
+        AgentRunStartedEvent,
+        SummaryProgressEvent,
+        ErrorEvent,
+    ]
+    assert events[-1].code == "llm_provider_error"
+    assert "upstream exploded" not in events[-1].message
+    failed = next(entry for entry in logs if entry["event"] == "agent_run_failed")
+    assert failed["outcome"] == "llm_provider_error"
+
+
+async def test_stream_missing_document_raises_before_first_event(session_factory):
+    service = make_service(session_factory, scripted_summarize_model(["never"]))
+
+    with pytest.raises(NotFoundError):
+        await drain(service.summarize_document_stream(uuid4(), tenant_id=DEFAULT_TENANT_ID))
+
+
+async def test_wrapper_result_matches_stream_result_event(db_session, session_factory):
+    created = await make_document(db_session, SHORT_DOC)
+    service = make_service(session_factory, scripted_summarize_model(["Parity summary."]))
+
+    wrapper_result = await service.summarize_document(created.id, tenant_id=DEFAULT_TENANT_ID)
+    stream_events = await drain(
+        service.summarize_document_stream(created.id, tenant_id=DEFAULT_TENANT_ID)
+    )
+    stream_result = next(e for e in stream_events if isinstance(e, SummaryResultEvent))
+
+    assert wrapper_result.summary == stream_result.summary
+    assert wrapper_result.model_dump(exclude={"latency_ms"}) == stream_result.model_dump(
+        exclude={"latency_ms"}
+    )

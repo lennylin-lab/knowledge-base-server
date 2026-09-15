@@ -1,11 +1,13 @@
 """Agent orchestration: summarize passes, association candidates, writing runs.
 
-Summarize and association are synchronous single responses: one call yields
-one computed result, never persisted. Summarize runs chunk-aware passes —
-long documents map-reduce style with the production chunker (one model pass
-per chunk, sequentially, then one combine pass). Association gathers its
-deterministic candidates (pgvector neighbors + tag overlap) BEFORE any model
-call, so the LLM only curates what the database surfaced. Writing streams
+Summarize and association compute one result per run, never persisted, and
+stream it as typed SSE events (design: agent stream) — summarize runs
+chunk-aware passes — long documents map-reduce style with the production
+chunker (one model pass per chunk, sequentially, then one combine pass) with
+a progress event per pass; association gathers its deterministic candidates
+(pgvector neighbors + tag overlap) BEFORE any model call, so the LLM only
+curates what the database surfaced, and its structured output stays atomic.
+Plain-coroutine wrappers drain the streams for sync callers. Writing streams
 suggestions over chat's SSE event vocabulary, with `ChatService.ask`'s stream
 discipline: run_id binding, sources flushed per tool call, and nothing may
 escape `suggest` once the first event is yielded.
@@ -51,6 +53,14 @@ from app.rag.chunker import chunk_markdown
 from app.rag.retriever import Retriever
 from app.repositories.document import DocumentRepository, TagOverlapRow
 from app.repositories.document_chunk import DocumentChunkRepository, NeighborDocumentRow
+from app.schemas.agent_stream import (
+    AgentDoneEvent,
+    AgentRunStartedEvent,
+    AgentStreamEvent,
+    AssociationsResultEvent,
+    SummaryProgressEvent,
+    SummaryResultEvent,
+)
 from app.schemas.agents import AssociationItem, AssociationsResult, SummaryResult
 from app.schemas.chat import (
     AnswerDeltaEvent,
@@ -95,29 +105,66 @@ class SummarizeService:
     async def summarize_document(self, doc_id: UUID, *, tenant_id: UUID) -> SummaryResult:
         """Summarize one live document; missing/soft-deleted raise NotFoundError.
 
-        Content that fits a single chunk is summarized in one pass; longer
-        content is chunked (map) and combined (reduce). Provider failures
-        surface as their `AppError` taxonomy so the shared handler returns
-        the matching envelope. Document content and summary text are never
-        logged — ids, lengths, and token counts only.
+        Draining wrapper over `summarize_document_stream`: the stream's errors
+        (which the stream itself reports as terminal `error` events only after
+        its first yield) surface here as their `AppError` — the internal
+        generator raises them straight through — so the sync envelope behavior
+        is unchanged. The result event IS the `SummaryResult`.
         """
+        async for event in self._summarize_events(doc_id, tenant_id=tenant_id):
+            if isinstance(event, SummaryResultEvent):
+                return event
+        raise AssertionError("summarize stream ended without a result event")
+
+    async def summarize_document_stream(
+        self, doc_id: UUID, *, tenant_id: UUID
+    ) -> AsyncIterator[AgentStreamEvent]:
+        """Stream one summarize run as typed events (design: agent stream).
+
+        Contract order: `run_started` → `summary_progress` per map pass plus
+        the reduce pass (fixed grammar, even for single-pass summaries) →
+        `summary` → `done`. A cache hit skips all progress events. The
+        document load (404 gate on missing/soft-deleted) happens BEFORE the
+        first yield, so pre-stream failures keep their HTTP envelopes;
+        everything after that becomes a terminal `error` event — nothing
+        raises out of this generator once it has yielded.
+        """
+        yielded = False
+        try:
+            async for event in self._summarize_events(doc_id, tenant_id=tenant_id):
+                yielded = True
+                yield event
+        except AppError as failure:
+            if not yielded:
+                raise  # pre-stream (document load): the HTTP envelope still applies
+            yield ErrorEvent(code=failure.code, message=failure.message)
+
+    async def _summarize_events(
+        self, doc_id: UUID, *, tenant_id: UUID
+    ) -> AsyncIterator[AgentStreamEvent]:
+        """Internal event generator; raises `AppError` on any failure."""
         started = time.perf_counter()
         # The load happens before anything else: a missing document must 404
         # without a model call, and the run log needs the id bound.
         document = await self._load_document(doc_id, tenant_id=tenant_id)
-        log = logger.bind(document_id=str(doc_id), run_id=uuid4().hex)
+        run_id = uuid4().hex
+        log = logger.bind(document_id=str(doc_id), run_id=run_id)
+        yield AgentRunStartedEvent(run_id=run_id, kind="summary", document_id=doc_id)
         # The document load above is the correctness gate (404 on missing);
         # the cache only ever short-circuits the expensive LLM run. Lookup
         # happens before chunking so a hit skips all model passes.
         cached = await self._cache_get(document, started=started)
         if cached is not None:
+            latency_ms = round((time.perf_counter() - started) * 1000, 2)
             log.info(
                 "cache_hit",
                 domain="summary",
                 model=self._model_name,
-                latency_ms=round((time.perf_counter() - started) * 1000, 2),
+                latency_ms=latency_ms,
             )
-            return cached
+            yield SummaryResultEvent(**cached.model_dump())
+            yield AgentDoneEvent(run_id=run_id, outcome="success", latency_ms=latency_ms)
+            return
         deps = SummarizeDeps(title=document.title, tags=list(document.tags))
         # Front-matter-only (or whitespace-only) bodies chunk to nothing; the
         # degenerate path summarizes the RAW stored content in one pass. Raw is
@@ -129,15 +176,29 @@ class SummarizeService:
 
         input_tokens = 0
         output_tokens = 0
+        # Fixed progress grammar: one event per map pass plus the reduce pass,
+        # so the reduce pass is always pass_index == passes_total.
+        passes_total = len(chunks) + 1
         try:
             if len(chunks) == 1:
+                yield SummaryProgressEvent(
+                    phase="map_pass", pass_index=1, passes_total=passes_total
+                )
                 summary, tokens_in, tokens_out = await self._run_pass(
                     deps, render_document_prompt(deps, chunks[0])
+                )
+                # Fixed grammar: the reduce phase is announced even when the
+                # whole document was one pass — no separate model call behind it.
+                yield SummaryProgressEvent(
+                    phase="reduce_pass", pass_index=passes_total, passes_total=passes_total
                 )
                 runs = 1
             else:
                 section_summaries: list[str] = []
                 for index, chunk in enumerate(chunks, start=1):
+                    yield SummaryProgressEvent(
+                        phase="map_pass", pass_index=index, passes_total=passes_total
+                    )
                     text, tokens_in, tokens_out = await self._run_pass(
                         deps,
                         render_document_prompt(deps, chunk, section=(index, len(chunks))),
@@ -145,6 +206,9 @@ class SummarizeService:
                     section_summaries.append(text)
                     input_tokens += tokens_in
                     output_tokens += tokens_out
+                yield SummaryProgressEvent(
+                    phase="reduce_pass", pass_index=passes_total, passes_total=passes_total
+                )
                 summary, tokens_in, tokens_out = await self._run_pass(
                     deps, render_reduce_prompt(deps, section_summaries)
                 )
@@ -155,9 +219,9 @@ class SummarizeService:
             failure = _as_app_error(exc)
             # Run-level audit event, not a boundary log: it closes the
             # agent_run_started trail with run-scoped context (run_id, latency,
-            # error_class, traceback) that the request-boundary `app_error`
-            # handler line cannot carry. Re-raising hands the envelope to that
-            # handler — two events, two scopes, no duplicated payload.
+            # error_class, traceback). Re-raising lets the stream wrapper turn
+            # it into the terminal `error` event (or the sync wrapper's
+            # envelope) — one audit trail, no duplicated payload.
             log.exception(
                 "agent_run_failed",
                 agent="summarize",
@@ -185,7 +249,8 @@ class SummarizeService:
             latency_ms=latency_ms,
         )
         await self._cache_put(document, result)
-        return result
+        yield SummaryResultEvent(**result.model_dump())
+        yield AgentDoneEvent(run_id=run_id, outcome="success", latency_ms=latency_ms)
 
     async def _cache_get(self, document: Document, *, started: float) -> SummaryResult | None:
         """Cached summary lookup; only successful results are ever stored.
@@ -293,6 +358,42 @@ class AssociationService:
     async def associate_document(self, doc_id: UUID, *, tenant_id: UUID) -> AssociationsResult:
         """Curate related documents for one live document via the LLM.
 
+        Draining wrapper over `associate_document_stream` (see the summarize
+        twin for the error-surfacing rationale). The result event IS the
+        `AssociationsResult`.
+        """
+        async for event in self._association_events(doc_id, tenant_id=tenant_id):
+            if isinstance(event, AssociationsResultEvent):
+                return event
+        raise AssertionError("association stream ended without a result event")
+
+    async def associate_document_stream(
+        self, doc_id: UUID, *, tenant_id: UUID
+    ) -> AsyncIterator[AgentStreamEvent]:
+        """Stream one association run as typed events (design: agent stream).
+
+        Contract order: `run_started` → `associations` → `done`; the no-
+        candidates and cache-hit shortcuts keep the same shape (no progress
+        events — the structured output is atomic). The candidate gather (404
+        gate on missing/soft-deleted) happens BEFORE the first yield, so
+        pre-stream failures keep their HTTP envelopes; everything after that
+        becomes a terminal `error` event.
+        """
+        yielded = False
+        try:
+            async for event in self._association_events(doc_id, tenant_id=tenant_id):
+                yielded = True
+                yield event
+        except AppError as failure:
+            if not yielded:
+                raise  # pre-stream (gather/document load): HTTP envelope applies
+            yield ErrorEvent(code=failure.code, message=failure.message)
+
+    async def _association_events(
+        self, doc_id: UUID, *, tenant_id: UUID
+    ) -> AsyncIterator[AgentStreamEvent]:
+        """Internal event generator; raises `AppError` on any failure.
+
         Deterministic candidates are gathered before any model call: a
         missing/soft-deleted source raises NotFoundError and a source with no
         candidates at all returns an empty result — neither ever reaches the
@@ -304,18 +405,23 @@ class AssociationService:
         """
         started = time.perf_counter()
         document, candidates, excerpt = await self._gather(doc_id, tenant_id=tenant_id)
-        log = logger.bind(document_id=str(doc_id), run_id=uuid4().hex)
+        run_id = uuid4().hex
+        log = logger.bind(document_id=str(doc_id), run_id=run_id)
+        yield AgentRunStartedEvent(run_id=run_id, kind="associations", document_id=doc_id)
         # The gather above is the correctness gate (404 on missing); the
         # cache only ever short-circuits the expensive LLM run.
         cached = await self._cache_get(document, started=started)
         if cached is not None:
+            latency_ms = round((time.perf_counter() - started) * 1000, 2)
             log.info(
                 "cache_hit",
                 domain="association",
                 model=self._model_name,
-                latency_ms=round((time.perf_counter() - started) * 1000, 2),
+                latency_ms=latency_ms,
             )
-            return cached
+            yield AssociationsResultEvent(**cached.model_dump())
+            yield AgentDoneEvent(run_id=run_id, outcome="success", latency_ms=latency_ms)
+            return
         if not candidates:
             # No signal to curate: skip the run (and its lifecycle events)
             # rather than logging a run that never happened.
@@ -326,12 +432,14 @@ class AssociationService:
                 reason="no_candidates",
                 latency_ms=latency_ms,
             )
-            return AssociationsResult(
+            yield AssociationsResultEvent(
                 document_id=doc_id,
                 associations=[],
                 model=self._model_name,
                 latency_ms=latency_ms,
             )
+            yield AgentDoneEvent(run_id=run_id, outcome="success", latency_ms=latency_ms)
+            return
 
         deps = AssociationDeps(title=document.title, tags=list(document.tags))
         prompt = render_association_prompt(deps, excerpt, candidates)
@@ -341,8 +449,8 @@ class AssociationService:
         except Exception as exc:
             failure = _as_app_error(exc)
             # Run-level audit event closing the agent_run_started trail (see
-            # the summarize twin for the two-scopes rationale); the envelope
-            # comes from re-raising into the shared handler.
+            # the summarize twin); re-raising feeds the terminal `error` event
+            # or the sync wrapper's envelope.
             log.exception(
                 "agent_run_failed",
                 agent="association",
@@ -374,7 +482,8 @@ class AssociationService:
             latency_ms=latency_ms,
         )
         await self._cache_put(document, associations_result)
-        return associations_result
+        yield AssociationsResultEvent(**associations_result.model_dump())
+        yield AgentDoneEvent(run_id=run_id, outcome="success", latency_ms=latency_ms)
 
     async def _cache_get(self, document: Document, *, started: float) -> AssociationsResult | None:
         """Cached association lookup; only successful non-empty results are

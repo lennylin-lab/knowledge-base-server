@@ -1,0 +1,12 @@
+{"file":".trellis/spec/backend/index.md","reason":"Layering matrix and project conventions; routers thin, services own orchestration, agents stay framework/SSE free."}
+{"file":".trellis/spec/backend/error-handling.md","reason":"Pre-stream HTTP envelope vs terminal SSE error event contract; AppError taxonomy and streaming failure mapping."}
+{"file":".trellis/spec/backend/chat-guidelines.md","reason":"Existing SSE progress-event ordering contracts and gateway adapter boundary; the new agent streams must follow the same event grammar rules."}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"Logs carry ids, lengths, and error classes only — never document content, prompts, summaries, or association reasons."}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Offline AI test strategy, toolchain gates, and forbidden patterns for the new service/API tests."}
+{"file":"src/app/schemas/chat.py","reason":"Canonical typed SSE event models and ErrorEvent shape to reuse; RunStartedEvent/StatusEvent/DoneEvent precedent for the new AgentStreamEvent union."}
+{"file":"src/app/api/v1/endpoints/chat.py","reason":"to_sse serializer and _primed_sse idiom (L35-88) to extract/share; priming preserves pre-stream 404 envelopes."}
+{"file":"src/app/services/agents.py","reason":"SummarizeService (L71-229, map/reduce passes, cache) and AssociationService (L269-431, gather/validate/filter, single LLM call); _as_app_error error mapping; WritingService.suggest (L579-628) generator precedent."}
+{"file":"src/app/api/v1/endpoints/documents.py","reason":"The two routes being converted (L79-92): current deps (TenantScope), response models, and error surface to preserve."}
+{"file":"src/app/schemas/agents.py","reason":"SummaryResult and AssociationsResult canonical payloads that must appear verbatim in the final result events."}
+{"file":"tests/fakes.py","reason":"Shared parse_sse test helper (L165-186) that AC6 requires the new API tests to use."}
+{"file":"tests/test_chat_api.py","reason":"Reference SSE API test patterns: content-type, event sequence, payload shape assertions (L66-124)."}

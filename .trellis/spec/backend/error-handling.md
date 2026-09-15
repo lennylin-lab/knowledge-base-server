@@ -191,16 +191,36 @@ async def get_document(self, doc_id: UUID) -> DocumentRead:
     return DocumentRead.model_validate(doc)
 ```
 
-Sync agent endpoints (summarize, later siblings) map provider failures
-to `AppError` subclasses and **re-raise** — the shared handler returns
-the envelope. The SSE terminal-`error`-event path above is the special
-case reserved for streams that already sent a 200.
+The document agent endpoints (summarize, associations) stream as SSE: their
+services map provider failures through the same `_as_app_error` taxonomy and
+turn any failure after the first yielded event into the terminal `error`
+event above; failures before it (document load) propagate so the shared
+handler returns the envelope. Pre-stream no-key configuration gates (503
+`chat_unavailable`) fire in the dependency, before any stream.
 
 `run_started.mode` must report the retriever **actually wired**
 (`"hybrid" if embedding provider is not None else "bm25"`) — since
 provider-config isolation the embedding and chat keys are independent,
 so a chat-key-only deployment wires BM25-only and must say so. Both
 chat and writing compute mode from the wiring; keep it that way.
+
+Document agent streams (summarize / associations, implemented in
+`services/agents.py`, wire names in `api/v1/endpoints/documents.py`) follow
+the same discipline with their own event vocabulary
+(`schemas/agent_stream.py`, serialized by the shared
+`api/v1/endpoints/sse.py` module that chat's serializer delegates to):
+
+| Stream | Event order |
+|--------|-------------|
+| summary | `run_started` (run_id, kind, document_id) → `summary_progress`* (phase `map_pass`/`reduce_pass`, 1-based `pass_index`, `passes_total` = map passes + 1; fixed grammar — also on single-pass summaries) → `summary` (full `SummaryResult` flat) → `done` |
+| associations | `run_started` → `associations` (full `AssociationsResult` flat; structured output stays atomic — no partial events) → `done` |
+| both, failure after 200 | already-emitted events stand → exactly one `error` (chat's `ErrorEvent`, reused so there is one error dialect) → close |
+
+Cache hits keep the same `run_started` → result → `done` shape with no
+progress events and no model call. The pre-stream rule is unchanged: the
+services load the document (404 gate on missing/soft-deleted) BEFORE the
+first yield, and the endpoints use chat's priming pattern, so missing
+documents still get the JSON 404 envelope — never a broken stream.
 
 ## Rules
 

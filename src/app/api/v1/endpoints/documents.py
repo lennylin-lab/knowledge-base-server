@@ -1,4 +1,11 @@
-"""Document CRUD endpoints — thin: parse, one service call, map to schema."""
+"""Document CRUD and agent endpoints — thin: parse, one service call, respond.
+
+The agent routes (summary/associations) stream their service generators as
+SSE through the shared serializer; the priming pull turns pre-stream
+failures (missing/soft-deleted document → 404) into clean JSON envelopes,
+while anything after the first event arrives as a terminal `error` event the
+service already emitted.
+"""
 
 from __future__ import annotations
 
@@ -6,6 +13,7 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Query, status
+from sse_starlette.sse import EventSourceResponse
 
 from app.api.deps import (
     AssociationServiceDep,
@@ -14,7 +22,16 @@ from app.api.deps import (
     SummarizeServiceDep,
     TenantScope,
 )
-from app.schemas.agents import AssociationsResult, SummaryResult
+from app.api.v1.endpoints.sse import primed_sse
+from app.schemas.agent_stream import (
+    AgentDoneEvent,
+    AgentRunStartedEvent,
+    AgentStreamEvent,
+    AssociationsResultEvent,
+    SummaryProgressEvent,
+    SummaryResultEvent,
+)
+from app.schemas.chat import ErrorEvent
 from app.schemas.document import (
     DocumentCreate,
     DocumentPage,
@@ -24,6 +41,15 @@ from app.schemas.document import (
 )
 
 router = APIRouter()
+
+_EVENT_NAMES: dict[type[AgentStreamEvent], str] = {
+    AgentRunStartedEvent: "run_started",
+    SummaryProgressEvent: "summary_progress",
+    SummaryResultEvent: "summary",
+    AssociationsResultEvent: "associations",
+    ErrorEvent: "error",
+    AgentDoneEvent: "done",
+}
 
 
 @router.post("", status_code=status.HTTP_201_CREATED, response_model=DocumentRead)
@@ -76,17 +102,24 @@ async def delete_document(
     await service.delete_document(document_id, tenant_id=tenant)
 
 
-@router.post("/{document_id}/summary", response_model=SummaryResult)
+@router.post("/{document_id}/summary", response_class=EventSourceResponse, response_model=None)
 async def summarize_document(
     document_id: UUID, service: SummarizeServiceDep, tenant: TenantScope
-) -> SummaryResult:
-    """Compute an LLM summary of the document (synchronous, not persisted)."""
-    return await service.summarize_document(document_id, tenant_id=tenant)
+) -> EventSourceResponse:
+    """Stream an LLM summary of the document as SSE (never persisted)."""
+    events = service.summarize_document_stream(document_id, tenant_id=tenant)
+    # Prime through the first event BEFORE the response is built: the service
+    # loads the document there, so a missing/soft-deleted document raises 404
+    # as a JSON envelope instead of a broken stream (see chat for the idiom).
+    first = await events.__anext__()
+    return EventSourceResponse(primed_sse(first, events, _EVENT_NAMES))
 
 
-@router.post("/{document_id}/associations", response_model=AssociationsResult)
+@router.post("/{document_id}/associations", response_class=EventSourceResponse, response_model=None)
 async def associate_document(
     document_id: UUID, service: AssociationServiceDep, tenant: TenantScope
-) -> AssociationsResult:
-    """Compute LLM-curated related documents (synchronous, not persisted)."""
-    return await service.associate_document(document_id, tenant_id=tenant)
+) -> EventSourceResponse:
+    """Stream LLM-curated related documents as SSE (never persisted)."""
+    events = service.associate_document_stream(document_id, tenant_id=tenant)
+    first = await events.__anext__()  # priming: the gather's 404 stays an envelope
+    return EventSourceResponse(primed_sse(first, events, _EVENT_NAMES))
