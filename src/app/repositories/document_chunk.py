@@ -102,7 +102,12 @@ class DocumentChunkRepository:
         return (await self._session.execute(stmt)).scalars().all()
 
     async def search_similar(
-        self, embedding: Sequence[float], *, limit: int, tag: str | None = None
+        self,
+        embedding: Sequence[float],
+        *,
+        tenant_id: UUID,
+        limit: int,
+        tag: str | None = None,
     ) -> Sequence[ChunkRow]:
         """Vector leg: nearest chunks of live documents, hydrated inline.
 
@@ -110,11 +115,13 @@ class DocumentChunkRepository:
         carries that distance so the retriever's relevance gate can drop
         matches beyond the configured ceiling. The optional tag filter mirrors
         the ES leg's term filter so fused ranks are tag-consistent across both
-        legs.
+        legs. The tenant filter applies to BOTH legs the same way — a stale ES
+        index can never bypass the PG tenant boundary.
         """
         distance = DocumentChunk.embedding.cosine_distance(embedding)
         stmt = (
             _LIVE_CHUNK_SELECT.add_columns(distance.label("distance"))
+            .where(Document.tenant_id == tenant_id)
             .order_by(distance)
             .limit(limit)
         )
@@ -124,7 +131,7 @@ class DocumentChunkRepository:
         return [_as_chunk_row(row, distance=row.distance) for row in rows]
 
     async def get_live_chunks(
-        self, keys: Sequence[tuple[UUID, int]]
+        self, keys: Sequence[tuple[UUID, int]], *, tenant_id: UUID
     ) -> dict[tuple[UUID, int], ChunkRow]:
         """Hydrate `(document_id, chunk_index)` keys from live documents.
 
@@ -135,13 +142,14 @@ class DocumentChunkRepository:
         if not keys:
             return {}
         stmt = _LIVE_CHUNK_SELECT.where(
-            tuple_(DocumentChunk.document_id, DocumentChunk.chunk_index).in_(list(keys))
+            Document.tenant_id == tenant_id,
+            tuple_(DocumentChunk.document_id, DocumentChunk.chunk_index).in_(list(keys)),
         )
         rows = (await self._session.execute(stmt)).all()
         return {(row.document_id, row.chunk_index): _as_chunk_row(row) for row in rows}
 
     async def find_neighbor_documents(
-        self, document_id: UUID, *, limit: int
+        self, document_id: UUID, *, tenant_id: UUID, limit: int
     ) -> Sequence[NeighborDocumentRow]:
         """Association vector leg: live documents with chunks nearest to this
         document's own chunk embeddings, one row per document.
@@ -166,7 +174,10 @@ class DocumentChunkRepository:
             distance = DocumentChunk.embedding.cosine_distance(embedding)
             stmt = (
                 _LIVE_CHUNK_SELECT.add_columns(distance.label("distance"))
-                .where(DocumentChunk.document_id != document_id)
+                .where(
+                    Document.tenant_id == tenant_id,
+                    DocumentChunk.document_id != document_id,
+                )
                 .order_by(distance)
                 .limit(limit)
             )
@@ -183,7 +194,7 @@ class DocumentChunkRepository:
         ranked = sorted(best.values(), key=lambda row: (row.distance, row.document_id))
         return ranked[:limit]
 
-    async def first_chunk_content(self, document_id: UUID) -> str | None:
+    async def first_chunk_content(self, document_id: UUID, *, tenant_id: UUID) -> str | None:
         """Content of the document's first chunk; `None` when none exist.
 
         A content-only column read (no embedding payloads travel) for callers
@@ -191,7 +202,11 @@ class DocumentChunkRepository:
         """
         stmt = (
             select(DocumentChunk.content)
-            .where(DocumentChunk.document_id == document_id)
+            .join(Document, Document.id == DocumentChunk.document_id)
+            .where(
+                DocumentChunk.document_id == document_id,
+                Document.tenant_id == tenant_id,
+            )
             .order_by(DocumentChunk.chunk_index.asc())
             .limit(1)
         )

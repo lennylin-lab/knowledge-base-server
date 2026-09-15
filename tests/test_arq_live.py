@@ -18,6 +18,7 @@ from arq.connections import RedisSettings
 
 import app.rag.worker as worker_module
 from app.models.document import IndexStatus
+from app.models.tenant import DEFAULT_TENANT_ID
 from app.rag.indexer import IndexingPipeline
 from app.rag.worker import INDEX_DOCUMENT_TASK
 from app.repositories.document import DocumentRepository
@@ -53,7 +54,8 @@ async def test_enqueue_worker_drain_round_trip_marks_document_done(session_facto
 
     pool = await create_pool(RedisSettings.from_dsn(TEST_REDIS_URL))
     try:
-        await pool.enqueue_job(INDEX_DOCUMENT_TASK, str(doc_id))
+        # Payload carries the tenant scope (Stage 5):
+        await pool.enqueue_job(INDEX_DOCUMENT_TASK, str(doc_id), str(DEFAULT_TENANT_ID))
         worker = Worker(
             functions=[func(worker_module.index_document, name=INDEX_DOCUMENT_TASK)],
             redis_pool=pool,
@@ -67,6 +69,6 @@ async def test_enqueue_worker_drain_round_trip_marks_document_done(session_facto
 
     assert completed == 1  # the job ran once, successfully
     async with session_factory() as session:
-        document = await DocumentRepository(session).get_by_id(doc_id)
+        document = await DocumentRepository(session).get_by_id(doc_id, tenant_id=DEFAULT_TENANT_ID)
         assert document is not None
         assert document.index_status is IndexStatus.DONE

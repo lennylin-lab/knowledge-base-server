@@ -19,6 +19,7 @@ dependencies = [
     "mcp>=2.0",
     "openai>=1.40",
     "pgvector>=0.3",
+    "pyjwt[crypto]>=2.9",
     "redis>=5.0",
     "pydantic-ai-slim[openai]>=1.0",
     "pydantic-settings>=2.4",
@@ -67,11 +68,12 @@ ignore_missing_imports = true
 testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
-addopts = "-m 'not live_llm and not live_mcp and not live_redis'"
+addopts = "-m 'not live_llm and not live_mcp and not live_redis and not live_gateway'"
 markers = [
     "live_llm: tests that call a real LLM provider (excluded from the default run)",
     "live_mcp: tests that connect to real MCP servers from mcp.json (excluded from the default run)",
     "live_redis: tests that connect to a real Redis for the ARQ queue or cache round trips (excluded from the default run)",
+    "live_gateway: tests that call the local knowledge-base-gateway with a real service key (excluded from the default run; opt-in via KB_GATEWAY_LIVE_* env)",
     "db: tests that need the disposable PostgreSQL test database (auto-skip when PG is unreachable)",
     "es: tests that need the local Elasticsearch node (auto-skip when ES is unreachable)",
 ]

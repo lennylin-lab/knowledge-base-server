@@ -19,6 +19,7 @@ from structlog.testing import capture_logs
 from app.agents.qa import ChatDeps, SourceCollector, build_qa_agent
 from app.mcp.manager import McpToolInfo, McpToolResult
 from app.mcp.tools import _DESCRIPTION_LIMIT, build_agent_tools
+from app.models.tenant import DEFAULT_TENANT_ID
 from fakes import FakeMcpManager, StubRetriever, _tool_return_count
 
 ADD_SCHEMA: dict[str, Any] = {
@@ -96,7 +97,9 @@ async def _run_agent(model: FunctionModel, tools: list[Any]) -> tuple[str, Sourc
     agent = build_qa_agent(model, extra_tools=tools)
     async with agent.run_stream(
         "question",
-        deps=ChatDeps(retriever=StubRetriever(), limit=8, collector=collector),
+        deps=ChatDeps(
+            retriever=StubRetriever(), limit=8, collector=collector, tenant_id=DEFAULT_TENANT_ID
+        ),
     ) as result:
         output = await result.get_output()
     return output, collector
@@ -194,7 +197,9 @@ async def test_failing_tool_returns_error_string_and_never_raises() -> None:
     with capture_logs() as logs:
         async with agent.run_stream(
             "question",
-            deps=ChatDeps(retriever=StubRetriever(), limit=8, collector=collector),
+            deps=ChatDeps(
+                retriever=StubRetriever(), limit=8, collector=collector, tenant_id=DEFAULT_TENANT_ID
+            ),
         ) as result:
             output = await result.get_output()
 

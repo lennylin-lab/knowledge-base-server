@@ -63,9 +63,16 @@ class AgentOperation(Base):
         ),
         # Per-document operation history, newest first (id = creation order).
         Index("ix_agent_operations_document_id", "document_id", "id"),
+        # Tenant-scoped lookups (every operation read filters tenant_id).
+        Index("ix_agent_operations_tenant_id", "tenant_id", "id"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid7)
+    # Owning tenant (Stage 5): non-null; the tenant scope of the target
+    # document at draft time. Every operation read/mutation filters it.
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
     # The target document. SET NULL (not CASCADE): an operation's audit trail
     # survives its document's deletion; applying to a deleted document fails
     # on the live-document check, not on a dangling FK.
@@ -119,9 +126,17 @@ class DocumentRevision(Base):
     __table_args__ = (
         # A document's revision history, chronological (id = creation order).
         Index("ix_document_revisions_document_id", "document_id", "id"),
+        # Tenant-scoped lookups; a revision's tenant always equals its
+        # document's (enforced by the service, which copies the operation's).
+        Index("ix_document_revisions_tenant_id", "tenant_id", "id"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid7)
+    # Owning tenant (Stage 5): copied from the operation/document at apply
+    # time so the revision trail carries the same tenant boundary.
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
     document_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("documents.id", ondelete="CASCADE"), nullable=False
     )

@@ -89,6 +89,9 @@ _CHUNK_SETTINGS: dict[str, dict[str, dict[str, dict[str, object]]]] = {
 _CHUNK_MAPPINGS: dict[str, dict[str, dict[str, object]]] = {
     "properties": {
         "document_id": {"type": "keyword"},
+        # Tenant filter field (Stage 5): every search carries a term filter on
+        # it, so a stale index can never surface another tenant's chunks.
+        "tenant_id": {"type": "keyword"},
         "title": {"type": "text", "analyzer": "ik_max_word", "search_analyzer": "ik_smart"},
         "tags": {"type": "keyword"},
         "heading_path": {"type": "text", "analyzer": "ik_max_word", "search_analyzer": "ik_smart"},
@@ -134,6 +137,7 @@ async def replace_document_chunks(
     client: AsyncElasticsearch,
     *,
     index: str,
+    tenant_id: str,
     document_id: UUID,
     title: str,
     tags: Sequence[str],
@@ -147,7 +151,8 @@ async def replace_document_chunks(
     refresh interval must still see (and delete) the previous version's docs —
     without this, replace would leak orphans. Each doc stores the chunk's
     `heading_path` breadcrumb alongside the text (retrieval signal only —
-    content is hydrated from PG).
+    content is hydrated from PG) and the owning `tenant_id` (the search-side
+    term filter's field).
     """
     try:
         await client.delete_by_query(
@@ -166,6 +171,7 @@ async def replace_document_chunks(
                         "_id": f"{document_id}:{chunk_index}",
                         "_source": {
                             "document_id": str(document_id),
+                            "tenant_id": tenant_id,
                             "title": title,
                             "tags": list(tags),
                             "chunk_index": chunk_index,

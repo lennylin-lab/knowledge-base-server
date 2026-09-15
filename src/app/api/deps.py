@@ -3,28 +3,39 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable, Coroutine
 from datetime import datetime
 from functools import lru_cache
-from typing import Annotated, ClassVar
+from typing import Annotated, Any, ClassVar
 from uuid import UUID
 
 import structlog
 from arq import create_pool
 from arq.connections import ArqRedis, RedisSettings
-from fastapi import BackgroundTasks, Depends
+from fastapi import BackgroundTasks, Depends, Header, Request
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.auth.dependencies import get_token_verifier, require_bearer
+from app.auth.rbac import Permission, ensure_allowed
+from app.auth.verifier import TokenVerifier
 from app.core.cache import Cache, NullCache, RedisCache
 from app.core.config import Settings, get_settings
 from app.core.database import SessionFactory, get_db
-from app.core.exceptions import ChatUnavailableError
+from app.core.exceptions import (
+    AuthenticationError,
+    ChatUnavailableError,
+    ForbiddenError,
+    TenantUnavailableError,
+)
 from app.llm.embeddings import CachingEmbeddingProvider, EmbeddingProvider, OpenAIEmbeddingProvider
 from app.llm.models import get_chat_model
 from app.mcp.manager import get_mcp_manager
 from app.mcp.tools import build_agent_tools
+from app.models.tenant import MembershipRole, MembershipStatus, UserStatus
 from app.rag.indexer import run_indexing
 from app.rag.retriever import Retriever
 from app.rag.worker import INDEX_DOCUMENT_TASK
+from app.repositories.tenant import TenantMembershipRepository, TenantRepository, UserRepository
 from app.search.es import get_shared_es_client
 from app.services.agents import AssociationService, SummarizeService, WritingService
 from app.services.chat import ChatService
@@ -36,6 +47,123 @@ from app.services.session import ChatSessionService
 logger = structlog.get_logger(__name__)
 
 SessionDep = Annotated[AsyncSession, Depends(get_db)]
+
+
+async def _resolve_default_tenant(session: AsyncSession, settings: Settings) -> UUID:
+    """Resolve the configured default tenant from persistence (shared tail of
+    both scope paths). A missing tenant row means an un-migrated database:
+    a clean 503, never a silent all-tenants fallback."""
+    tenant = await TenantRepository(session).get_by_slug(settings.TENANT_DEFAULT_SLUG)
+    if tenant is None:
+        logger.error("tenant_unavailable", slug=settings.TENANT_DEFAULT_SLUG)
+        raise TenantUnavailableError(
+            "Tenant scope is not available; run database migrations",
+        )
+    return tenant.id
+
+
+async def _resolve_membership_scope(
+    session: AsyncSession,
+    settings: Settings,
+    authorization: str | None,
+    verifier: TokenVerifier,
+) -> tuple[UUID, MembershipRole]:
+    """OIDC path: verified principal -> membership -> (tenant, role).
+
+    Claim mapping (design.md): the ONLY identity claim is `sub` — tenant and
+    role are resolved exclusively from server persistence (`users.subject` ->
+    `tenant_memberships`), never from token claims or headers, so an IdP
+    cannot grant membership the server did not record. Failure policy:
+    verification failures are 401 (authn); an authenticated caller with no
+    usable membership here is 403 (authz) — cross-tenant resource ids stay
+    non-leaky 404s downstream.
+    """
+    token = require_bearer(authorization)
+    principal = await verifier.verify(token)  # generic 401 on any failure
+    tenant_id = await _resolve_default_tenant(session, settings)
+    user = await UserRepository(session).get_by_subject(principal.subject_id)
+    membership = None
+    if user is not None and user.status == UserStatus.ACTIVE:
+        membership = await TenantMembershipRepository(session).get_membership(tenant_id, user.id)
+    if (
+        membership is None
+        or membership.status != MembershipStatus.ACTIVE
+        or membership.role == MembershipRole.SERVICE_ACCOUNT
+    ):
+        logger.warning("membership_rejected", subject_known=user is not None)
+        raise ForbiddenError("You do not have access to this tenant")
+    return tenant_id, membership.role
+
+
+async def get_tenant_scope(
+    request: Request,
+    session: SessionDep,
+    verifier: Annotated[TokenVerifier | None, Depends(get_token_verifier)],
+    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
+) -> UUID:
+    """Resolve the request's tenant scope and (when OIDC is on) its role.
+
+    Two explicit paths, per design.md:
+
+    - Compatibility path (default; `KB_OIDC_ISSUER` empty): single-user MVP —
+      every request is scoped to the configured default tenant
+      (`KB_TENANT_DEFAULT_SLUG`, backfilled by migration 0010), resolved from
+      server persistence, never from a client header. No role is attached;
+      downstream permission checks are skipped. This path is kept for the MVP
+      deliberately (design.md rollout step 6 enables RBAC by configuration);
+      tests pin both paths.
+    - Membership path (`KB_OIDC_ISSUER` set): the bearer token is verified
+      (signature/iss/aud/exp/JWKS) and the role comes from
+      `tenant_memberships` — see `_resolve_membership_scope`. Service-account
+      keys are NOT accepted here (they grant only internal routes).
+    """
+    settings = get_settings()
+    if not settings.OIDC_ISSUER:
+        tenant_id = await _resolve_default_tenant(session, settings)
+        request.state.membership_role = None  # compatibility: no RBAC
+        return tenant_id
+    if verifier is None:
+        # Issuer configured but no verifier could be built: deny, never
+        # fall open onto the compatibility path.
+        logger.error("auth_verifier_unavailable")
+        raise AuthenticationError("Authentication required")
+    tenant_id, role = await _resolve_membership_scope(session, settings, authorization, verifier)
+    request.state.membership_role = role
+    return tenant_id
+
+
+def tenant_scope_requiring(
+    *permissions: Permission,
+) -> Callable[[Request, UUID], Coroutine[Any, Any, UUID]]:
+    """Build a scope dependency that additionally enforces the RBAC matrix.
+
+    The returned dependency depends on `get_tenant_scope` (so overrides in
+    tests and the compatibility path keep working) and then checks the role
+    the scope resolver attached to `request.state` against every requested
+    permission. No role attached (compatibility mode) means no check — the
+    MVP actor stands in for every role.
+    """
+
+    async def dep(
+        request: Request,
+        scope: Annotated[UUID, Depends(get_tenant_scope)],
+    ) -> UUID:
+        role = getattr(request.state, "membership_role", None)
+        if role is not None:
+            resolved = MembershipRole(role)
+            for permission in permissions:
+                ensure_allowed(resolved, permission)
+        return scope
+
+    return dep
+
+
+TenantScope = Annotated[UUID, Depends(get_tenant_scope)]
+DocumentWriteScope = Annotated[UUID, Depends(tenant_scope_requiring(Permission.DOCUMENT_WRITE))]
+SessionWriteScope = Annotated[UUID, Depends(tenant_scope_requiring(Permission.SESSION_WRITE))]
+ChatScope = Annotated[UUID, Depends(tenant_scope_requiring(Permission.CHAT_CREATE))]
+OperationCreateScope = Annotated[UUID, Depends(tenant_scope_requiring(Permission.OPERATION_CREATE))]
+OperationApplyScope = Annotated[UUID, Depends(tenant_scope_requiring(Permission.OPERATION_APPLY))]
 
 
 def get_document_service(session: SessionDep, background_tasks: BackgroundTasks) -> DocumentService:
@@ -91,12 +219,13 @@ def make_index_enqueuer(background_tasks: BackgroundTasks) -> ReindexEnqueuer:
     path exactly — no Redis client is ever constructed. A configured URL
     routes enqueueing to the shared ARQ pool instead; BackgroundTasks then
     carries nothing (it stays solely the fallback's transport). Both paths
-    carry the document's `updated_at` version stamp so the pipeline's
-    generation guard can skip superseded jobs.
+    carry the document's tenant id (the background run's scope) and its
+    `updated_at` version stamp so the pipeline's generation guard can skip
+    superseded jobs.
     """
     if not get_settings().REDIS_URL:
-        return lambda doc_id, updated_at: background_tasks.add_task(
-            run_indexing, doc_id, updated_at
+        return lambda doc_id, tenant_id, updated_at: background_tasks.add_task(
+            run_indexing, doc_id, tenant_id, updated_at
         )
     return _ArqEnqueuer()
 
@@ -139,17 +268,20 @@ class _ArqEnqueuer:
     # mid-flight; done-callbacks keep the set bounded.
     _inflight: ClassVar[set[asyncio.Task[None]]] = set()
 
-    def __call__(self, doc_id: UUID, updated_at: datetime) -> None:
-        task = asyncio.create_task(self._enqueue(doc_id, updated_at))
+    def __call__(self, doc_id: UUID, tenant_id: UUID, updated_at: datetime) -> None:
+        task = asyncio.create_task(self._enqueue(doc_id, tenant_id, updated_at))
         self._inflight.add(task)
         task.add_done_callback(self._inflight.discard)
 
-    async def _enqueue(self, doc_id: UUID, updated_at: datetime) -> None:
+    async def _enqueue(self, doc_id: UUID, tenant_id: UUID, updated_at: datetime) -> None:
         try:
             pool = await _get_shared_arq_pool()
-            # The ISO version stamp rides in the payload (JSON-safe); the
-            # worker degrades unparseable/absent values to no guard.
-            await pool.enqueue_job(INDEX_DOCUMENT_TASK, str(doc_id), updated_at.isoformat())
+            # The tenant id and ISO version stamp ride in the payload
+            # (JSON-safe); the worker scopes the run by tenant and degrades
+            # unparseable/absent version values to no guard.
+            await pool.enqueue_job(
+                INDEX_DOCUMENT_TASK, str(doc_id), str(tenant_id), updated_at.isoformat()
+            )
             logger.info("index_enqueued", document_id=str(doc_id), mode="arq")
         except Exception as exc:
             logger.warning(

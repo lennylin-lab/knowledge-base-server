@@ -16,6 +16,7 @@ from structlog.testing import capture_logs
 
 from app.core.exceptions import LLMProviderError, SearchIndexError
 from app.llm.embeddings import EmbeddingProvider
+from app.models.tenant import DEFAULT_TENANT_ID
 from app.rag.retriever import (
     DEFAULT_BM25_MIN_SCORE,
     DEFAULT_MAX_QUERY_LENGTH,
@@ -70,7 +71,7 @@ async def test_bm25_leg_ranks_distinctive_term_first_without_provider(
         session_factory, es_client, es_index_name, provider=None, **GATES_OFF
     )
 
-    outcome = await retriever.retrieve("zorblat")
+    outcome = await retriever.retrieve("zorblat", tenant_id=DEFAULT_TENANT_ID)
 
     assert outcome.mode == "bm25"
     assert outcome.es_hits == 1
@@ -93,7 +94,7 @@ async def test_vector_leg_top_ranks_scripted_neighbor(
         session_factory, es_client, es_index_name, neighbor_scripted_provider(), **GATES_OFF
     )
 
-    outcome = await retriever.retrieve(VECTOR_QUERY)
+    outcome = await retriever.retrieve(VECTOR_QUERY, tenant_id=DEFAULT_TENANT_ID)
 
     assert outcome.mode == "hybrid"
     assert outcome.es_hits == 0  # BM25-empty query: vector leg decides alone
@@ -115,7 +116,7 @@ async def test_fused_result_carries_both_leg_ranks(
     await seed_corpus(seed_indexed, provider)
     retriever = make_retriever(session_factory, es_client, es_index_name, provider, **GATES_OFF)
 
-    outcome = await retriever.retrieve("zorblat")
+    outcome = await retriever.retrieve("zorblat", tenant_id=DEFAULT_TENANT_ID)
 
     assert outcome.mode == "hybrid"
     assert outcome.es_hits == 1  # only the Kotlin document contains "zorblat"
@@ -132,11 +133,11 @@ async def test_soft_deleted_document_chunks_never_surface_on_either_leg(
 ):
     kotlin_id, _ = await seed_corpus(seed_indexed, neighbor_scripted_provider())
     async with session_factory() as session:
-        await DocumentService(session).delete_document(kotlin_id)
+        await DocumentService(session).delete_document(kotlin_id, tenant_id=DEFAULT_TENANT_ID)
 
     # BM25 leg: ES still returns the stale doc; PG hydration must drop it.
     bm25 = make_retriever(session_factory, es_client, es_index_name, provider=None, **GATES_OFF)
-    outcome = await bm25.retrieve("zorblat")
+    outcome = await bm25.retrieve("zorblat", tenant_id=DEFAULT_TENANT_ID)
     assert outcome.es_hits == 1  # ES is stale — by design (PG is the filter)
     assert outcome.items == []
 
@@ -144,12 +145,12 @@ async def test_soft_deleted_document_chunks_never_surface_on_either_leg(
     hybrid = make_retriever(
         session_factory, es_client, es_index_name, neighbor_scripted_provider(), **GATES_OFF
     )
-    vector_outcome = await hybrid.retrieve(VECTOR_QUERY)
+    vector_outcome = await hybrid.retrieve(VECTOR_QUERY, tenant_id=DEFAULT_TENANT_ID)
     assert all(item.document_title != "Kotlin Notes" for item in vector_outcome.items)
     assert [item.document_title for item in vector_outcome.items] == ["Python Notes"]
 
     # The sibling stays fully visible.
-    sibling = await bm25.retrieve("quibnard")
+    sibling = await bm25.retrieve("quibnard", tenant_id=DEFAULT_TENANT_ID)
     assert [item.document_title for item in sibling.items] == ["Python Notes"]
 
 
@@ -163,13 +164,13 @@ async def test_tag_filter_narrows_both_legs(
     await seed_corpus(seed_indexed, provider)
     retriever = make_retriever(session_factory, es_client, es_index_name, provider, **GATES_OFF)
 
-    unfiltered = await retriever.retrieve("notes")
+    unfiltered = await retriever.retrieve("notes", tenant_id=DEFAULT_TENANT_ID)
     assert {item.document_title for item in unfiltered.items} == {
         "Kotlin Notes",
         "Python Notes",
     }
 
-    filtered = await retriever.retrieve("notes", tag="kotlin")
+    filtered = await retriever.retrieve("notes", tenant_id=DEFAULT_TENANT_ID, tag="kotlin")
     assert filtered.es_hits == 1
     assert filtered.vector_hits == 1
     assert [item.document_title for item in filtered.items] == ["Kotlin Notes"]
@@ -184,7 +185,7 @@ async def test_limit_trims_fused_results(seed_indexed, session_factory, es_clien
     await seed_corpus(seed_indexed, provider)
     retriever = make_retriever(session_factory, es_client, es_index_name, provider, **GATES_OFF)
 
-    outcome = await retriever.retrieve("notes", limit=1)
+    outcome = await retriever.retrieve("notes", tenant_id=DEFAULT_TENANT_ID, limit=1)
 
     assert len(outcome.items) == 1
 
@@ -195,7 +196,7 @@ async def test_es_failure_raises_search_index_error(session_factory, es_client, 
     )
 
     with pytest.raises(SearchIndexError) as exc_info:
-        await retriever.retrieve("anything")
+        await retriever.retrieve("anything", tenant_id=DEFAULT_TENANT_ID)
 
     assert exc_info.value.details["operation"] == "search_chunks"
 
@@ -209,7 +210,7 @@ async def test_provider_failure_mid_search_degrades_to_bm25_with_warning(
     provider.error = LLMProviderError("provider down with secret detail")
 
     with capture_logs() as logs:
-        outcome = await retriever.retrieve("zorblat")
+        outcome = await retriever.retrieve("zorblat", tenant_id=DEFAULT_TENANT_ID)
 
     assert outcome.mode == "bm25"
     assert outcome.vector_hits == 0
@@ -232,7 +233,9 @@ async def test_unrelated_vector_query_returns_zero_items_with_default_gates(
         session_factory, es_client, es_index_name, distant_scripted_provider()
     )
 
-    outcome = await retriever.retrieve(VECTOR_QUERY)  # default limit=10
+    outcome = await retriever.retrieve(
+        VECTOR_QUERY, tenant_id=DEFAULT_TENANT_ID
+    )  # default limit=10
 
     assert outcome.mode == "hybrid"
     assert outcome.es_hits == 0  # no term overlap: BM25 leg empty on its own
@@ -247,7 +250,7 @@ async def test_distinctive_bm25_query_passes_gate_and_carries_es_score(
     await seed_corpus(seed_indexed, distant_scripted_provider())
     retriever = make_retriever(session_factory, es_client, es_index_name, provider=None)
 
-    outcome = await retriever.retrieve("zorblat")
+    outcome = await retriever.retrieve("zorblat", tenant_id=DEFAULT_TENANT_ID)
 
     assert outcome.mode == "bm25"
     assert outcome.es_hits == 1
@@ -268,7 +271,7 @@ async def test_vector_neighbor_passes_distance_gate_and_carries_distance(
         session_factory, es_client, es_index_name, neighbor_scripted_provider()
     )
 
-    outcome = await retriever.retrieve(VECTOR_QUERY)
+    outcome = await retriever.retrieve(VECTOR_QUERY, tenant_id=DEFAULT_TENANT_ID)
 
     assert outcome.mode == "hybrid"
     assert outcome.vector_hits == 2
@@ -289,7 +292,7 @@ async def test_gates_apply_after_tag_filter_narrowing(
 
     # The tag filter keeps the Python row alive; its distance (1.0) then
     # fails the gate — the two filters compose, neither masks the other.
-    outcome = await retriever.retrieve(VECTOR_QUERY, tag="python")
+    outcome = await retriever.retrieve(VECTOR_QUERY, tenant_id=DEFAULT_TENANT_ID, tag="python")
 
     assert outcome.vector_hits == 1
     assert outcome.vector_gated == 1
@@ -301,13 +304,13 @@ async def test_gates_and_visibility_compose_to_empty(
 ):
     kotlin_id, _ = await seed_corpus(seed_indexed, neighbor_scripted_provider())
     async with session_factory() as session:
-        await DocumentService(session).delete_document(kotlin_id)
+        await DocumentService(session).delete_document(kotlin_id, tenant_id=DEFAULT_TENANT_ID)
     retriever = make_retriever(
         session_factory, es_client, es_index_name, neighbor_scripted_provider()
     )
 
     # The only live chunk sits at distance 1.0: soft-delete + gate => nothing.
-    outcome = await retriever.retrieve(VECTOR_QUERY)
+    outcome = await retriever.retrieve(VECTOR_QUERY, tenant_id=DEFAULT_TENANT_ID)
 
     assert outcome.items == []
 
@@ -323,7 +326,7 @@ async def test_rescued_vector_head_restores_short_query_recall(
         session_factory, es_client, es_index_name, shifted_scripted_provider()
     )
 
-    outcome = await retriever.retrieve(SHIFTED_QUERY)
+    outcome = await retriever.retrieve(SHIFTED_QUERY, tenant_id=DEFAULT_TENANT_ID)
 
     assert outcome.mode == "hybrid"
     assert outcome.es_hits == 0  # BM25 empty: the lexical-failure path rescue exists for
@@ -357,7 +360,7 @@ async def test_bm25_hits_suppress_rescue_when_primary_vector_empties(
     await seed_corpus(seed_indexed, provider)
     retriever = make_retriever(session_factory, es_client, es_index_name, provider)
 
-    outcome = await retriever.retrieve("zorblat")
+    outcome = await retriever.retrieve("zorblat", tenant_id=DEFAULT_TENANT_ID)
 
     assert outcome.mode == "hybrid"
     assert outcome.es_hits == 1  # BM25 already answered lexically: Kotlin matches
@@ -378,7 +381,7 @@ async def test_rescue_cap_keeps_rare_term_query_es_dominated(
         session_factory, es_client, es_index_name, shifted_scripted_provider()
     )
 
-    outcome = await retriever.retrieve(RESCUE_PROOF_QUERY)
+    outcome = await retriever.retrieve(RESCUE_PROOF_QUERY, tenant_id=DEFAULT_TENANT_ID)
 
     assert outcome.mode == "hybrid"
     assert outcome.vector_gated == 2  # head at 0.9: beyond trigger and rescue cap
@@ -398,7 +401,7 @@ async def test_off_domain_band_query_stays_empty_above_rescue_trigger(
         session_factory, es_client, es_index_name, shifted_scripted_provider()
     )
 
-    outcome = await retriever.retrieve(TRIGGER_PROOF_QUERY)
+    outcome = await retriever.retrieve(TRIGGER_PROOF_QUERY, tenant_id=DEFAULT_TENANT_ID)
 
     assert outcome.mode == "hybrid"
     assert outcome.es_hits == 0  # no term overlap: a vector-only leg
@@ -419,7 +422,9 @@ async def test_unrelated_query_stays_empty_in_rescue_world(
         session_factory, es_client, es_index_name, shifted_scripted_provider()
     )
 
-    outcome = await retriever.retrieve(VECTOR_QUERY)  # orthogonal: distance 1.0
+    outcome = await retriever.retrieve(
+        VECTOR_QUERY, tenant_id=DEFAULT_TENANT_ID
+    )  # orthogonal: distance 1.0
 
     assert outcome.vector_rescued == 0
     assert outcome.items == []  # the rescue tier is not a noise leak
@@ -432,7 +437,7 @@ async def test_over_long_query_reaches_legs_truncated(
     await seed_corpus(seed_indexed, provider)
     retriever = make_retriever(session_factory, es_client, es_index_name, provider, **GATES_OFF)
 
-    await retriever.retrieve("x" * 300)
+    await retriever.retrieve("x" * 300, tenant_id=DEFAULT_TENANT_ID)
 
     # The search-time embed call (the last one, after indexing's) carried the
     # prefix only — the legs never saw the over-long query.

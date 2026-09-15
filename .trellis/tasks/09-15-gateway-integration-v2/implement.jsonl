@@ -1,0 +1,9 @@
+{"file":".trellis/spec/backend/index.md","reason":"Binding FastAPI, Settings/provider boundary, single-user-to-multitenant scope transition, and layering conventions."}
+{"file":".trellis/spec/backend/directory-structure.md","reason":"Keeps OIDC parsing at the API/core boundary, tenant authorization in services/repositories, and provider access in llm/."}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"Required for Alembic migrations, backfill/constraint rollout, foreign keys, indexes, and async repository patterns."}
+{"file":".trellis/spec/backend/error-handling.md","reason":"Defines generic authentication/authorization errors, domain envelope mapping, and streaming terminal-error behavior."}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"Prevents tokens, keys, prompts, completions, DSNs and sensitive identity claims from entering logs or task evidence."}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Defines complete uv quality gates, offline JWT/test strategy, migration test hygiene, and live integration markers."}
+{"file":".trellis/spec/backend/chat-guidelines.md","reason":"Preserves server SSE ordering and the already-recorded Gateway tools/MCP capability boundary while changing provider wiring."}
+{"file":".trellis/spec/backend/search-guidelines.md","reason":"Tenant filters must remain structural ES filters and search/index hydration must preserve resource scope."}
+{"file":"docs/gateway-integration.md","reason":"Existing operational contract for Gateway base URL, service key, public model, SSE formats, secret separation and known limitations."}

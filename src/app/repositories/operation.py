@@ -12,7 +12,11 @@ from app.models.operation import AgentOperation, DocumentRevision
 
 
 class AgentOperationRepository:
-    """Every SQL statement touching the `agent_operations` table lives here."""
+    """Every SQL statement touching the `agent_operations` table lives here.
+
+    Tenant rule (Stage 5): every method takes a required `tenant_id` — there
+    is deliberately no all-tenants read.
+    """
 
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -24,14 +28,18 @@ class AgentOperationRepository:
         await self._session.refresh(operation)
         return operation
 
-    async def get_by_id(self, operation_id: UUID) -> AgentOperation | None:
-        stmt = select(AgentOperation).where(AgentOperation.id == operation_id)
+    async def get_by_id(self, operation_id: UUID, *, tenant_id: UUID) -> AgentOperation | None:
+        stmt = select(AgentOperation).where(
+            AgentOperation.id == operation_id, AgentOperation.tenant_id == tenant_id
+        )
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
-    async def get_by_idempotency_key(self, key: str) -> AgentOperation | None:
+    async def get_by_idempotency_key(self, key: str, *, tenant_id: UUID) -> AgentOperation | None:
         """The retry handle's resolution target, or None (partial unique index:
         NULL keys never match)."""
-        stmt = select(AgentOperation).where(AgentOperation.idempotency_key == key)
+        stmt = select(AgentOperation).where(
+            AgentOperation.idempotency_key == key, AgentOperation.tenant_id == tenant_id
+        )
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
     async def update(self, operation: AgentOperation) -> AgentOperation:
@@ -41,12 +49,15 @@ class AgentOperationRepository:
         return operation
 
     async def list_for_document(
-        self, document_id: UUID, *, limit: int = 50
+        self, document_id: UUID, *, tenant_id: UUID, limit: int = 50
     ) -> Sequence[AgentOperation]:
         """One document's operations, newest first (id = creation order)."""
         stmt = (
             select(AgentOperation)
-            .where(AgentOperation.document_id == document_id)
+            .where(
+                AgentOperation.document_id == document_id,
+                AgentOperation.tenant_id == tenant_id,
+            )
             .order_by(AgentOperation.id.desc())
             .limit(limit)
         )
@@ -54,7 +65,11 @@ class AgentOperationRepository:
 
 
 class DocumentRevisionRepository:
-    """Every SQL statement touching the `document_revisions` table lives here."""
+    """Every SQL statement touching the `document_revisions` table lives here.
+
+    Tenant rule (Stage 5): every method takes a required `tenant_id`; a
+    revision's tenant always equals its document's.
+    """
 
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -65,21 +80,31 @@ class DocumentRevisionRepository:
         await self._session.refresh(revision)
         return revision
 
-    async def get_by_id(self, revision_id: UUID) -> DocumentRevision | None:
-        stmt = select(DocumentRevision).where(DocumentRevision.id == revision_id)
+    async def get_by_id(self, revision_id: UUID, *, tenant_id: UUID) -> DocumentRevision | None:
+        stmt = select(DocumentRevision).where(
+            DocumentRevision.id == revision_id, DocumentRevision.tenant_id == tenant_id
+        )
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
-    async def get_by_operation_id(self, operation_id: UUID) -> DocumentRevision | None:
+    async def get_by_operation_id(
+        self, operation_id: UUID, *, tenant_id: UUID
+    ) -> DocumentRevision | None:
         """The one revision an apply produced (idempotent repeat reads this)."""
-        stmt = select(DocumentRevision).where(DocumentRevision.operation_id == operation_id)
+        stmt = select(DocumentRevision).where(
+            DocumentRevision.operation_id == operation_id,
+            DocumentRevision.tenant_id == tenant_id,
+        )
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
     async def list_for_document(
-        self, document_id: UUID, *, limit: int = 100
+        self, document_id: UUID, *, tenant_id: UUID, limit: int = 100
     ) -> Sequence[DocumentRevision]:
         stmt = (
             select(DocumentRevision)
-            .where(DocumentRevision.document_id == document_id)
+            .where(
+                DocumentRevision.document_id == document_id,
+                DocumentRevision.tenant_id == tenant_id,
+            )
             .order_by(DocumentRevision.id.desc())
             .limit(limit)
         )

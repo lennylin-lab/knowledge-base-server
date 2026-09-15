@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.api.deps import build_writing_service
 from app.core.config import get_settings
+from app.models.tenant import DEFAULT_TENANT_ID
 from app.rag.retriever import Retriever
 from app.schemas.chat import AnswerDeltaEvent, DoneEvent, RunStartedEvent, SourcesEvent
 from app.services.agents import WritingService
@@ -45,7 +46,10 @@ async def test_tool_retrieves_seeded_corpus_and_suggestion_cites_it(
         mode="bm25",
     )
 
-    events = [event async for event in service.suggest(DRAFT, "continue", limit=8)]
+    events = [
+        event
+        async for event in service.suggest(DRAFT, "continue", tenant_id=DEFAULT_TENANT_ID, limit=8)
+    ]
 
     kinds = [type(event).__name__ for event in events]
     assert kinds[0] == "RunStartedEvent"
@@ -90,7 +94,12 @@ async def test_live_provider_streams_a_complete_run():
         pytest.skip("CHAT_API_KEY not configured")
     service = build_writing_service(settings)
 
-    events = [event async for event in service.suggest("Draft: what is a zorblat?", "continue")]
+    events = [
+        event
+        async for event in service.suggest(
+            "Draft: what is a zorblat?", "continue", tenant_id=DEFAULT_TENANT_ID
+        )
+    ]
 
     kinds = [type(event).__name__ for event in events]
     assert kinds[0] == "RunStartedEvent"

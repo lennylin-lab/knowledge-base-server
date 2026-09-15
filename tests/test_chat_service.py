@@ -34,6 +34,7 @@ from app.core.exceptions import NotFoundError, SearchIndexError
 from app.mcp.manager import McpToolInfo, McpToolResult
 from app.mcp.tools import build_agent_tools
 from app.models.chat import ChatMessage, ChatSession, MessageRole
+from app.models.tenant import DEFAULT_TENANT_ID
 from app.rag.retriever import RetrievedChunk, SearchOutcome
 from app.repositories.chat import ChatMessageRepository, ChatSessionRepository
 from app.schemas.chat import (
@@ -84,7 +85,12 @@ def _make_retriever(item: RetrievedChunk | None = None) -> StubRetriever:
 async def _collect(
     service: ChatService, question: str, *, limit: int = 8, session_id: UUID | None = None
 ) -> list[object]:
-    return [event async for event in service.ask(question, limit=limit, session_id=session_id)]
+    return [
+        event
+        async for event in service.ask(
+            question, limit=limit, session_id=session_id, tenant_id=DEFAULT_TENANT_ID
+        )
+    ]
 
 
 def _names(events: list[object]) -> list[str]:
@@ -148,7 +154,7 @@ async def test_ask_streams_run_started_sources_deltas_done_in_order():
     assert [e for e in events if isinstance(e, StatusEvent)] == [status]
 
     # The tool forwarded the run's limit to the retriever.
-    assert retriever.calls == [("zorblat", 8)]
+    assert retriever.calls == [("zorblat", 8, DEFAULT_TENANT_ID)]
     assert _answer_text(events) == "Zorblat is a test term used in fixtures [1]."
 
     done = events[-1]
@@ -182,7 +188,10 @@ async def test_each_tool_call_flushes_its_own_sources_event():
         "AnswerDeltaEvent",
         "DoneEvent",
     ]
-    assert retriever.calls == [("zorblat", 8), ("quibnard", 8)]
+    assert retriever.calls == [
+        ("zorblat", 8, DEFAULT_TENANT_ID),
+        ("quibnard", 8, DEFAULT_TENANT_ID),
+    ]
     done = events[-1]
     assert isinstance(done, DoneEvent)
     assert done.tool_calls == 2
@@ -602,7 +611,11 @@ async def _session_messages(
     factory: async_sessionmaker[AsyncSession], session_id: UUID
 ) -> list[ChatMessage]:
     async with factory() as session:
-        return list(await ChatMessageRepository(session).list_for_session(session_id))
+        return list(
+            await ChatMessageRepository(session).list_for_session(
+                session_id, tenant_id=DEFAULT_TENANT_ID
+            )
+        )
 
 
 def _user_prompts(messages: list[ModelMessage]) -> list[str]:
@@ -639,7 +652,9 @@ async def test_ask_without_session_id_creates_session_and_persists_the_turn(sess
     assert run_started.session_id is not None
 
     async with session_factory() as session:
-        chat_session = await ChatSessionRepository(session).get_by_id(run_started.session_id)
+        chat_session = await ChatSessionRepository(session).get_by_id(
+            run_started.session_id, tenant_id=DEFAULT_TENANT_ID
+        )
     assert chat_session is not None
     assert chat_session.title == derive_title(QUESTION)
 
@@ -961,7 +976,7 @@ async def test_ask_with_soft_deleted_session_id_raises_not_found(session_factory
 
     async with session_factory() as session:
         repo = ChatSessionRepository(session)
-        chat_session = await repo.get_by_id(session_id)
+        chat_session = await repo.get_by_id(session_id, tenant_id=DEFAULT_TENANT_ID)
         assert chat_session is not None
         await repo.soft_delete(chat_session)
         await session.commit()
@@ -1056,7 +1071,10 @@ async def test_followup_turn_retrieves_on_rewritten_standalone_query(session_fac
     )
     await _collect(turn2, ANAPHORIC_FOLLOWUP, session_id=session_id)
 
-    assert retriever.calls == [("Redis 是什么", 8), (STANDALONE_QUERY, 8)]
+    assert retriever.calls == [
+        ("Redis 是什么", 8, DEFAULT_TENANT_ID),
+        (STANDALONE_QUERY, 8, DEFAULT_TENANT_ID),
+    ]
     # The rewriter ran exactly once, on the raw follow-up…
     assert rewrite_prompts == [ANAPHORIC_FOLLOWUP]
     # …and saw the prior turns as its history: [q1, a1] precede its prompt.
@@ -1199,7 +1217,7 @@ async def test_first_turn_performs_no_rewrite_call(session_factory):
 
     assert isinstance(events[-1], DoneEvent)
     assert rewrite_prompts == []
-    assert retriever.calls == [(ANAPHORIC_FOLLOWUP, 8)]
+    assert retriever.calls == [(ANAPHORIC_FOLLOWUP, 8, DEFAULT_TENANT_ID)]
 
 
 async def test_stateless_service_never_rewrites():
@@ -1219,7 +1237,7 @@ async def test_stateless_service_never_rewrites():
 
     assert isinstance(events[-1], DoneEvent)
     assert rewrite_prompts == []
-    assert retriever.calls == [(ANAPHORIC_FOLLOWUP, 8)]
+    assert retriever.calls == [(ANAPHORIC_FOLLOWUP, 8, DEFAULT_TENANT_ID)]
 
 
 @pytest.mark.db
@@ -1300,7 +1318,10 @@ async def test_rewrite_disabled_construction_passes_raw_questions(session_factor
     assert isinstance(events2[-1], DoneEvent)
     # The retriever saw the raw questions: an anaphoric follow-up retrieves
     # on its verbatim text — exactly the pre-rewrite behavior.
-    assert retriever.calls == [(TOPIC_QUESTION, 8), (ANAPHORIC_FOLLOWUP, 8)]
+    assert retriever.calls == [
+        (TOPIC_QUESTION, 8, DEFAULT_TENANT_ID),
+        (ANAPHORIC_FOLLOWUP, 8, DEFAULT_TENANT_ID),
+    ]
     # Both turns' model requests ran on the raw questions as their prompts
     # (two requests per turn: tool call, then answer).
     assert [_user_prompts(messages) for messages in qa_histories] == [
@@ -1368,7 +1389,10 @@ async def test_rewrite_failure_degrades_to_raw_query_and_still_completes(session
     assert isinstance(done, DoneEvent)
     assert done.outcome == "success"
     assert not any(isinstance(event, ErrorEvent) for event in events2)
-    assert retriever.calls == [(TOPIC_QUESTION, 8), (ANAPHORIC_FOLLOWUP, 8)]
+    assert retriever.calls == [
+        (TOPIC_QUESTION, 8, DEFAULT_TENANT_ID),
+        (ANAPHORIC_FOLLOWUP, 8, DEFAULT_TENANT_ID),
+    ]
     # The failure was logged once, error class only — no question text.
     failed = [entry for entry in logs if entry["event"] == "query_rewrite_failed"]
     assert len(failed) == 1
@@ -1435,7 +1459,9 @@ def _summarizing_service(
 
 async def _session_row(factory: async_sessionmaker[AsyncSession], session_id: UUID) -> ChatSession:
     async with factory() as session:
-        row = await ChatSessionRepository(session).get_by_id(session_id)
+        row = await ChatSessionRepository(session).get_by_id(
+            session_id, tenant_id=DEFAULT_TENANT_ID
+        )
     assert row is not None
     return row
 

@@ -129,6 +129,7 @@ class RecordingEsStore:
         client: object,
         *,
         index: str,
+        tenant_id: str,
         document_id: UUID,
         title: str,
         tags: list[str],
@@ -137,6 +138,7 @@ class RecordingEsStore:
         self.replace_calls.append(
             {
                 "index": index,
+                "tenant_id": tenant_id,
                 "document_id": document_id,
                 "title": title,
                 "tags": list(tags),
@@ -213,8 +215,9 @@ def retrieved_chunk(
 class StubRetriever:
     """Stands in for `rag.retriever.Retriever`: scripted outcome or a raise.
 
-    Records `(query, limit)` per call so tests assert what the agent's tool
-    actually asked for.
+    Records `(query, limit, tenant_id)` per call so tests assert what the
+    agent's tool actually asked for — including that the tenant scope is
+    threaded (a run without a scope must fail loudly, not search globally).
     """
 
     def __init__(
@@ -222,12 +225,17 @@ class StubRetriever:
     ) -> None:
         self.outcome = outcome if outcome is not None else empty_outcome()
         self.error = error
-        self.calls: list[tuple[str, int]] = []
+        self.calls: list[tuple[str, int, UUID | None]] = []
 
     async def retrieve(
-        self, query: str, *, limit: int = 10, tag: str | None = None
+        self,
+        query: str,
+        *,
+        limit: int = 10,
+        tenant_id: UUID | None = None,
+        tag: str | None = None,
     ) -> SearchOutcome:
-        self.calls.append((query, limit))
+        self.calls.append((query, limit, tenant_id))
         if self.error is not None:
             raise self.error
         return self.outcome

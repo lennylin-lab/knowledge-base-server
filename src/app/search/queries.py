@@ -35,6 +35,7 @@ def bm25_chunk_query(
     q: str,
     *,
     size: int,
+    tenant_id: str | None = None,
     tag: str | None = None,
     min_score: float = 0.0,
     min_coverage: str = DEFAULT_BM25_MIN_COVERAGE,
@@ -75,8 +76,11 @@ def bm25_chunk_query(
     Defaults to `DEFAULT_BM25_MIN_COVERAGE`; an empty string omits the key
     entirely (gate disabled, identity group included).
 
-    An optional `tags` keyword filter rides as a `filter` clause: applied
-    without affecting BM25 scoring. Bounded `size`, source retrieval
+    An optional `tenant_id` keyword term filter (Stage 5) and an optional
+    `tags` keyword filter ride as `filter` clauses: applied without affecting
+    BM25 scoring. The tenant filter is structural — the production retriever
+    always supplies it, so a stale index can never surface another tenant's
+    chunks. Bounded `size`, source retrieval
     disabled — ES is a ranking index only, PG hydrates content (see
     `rag/retriever.py`). A positive `min_score` prunes sub-threshold hits
     ES-side (the retriever re-checks the same floor Python-side so gate
@@ -101,8 +105,13 @@ def bm25_chunk_query(
         ],
         "minimum_should_match": 1,
     }
+    filters: list[dict[str, Any]] = []
+    if tenant_id is not None:
+        filters.append({"term": {"tenant_id": tenant_id}})
     if tag is not None:
-        boolean["filter"] = [{"term": {"tags": tag}}]
+        filters.append({"term": {"tags": tag}})
+    if filters:
+        boolean["filter"] = filters
     body: dict[str, Any] = {
         "size": size,
         "query": {"bool": boolean},

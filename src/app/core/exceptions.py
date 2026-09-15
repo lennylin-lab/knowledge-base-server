@@ -49,6 +49,18 @@ class ForbiddenError(AppError):
     code = "forbidden"
 
 
+class AuthenticationError(AppError):
+    """Request authentication failed or is not configured (HTTP 401).
+
+    The response message is deliberately generic — the verification failure
+    reason (issuer/audience/signature/expiry/JWKS) goes to logs only, never
+    into the envelope, so probes learn nothing about why a token failed.
+    """
+
+    status_code = 401
+    code = "unauthorized"
+
+
 # --- LLM / agent stack (see error-handling.md taxonomy) ---
 
 
@@ -78,6 +90,15 @@ class ChatUnavailableError(AppError):
 
     status_code = 503
     code = "chat_unavailable"
+
+
+class TenantUnavailableError(AppError):
+    """The request's tenant scope cannot be resolved (e.g. the configured
+    default tenant is missing because migrations have not run) — a deployment
+    problem, not a caller error, so it fails fast with a clean envelope."""
+
+    status_code = 503
+    code = "tenant_unavailable"
 
 
 def error_response(

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from uuid import UUID
 
 from pydantic import BaseModel
 from pydantic_ai import Agent, RunContext
@@ -50,6 +51,9 @@ class WritingDeps:
     retriever: Retriever
     limit: int
     collector: SourceCollector
+    # Tenant scope of the run (Stage 5): every retrieval tool call filters
+    # both legs on it — the agent can never ground on another tenant's docs.
+    tenant_id: UUID
 
     def record_external_tool_call(self) -> None:
         """Satisfies `mcp.tools.McpCallObserver` structurally (no import needed).
@@ -78,7 +82,9 @@ async def search_knowledge(ctx: RunContext[WritingDeps], query: str) -> str:
     bracketed numbers are the citation handles for the reply, or an explicit
     no-results marker.
     """
-    outcome = await ctx.deps.retriever.retrieve(query, limit=ctx.deps.limit)
+    outcome = await ctx.deps.retriever.retrieve(
+        query, limit=ctx.deps.limit, tenant_id=ctx.deps.tenant_id
+    )
     hits = [to_search_hit(item) for item in outcome.items]
     # Offset before appending: batch N numbers past everything already
     # collected, so citations stay unique for the whole run (same rule as QA).

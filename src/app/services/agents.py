@@ -92,7 +92,7 @@ class SummarizeService:
         # per-request state rides in SummarizeDeps, never on the agent.
         self._agent = build_summarize_agent(model)
 
-    async def summarize_document(self, doc_id: UUID) -> SummaryResult:
+    async def summarize_document(self, doc_id: UUID, *, tenant_id: UUID) -> SummaryResult:
         """Summarize one live document; missing/soft-deleted raise NotFoundError.
 
         Content that fits a single chunk is summarized in one pass; longer
@@ -104,7 +104,7 @@ class SummarizeService:
         started = time.perf_counter()
         # The load happens before anything else: a missing document must 404
         # without a model call, and the run log needs the id bound.
-        document = await self._load_document(doc_id)
+        document = await self._load_document(doc_id, tenant_id=tenant_id)
         log = logger.bind(document_id=str(doc_id), run_id=uuid4().hex)
         # The document load above is the correctness gate (404 on missing);
         # the cache only ever short-circuits the expensive LLM run. Lookup
@@ -213,10 +213,11 @@ class SummarizeService:
             key, result.model_dump_json().encode("utf-8"), ttl_seconds=self._cache_ttl_seconds
         )
 
-    async def _load_document(self, doc_id: UUID) -> Document:
-        """Fetch one live document; soft-deleted counts as missing."""
+    async def _load_document(self, doc_id: UUID, *, tenant_id: UUID) -> Document:
+        """Fetch one live document in the tenant scope; soft-deleted counts as
+        missing (one non-leaky 404 for both cases)."""
         async with self._session_factory() as session:
-            document = await DocumentRepository(session).get_by_id(doc_id)
+            document = await DocumentRepository(session).get_by_id(doc_id, tenant_id=tenant_id)
         if document is None:
             raise NotFoundError(f"Document {doc_id} not found")
         return document
@@ -289,7 +290,7 @@ class AssociationService:
         # per-request state rides in AssociationDeps, never on the agent.
         self._agent = build_association_agent(model)
 
-    async def associate_document(self, doc_id: UUID) -> AssociationsResult:
+    async def associate_document(self, doc_id: UUID, *, tenant_id: UUID) -> AssociationsResult:
         """Curate related documents for one live document via the LLM.
 
         Deterministic candidates are gathered before any model call: a
@@ -302,7 +303,7 @@ class AssociationService:
         content are never logged — ids and counts only.
         """
         started = time.perf_counter()
-        document, candidates, excerpt = await self._gather(doc_id)
+        document, candidates, excerpt = await self._gather(doc_id, tenant_id=tenant_id)
         log = logger.bind(document_id=str(doc_id), run_id=uuid4().hex)
         # The gather above is the correctness gate (404 on missing); the
         # cache only ever short-circuits the expensive LLM run.
@@ -402,7 +403,9 @@ class AssociationService:
             key, result.model_dump_json().encode("utf-8"), ttl_seconds=self._cache_ttl_seconds
         )
 
-    async def _gather(self, doc_id: UUID) -> tuple[Document, list[AssociationCandidate], str]:
+    async def _gather(
+        self, doc_id: UUID, *, tenant_id: UUID
+    ) -> tuple[Document, list[AssociationCandidate], str]:
         """Load the live source, both candidate legs, and a bounded excerpt.
 
         One session for the whole read set. The document load comes first: a
@@ -413,14 +416,16 @@ class AssociationService:
         async with self._session_factory() as session:
             documents = DocumentRepository(session)
             chunks = DocumentChunkRepository(session)
-            document = await documents.get_by_id(doc_id)
+            document = await documents.get_by_id(doc_id, tenant_id=tenant_id)
             if document is None:
                 raise NotFoundError(f"Document {doc_id} not found")
-            vector_rows = await chunks.find_neighbor_documents(doc_id, limit=CANDIDATE_LIMIT)
-            tag_rows = await documents.find_by_tag_overlap(
-                document.tags, exclude_id=doc_id, limit=CANDIDATE_LIMIT
+            vector_rows = await chunks.find_neighbor_documents(
+                doc_id, tenant_id=tenant_id, limit=CANDIDATE_LIMIT
             )
-            excerpt = await chunks.first_chunk_content(doc_id)
+            tag_rows = await documents.find_by_tag_overlap(
+                document.tags, tenant_id=tenant_id, exclude_id=doc_id, limit=CANDIDATE_LIMIT
+            )
+            excerpt = await chunks.first_chunk_content(doc_id, tenant_id=tenant_id)
         if excerpt is None:
             excerpt = document.content[:EXCERPT_CHAR_LIMIT]
         return document, _merge_candidates(vector_rows, tag_rows), excerpt
@@ -544,13 +549,14 @@ class WritingService:
         self._agent = build_writing_agent(model, extra_tools=extra_tools)
 
     async def suggest(
-        self, draft: str, instruction: str | None = None, *, limit: int = 8
+        self, draft: str, instruction: str | None = None, *, tenant_id: UUID, limit: int = 8
     ) -> AsyncIterator[ChatStreamEvent]:
         """Run one writing-assistance turn, yielding chat-contract events.
 
         The draft (plus optional instruction) is rendered into the user
         prompt; the model then streams its suggestion, calling
         `search_knowledge` only when it judges the knowledge base helpful.
+        Retrieval is scoped to `tenant_id` — both legs filter on it.
         """
         run_id = uuid4().hex
         structlog.contextvars.bind_contextvars(run_id=run_id)
@@ -560,7 +566,9 @@ class WritingService:
         # drains (same hand-off as chat, so `agents/` stays stream-free).
         pending: list[list[SearchHit]] = []
         collector = SourceCollector(on_append=pending.append)
-        deps = WritingDeps(retriever=self._retriever, limit=limit, collector=collector)
+        deps = WritingDeps(
+            retriever=self._retriever, limit=limit, collector=collector, tenant_id=tenant_id
+        )
 
         logger.info(
             "agent_run_started",

@@ -1,0 +1,9 @@
+{"file":".trellis/spec/backend/index.md","reason":"Review scope and project-wide conventions for the identity, tenant and Gateway integration work."}
+{"file":".trellis/spec/backend/directory-structure.md","reason":"Review module ownership and prevent provider/JWT/database details from leaking across layers."}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"Review schema migration/backfill/downgrade safety, tenant foreign keys, indexes and repository query boundaries."}
+{"file":".trellis/spec/backend/error-handling.md","reason":"Review 401/403 behavior, non-leaky cross-tenant errors and server/Gateway streaming failure mapping."}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"Review identity, provider and user-content redaction in logs, diagnostics and public issue evidence."}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Run and review all Python quality gates, offline auth tests, live-test markers and schema-test setup."}
+{"file":".trellis/spec/backend/chat-guidelines.md","reason":"Review provider migration does not change server SSE contract and respects Gateway tools/MCP limitations."}
+{"file":".trellis/spec/backend/search-guidelines.md","reason":"Review tenant isolation in ES filters, hydration and indexing paths."}
+{"file":"docs/gateway-integration.md","reason":"Check implementation against the existing Gateway client and operational contract."}

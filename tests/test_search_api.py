@@ -17,8 +17,10 @@ from app.api.deps import (
     build_search_service,
     embedding_provider_from_settings,
     get_search_service,
+    get_tenant_scope,
 )
 from app.core.exceptions import LLMProviderError
+from app.models.tenant import DEFAULT_TENANT_ID
 from app.rag.retriever import Retriever
 from app.services.search import SearchService
 from corpus import (
@@ -395,3 +397,10 @@ async def test_build_search_service_with_key_does_not_warn():
         build_search_service(hermetic_settings(EMBEDDING_API_KEY=SecretStr("test-key")))
 
     assert not [entry for entry in logs if entry["event"] == "vector_search_disabled"]
+
+
+@pytest.fixture(autouse=True)
+def _offline_tenant_scope(app: FastAPI) -> None:
+    """DB-free contract tests: the tenant-scope dependency is overridden with
+    the constant default tenant so no request ever touches a database."""
+    app.dependency_overrides[get_tenant_scope] = lambda: DEFAULT_TENANT_ID

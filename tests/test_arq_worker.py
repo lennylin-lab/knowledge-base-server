@@ -27,6 +27,7 @@ from app.core.exceptions import (
     SearchIndexError,
 )
 from app.models.document import IndexStatus
+from app.models.tenant import DEFAULT_TENANT_ID
 from app.rag.indexer import IndexingPipeline
 from app.rag.worker import (
     INDEX_DOCUMENT_TASK,
@@ -59,13 +60,15 @@ def make_pipeline(session_factory: SessionMaker, provider: Any) -> IndexingPipel
 
 async def seed_document(session_factory: SessionMaker, content: str = "# A\n\ntext a") -> UUID:
     async with session_factory() as session:
-        created = await DocumentService(session).create_document(DocumentCreate(content=content))
+        created = await DocumentService(session).create_document(
+            DocumentCreate(content=content), tenant_id=DEFAULT_TENANT_ID
+        )
         return created.id
 
 
 async def status_of(session_factory: SessionMaker, doc_id: UUID) -> IndexStatus:
     async with session_factory() as session:
-        document = await DocumentRepository(session).get_by_id(doc_id)
+        document = await DocumentRepository(session).get_by_id(doc_id, tenant_id=DEFAULT_TENANT_ID)
         assert document is not None
         return document.index_status
 
@@ -81,6 +84,7 @@ async def run_job(
     """`run_index_job` against a real (double-backed) pipeline core."""
     await run_index_job(
         doc_id,
+        DEFAULT_TENANT_ID,
         job_try=job_try,
         max_tries=MAX_TRIES,
         retry_min_delay_s=MIN_DELAY_S,
@@ -256,7 +260,7 @@ async def test_retry_after_newer_edit_skips_instead_of_reindexing(
     an obsolete version."""
     async with session_factory() as session:
         created = await DocumentService(session).create_document(
-            DocumentCreate(content="# A\n\ntext a")
+            DocumentCreate(content="# A\n\ntext a"), tenant_id=DEFAULT_TENANT_ID
         )
     doc_id, enqueued_version = created.id, created.updated_at
 
@@ -269,7 +273,9 @@ async def test_retry_after_newer_edit_skips_instead_of_reindexing(
 
     # The document is edited while the retry waits — the queued version is stale.
     async with session_factory() as session:
-        await DocumentService(session).update_document(doc_id, DocumentUpdate(title="edited"))
+        await DocumentService(session).update_document(
+            doc_id, DocumentUpdate(title="edited"), tenant_id=DEFAULT_TENANT_ID
+        )
     fake_embedding_provider.error = None
     fake_embedding_provider.calls.clear()  # attempt 1 errored mid-embed already
 
@@ -294,7 +300,7 @@ async def test_retry_after_newer_edit_skips_instead_of_reindexing(
 
 async def test_malformed_doc_id_is_skipped_as_poison() -> None:
     with capture_logs() as logs:
-        await index_document({"job_try": 1}, "not-a-uuid")
+        await index_document({"job_try": 1}, "not-a-uuid", str(DEFAULT_TENANT_ID))
 
     poison = events(logs, "index_job_poison")
     assert len(poison) == 1
@@ -310,8 +316,9 @@ async def test_index_document_reads_job_try_from_ctx_and_module_seams(
     seen_versions: list[datetime | None] = []
 
     async def flaky_runner(
-        doc_id: UUID, expected_updated_at: datetime | None
+        doc_id: UUID, tenant_id: UUID, expected_updated_at: datetime | None
     ) -> IndexStatus | None:
+        assert tenant_id == DEFAULT_TENANT_ID
         seen_versions.append(expected_updated_at)
         raise LLMProviderError("provider down")
 
@@ -327,11 +334,11 @@ async def test_index_document_reads_job_try_from_ctx_and_module_seams(
 
     # Absent job_try defaults to 1 -> transient -> retry requested.
     with pytest.raises(Retry):
-        await index_document({}, str(doc_id))
+        await index_document({}, str(doc_id), str(DEFAULT_TENANT_ID))
     assert await status_of(session_factory, doc_id) is IndexStatus.PENDING
 
     # ctx job_try at the budget's end -> settle without raising.
-    await index_document({"job_try": MAX_TRIES}, str(doc_id))
+    await index_document({"job_try": MAX_TRIES}, str(doc_id), str(DEFAULT_TENANT_ID))
     assert await status_of(session_factory, doc_id) is IndexStatus.FAILED
 
     # Legacy payloads (no timestamp) degrade to a guard-free run.
@@ -369,7 +376,7 @@ async def test_unusable_timestamp_payload_degrades_to_no_guard(
     # The non-string case deliberately violates the typed signature: JSON
     # payloads are untyped at runtime and the worker must survive that.
     with capture_logs() as logs:
-        await index_document({"job_try": 1}, str(doc_id), bad_stamp)
+        await index_document({"job_try": 1}, str(doc_id), str(DEFAULT_TENANT_ID), bad_stamp)
 
     assert await status_of(session_factory, doc_id) is IndexStatus.DONE
     degraded = events(logs, "index_job_invalid_expected_updated_at")

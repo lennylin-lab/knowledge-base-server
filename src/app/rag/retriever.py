@@ -405,11 +405,19 @@ class Retriever:
         self._cache_ttl_seconds = cache_ttl_seconds
 
     async def retrieve(
-        self, query: str, *, limit: int = 10, tag: str | None = None
+        self,
+        query: str,
+        *,
+        limit: int = 10,
+        tenant_id: UUID,
+        tag: str | None = None,
     ) -> SearchOutcome:
         """Run both legs concurrently, gate, fuse with RRF, hydrate the top hits.
 
-        The tag filter applies to BOTH legs so fused ranks are tag-consistent.
+        The tenant filter applies to BOTH legs (ES term filter + PG join
+        filter) and to the hydration read, so fused ranks are tenant-consistent
+        and a stale index can never leak another tenant's chunks. The tag
+        filter applies to BOTH legs so fused ranks are tag-consistent.
         `mode` is `"hybrid"` when the vector leg ran, `"bm25"` when it could
         not (no provider configured, or the embed call failed mid-search).
 
@@ -427,7 +435,9 @@ class Retriever:
         the raw caller-provided length — truncation is retriever-internal.
         """
         query = truncate_query(query, max_length=self._max_query_length)
-        cache_key_search = await self._search_cache_key(query, limit=limit, tag=tag)
+        cache_key_search = await self._search_cache_key(
+            query, limit=limit, tag=tag, tenant_id=tenant_id
+        )
         if cache_key_search is not None and self._cache is not None:
             raw = await self._cache.get(cache_key_search)
             outcome: SearchOutcome | None = None
@@ -443,13 +453,14 @@ class Retriever:
         body = bm25_chunk_query(
             query,
             size=CANDIDATE_POOL,
+            tenant_id=str(tenant_id),
             tag=tag,
             min_score=self._bm25_min_score,
             min_coverage=self._bm25_min_coverage,
         )
         es_result, vector_result = await asyncio.gather(
             search_chunks(self._es_client, index=self._es_index, body=body),
-            self._vector_leg(query, tag=tag),
+            self._vector_leg(query, tenant_id=tenant_id, tag=tag),
             return_exceptions=True,
         )
         # ES errors take precedence: a broken index is a 502 even if the
@@ -492,7 +503,11 @@ class Retriever:
         missing = [hit.key for hit in top if hit.key not in hydrated]
         if missing:
             async with self._session_factory() as session:
-                hydrated.update(await DocumentChunkRepository(session).get_live_chunks(missing))
+                hydrated.update(
+                    await DocumentChunkRepository(session).get_live_chunks(
+                        missing, tenant_id=tenant_id
+                    )
+                )
 
         items: list[RetrievedChunk] = []
         for hit in top:
@@ -533,11 +548,13 @@ class Retriever:
         return outcome
 
     async def _search_cache_key(
-        self, truncated_query: str, *, limit: int, tag: str | None
+        self, truncated_query: str, *, limit: int, tag: str | None, tenant_id: UUID
     ) -> str | None:
         """Cache key built AFTER `truncate_query` (the key must match what the
-        legs would see). The epoch comes from the same cache handle; a cache
-        fault or caching-off returns `None` (compute path, no caching)."""
+        legs would see). The tenant id is part of the key — one tenant's
+        cached outcome can never be served to another. The epoch comes from
+        the same cache handle; a cache fault or caching-off returns `None`
+        (compute path, no caching)."""
         if self._cache is None:
             return None
         epoch_raw = await self._cache.get(SEARCH_EPOCH_KEY)
@@ -546,9 +563,11 @@ class Retriever:
         except ValueError:
             epoch = 0
         digest = hashlib.sha256(truncated_query.encode("utf-8")).hexdigest()
-        return cache_key("search", epoch, digest, limit, tag if tag is not None else "-")
+        return cache_key(
+            "search", str(tenant_id), epoch, digest, limit, tag if tag is not None else "-"
+        )
 
-    async def _vector_leg(self, query: str, *, tag: str | None) -> _VectorLeg:
+    async def _vector_leg(self, query: str, *, tenant_id: UUID, tag: str | None) -> _VectorLeg:
         """Embed the query and search pgvector, hydrated against live documents.
 
         `ran=False` marks BM25-only operation: no provider configured, or the
@@ -567,6 +586,6 @@ class Retriever:
             return _VectorLeg(rows=[], ran=False)
         async with self._session_factory() as session:
             rows = await DocumentChunkRepository(session).search_similar(
-                vectors[0], limit=CANDIDATE_POOL, tag=tag
+                vectors[0], tenant_id=tenant_id, limit=CANDIDATE_POOL, tag=tag
             )
         return _VectorLeg(rows=list(rows), ran=True)

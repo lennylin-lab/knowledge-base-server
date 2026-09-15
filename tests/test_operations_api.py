@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.chat import ChatMessage
 from app.models.operation import AgentOperation, DocumentRevision, OperationState
+from app.models.tenant import DEFAULT_TENANT_ID
 from app.utils.ids import uuid7
 
 pytestmark = pytest.mark.db
@@ -160,6 +161,7 @@ async def test_apply_running_operation_conflicts(db_client, db_session):
     db_session.add(
         AgentOperation(
             id=uuid7(),
+            tenant_id=DEFAULT_TENANT_ID,
             document_id=UUID(document["id"]),
             base_document_version=None,
             state=OperationState.RUNNING,
@@ -180,6 +182,7 @@ async def test_resume_interrupted_then_apply(db_client, db_session):
     db_session.add(
         AgentOperation(
             id=uuid7(),
+            tenant_id=DEFAULT_TENANT_ID,
             document_id=UUID(document["id"]),
             base_document_version=datetime.fromisoformat(document["updated_at"]),
             state=OperationState.INTERRUPTED,
@@ -216,6 +219,7 @@ async def test_operations_never_touch_chat_history(db_client, db_session):
     db_session.add(
         AgentOperation(
             id=uuid7(),
+            tenant_id=DEFAULT_TENANT_ID,
             document_id=UUID(document["id"]),
             base_document_version=None,
             state=OperationState.INTERRUPTED,

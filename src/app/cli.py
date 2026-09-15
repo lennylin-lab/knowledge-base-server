@@ -88,13 +88,16 @@ async def run_reindex(
             documents = await DocumentRepository(session).list_by_index_status(
                 statuses, limit=limit
             )
-            document_ids = [document.id for document in documents]
+            # (id, tenant) pairs: each per-document job stays tenant-scoped
+            # even though the sweep itself is the one deliberate cross-tenant
+            # ops read.
+            document_scopes = [(document.id, document.tenant_id) for document in documents]
 
         counts = {"processed": 0, "done": 0, "failed": 0, "skipped": 0}
-        for doc_id in document_ids:
+        for doc_id, tenant_id in document_scopes:
             # No generation guard here: the sweep reads current state by
             # definition, so there is no enqueue-time version to match.
-            outcome = await pipeline.process_document(doc_id)
+            outcome = await pipeline.process_document(doc_id, tenant_id)
             counts["processed"] += 1
             if outcome is None:
                 counts["skipped"] += 1

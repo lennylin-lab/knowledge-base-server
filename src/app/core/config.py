@@ -94,6 +94,41 @@ class Settings(BaseSettings):
     # paths resolve against the working directory. Missing file = no servers.
     MCP_CONFIG_PATH: str = "mcp.json"
 
+    # --- identity: OIDC verification (opt-in; see auth/) ---
+    # Empty OIDC_ISSUER (the default) keeps user-token verification disabled:
+    # the principal dependency rejects with a generic 401 until a deployment
+    # configures a Keycloak-compatible issuer. The service-account path is
+    # independent and stays available for internal calls (see below).
+    OIDC_ISSUER: str = ""
+    # Expected `aud` of access tokens; empty disables audience checking
+    # (rejected in production deployments that set an issuer).
+    OIDC_AUDIENCE: str = ""
+    # JWKS endpoint; empty = discovered once from `{issuer}/.well-known/
+    # openid-configuration` (standard OIDC discovery, provider-neutral).
+    OIDC_JWKS_URL: str = ""
+    # Allowed signing algorithms; anything outside this set is rejected.
+    OIDC_ALGORITHMS: list[str] = ["RS256"]
+    # Clock skew tolerated on exp/nbf validation (seconds).
+    OIDC_LEEWAY_SECONDS: int = 30
+    # Bounded JWKS cache: keys refresh at most this often (PyJWKClient
+    # lifespan); a bounded refresh window, not an unbounded in-process trust.
+    OIDC_JWKS_CACHE_TTL_S: int = 300
+    # Bound on every live OIDC/JWKS HTTP fetch (discovery + key refresh).
+    OIDC_HTTP_TIMEOUT_S: float = 5.0
+
+    # --- identity: service-account path (internal calls) ---
+    # Bearer key accepted on routes wired to the service-account dependency
+    # (health/operations/internal). Never a user identity and never a caller
+    # grant to arbitrary resources. Empty = the path rejects everything.
+    SERVICE_ACCOUNT_KEY: SecretStr = SecretStr("")
+    # Stable subject recorded on service-account principals (audit display).
+    SERVICE_ACCOUNT_SUBJECT: str = "service-account"
+
+    # --- identity: tenant schema (Stage 4 backfill; see models/tenant.py) ---
+    # The deterministic single default tenant the migration backfills.
+    TENANT_DEFAULT_SLUG: str = "default"
+    TENANT_DEFAULT_NAME: str = "Default tenant"
+
     # --- cache (opt-in, best-effort Redis) ---
     # Master switch for the cache layer (core/cache.py). Effective enable =
     # CACHE_ENABLED AND non-empty REDIS_URL, so the default (empty REDIS_URL)

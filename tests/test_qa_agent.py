@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.api.deps import build_chat_service
 from app.core.config import get_settings
+from app.models.tenant import DEFAULT_TENANT_ID
 from app.rag.retriever import Retriever
 from app.schemas.chat import AnswerDeltaEvent, DoneEvent, RunStartedEvent, SourcesEvent
 from app.services.chat import ChatService
@@ -45,7 +46,10 @@ async def test_tool_retrieves_seeded_corpus_and_answer_cites_it(
         mode="bm25",
     )
 
-    events = [event async for event in service.ask("What is zorblat?", limit=8)]
+    events = [
+        event
+        async for event in service.ask("What is zorblat?", limit=8, tenant_id=DEFAULT_TENANT_ID)
+    ]
 
     kinds = [type(event).__name__ for event in events]
     assert kinds[0] == "RunStartedEvent"
@@ -94,7 +98,7 @@ async def test_run_id_is_echoed_across_the_stream(
         mode="bm25",
     )
 
-    events = [event async for event in service.ask("Anything?")]
+    events = [event async for event in service.ask("Anything?", tenant_id=DEFAULT_TENANT_ID)]
 
     run_ids = {event.run_id for event in events if isinstance(event, (RunStartedEvent, DoneEvent))}
     assert len(run_ids) == 1
@@ -114,7 +118,10 @@ async def test_live_provider_streams_a_complete_run():
         pytest.skip("CHAT_API_KEY not configured")
     service = build_chat_service(settings)
 
-    events = [event async for event in service.ask("What is a zorblat?", limit=3)]
+    events = [
+        event
+        async for event in service.ask("What is a zorblat?", limit=3, tenant_id=DEFAULT_TENANT_ID)
+    ]
 
     kinds = [type(event).__name__ for event in events]
     assert kinds[0] == "RunStartedEvent"

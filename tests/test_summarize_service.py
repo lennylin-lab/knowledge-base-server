@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from structlog.testing import capture_logs
 
 from app.core.exceptions import LLMProviderError, LLMRateLimitedError, NotFoundError
+from app.models.tenant import DEFAULT_TENANT_ID
 from app.schemas.document import DocumentCreate
 from app.services.agents import SummarizeService
 from app.services.document import DocumentService
@@ -45,7 +46,9 @@ def make_service(
 
 
 async def make_document(session: AsyncSession, content: str) -> object:
-    return await DocumentService(session).create_document(DocumentCreate(content=content))
+    return await DocumentService(session).create_document(
+        DocumentCreate(content=content), tenant_id=DEFAULT_TENANT_ID
+    )
 
 
 async def test_short_document_summarizes_in_one_pass(db_session, session_factory):
@@ -55,7 +58,7 @@ async def test_short_document_summarizes_in_one_pass(db_session, session_factory
         session_factory, scripted_summarize_model(["Scripted summary."], prompts=prompts)
     )
 
-    result = await service.summarize_document(created.id)
+    result = await service.summarize_document(created.id, tenant_id=DEFAULT_TENANT_ID)
 
     assert result.document_id == created.id
     assert result.summary == "Scripted summary."
@@ -79,7 +82,7 @@ async def test_long_document_map_reduces_over_chunk_summaries(db_session, sessio
         scripted_summarize_model(["s-one", "s-two", "s-three", "Final reduce."], prompts=prompts),
     )
 
-    result = await service.summarize_document(created.id)
+    result = await service.summarize_document(created.id, tenant_id=DEFAULT_TENANT_ID)
 
     assert result.summary == "Final reduce."  # the combine pass wins, not a chunk
     assert len(prompts) == 4  # 3 sequential chunk passes + 1 combine (no fan-out)
@@ -102,19 +105,19 @@ async def test_missing_document_raises_not_found_before_any_model_call(session_f
     service = make_service(session_factory, scripted_summarize_model(["never"], prompts=prompts))
 
     with pytest.raises(NotFoundError):
-        await service.summarize_document(uuid4())
+        await service.summarize_document(uuid4(), tenant_id=DEFAULT_TENANT_ID)
 
     assert prompts == []  # the 404 gate fires before any LLM call
 
 
 async def test_soft_deleted_document_raises_not_found(db_session, session_factory):
     created = await make_document(db_session, SHORT_DOC)
-    await DocumentService(db_session).delete_document(created.id)
+    await DocumentService(db_session).delete_document(created.id, tenant_id=DEFAULT_TENANT_ID)
     prompts: list[str] = []
     service = make_service(session_factory, scripted_summarize_model(["never"], prompts=prompts))
 
     with pytest.raises(NotFoundError):
-        await service.summarize_document(created.id)
+        await service.summarize_document(created.id, tenant_id=DEFAULT_TENANT_ID)
 
     assert prompts == []
 
@@ -124,7 +127,7 @@ async def test_run_lifecycle_is_logged_with_document_id_and_no_content(db_sessio
     service = make_service(session_factory, scripted_summarize_model(["Scripted summary."]))
 
     with capture_logs() as logs:
-        await service.summarize_document(created.id)
+        await service.summarize_document(created.id, tenant_id=DEFAULT_TENANT_ID)
 
     started = next(entry for entry in logs if entry["event"] == "agent_run_started")
     finished = next(entry for entry in logs if entry["event"] == "agent_run_finished")
@@ -162,7 +165,7 @@ async def test_provider_failure_wraps_into_llm_provider_error_and_logs_failure(
     )
 
     with capture_logs() as logs, pytest.raises(LLMProviderError) as exc_info:
-        await service.summarize_document(created.id)
+        await service.summarize_document(created.id, tenant_id=DEFAULT_TENANT_ID)
 
     # Provider internals stay out of the response; they went to logs only.
     assert "upstream exploded" not in exc_info.value.message
@@ -192,7 +195,7 @@ async def test_rate_limit_failure_maps_to_llm_rate_limited(db_session, session_f
     )
 
     with capture_logs() as logs, pytest.raises(LLMRateLimitedError) as exc_info:
-        await service.summarize_document(created.id)
+        await service.summarize_document(created.id, tenant_id=DEFAULT_TENANT_ID)
 
     # Rate limit must win over the generic APIError branch, message stays generic.
     assert "secret detail" not in exc_info.value.message
@@ -222,7 +225,7 @@ async def test_model_http_error_maps_to_llm_provider_error(db_session, session_f
     )
 
     with capture_logs() as logs, pytest.raises(LLMProviderError) as exc_info:
-        await service.summarize_document(created.id)
+        await service.summarize_document(created.id, tenant_id=DEFAULT_TENANT_ID)
 
     # Provider internals stay out of the response; they went to logs only.
     assert "upstream exploded" not in exc_info.value.message
@@ -245,7 +248,7 @@ async def test_model_http_429_maps_to_llm_rate_limited(db_session, session_facto
     )
 
     with capture_logs() as logs, pytest.raises(LLMRateLimitedError) as exc_info:
-        await service.summarize_document(created.id)
+        await service.summarize_document(created.id, tenant_id=DEFAULT_TENANT_ID)
 
     # 429 must win over the generic provider-error branch, message stays generic.
     assert exc_info.value.message == "LLM provider rate limit exceeded"
@@ -263,7 +266,7 @@ async def test_front_matter_only_document_summarizes_raw_content_in_one_pass(
         session_factory, scripted_summarize_model(["Degenerate summary."], prompts=prompts)
     )
 
-    result = await service.summarize_document(created.id)
+    result = await service.summarize_document(created.id, tenant_id=DEFAULT_TENANT_ID)
 
     assert result.summary == "Degenerate summary."
     # Degenerate path: chunk_markdown strips to nothing, so the single pass goes

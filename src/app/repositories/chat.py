@@ -14,7 +14,11 @@ from app.models.chat import ChatMessage, ChatSession
 
 
 class ChatSessionRepository:
-    """Every SQL statement touching the `chat_sessions` table lives here."""
+    """Every SQL statement touching the `chat_sessions` table lives here.
+
+    Tenant rule (Stage 5): every method takes a required `tenant_id` — there
+    is deliberately no all-tenants read.
+    """
 
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -26,16 +30,19 @@ class ChatSessionRepository:
         await self._session.refresh(chat_session)
         return chat_session
 
-    async def get_by_id(self, session_id: UUID) -> ChatSession | None:
-        """Fetch one non-deleted session."""
+    async def get_by_id(self, session_id: UUID, *, tenant_id: UUID) -> ChatSession | None:
+        """Fetch one non-deleted session within the tenant scope."""
         stmt = select(ChatSession).where(
-            ChatSession.id == session_id, ChatSession.deleted_at.is_(None)
+            ChatSession.id == session_id,
+            ChatSession.tenant_id == tenant_id,
+            ChatSession.deleted_at.is_(None),
         )
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
     async def list_page(
         self,
         *,
+        tenant_id: UUID,
         cursor: tuple[datetime, UUID] | None = None,
         limit: int = 20,
     ) -> Sequence[ChatSession]:
@@ -44,7 +51,9 @@ class ChatSessionRepository:
         Fetches `limit + 1` rows so the caller can tell whether another page
         exists without a separate count query.
         """
-        stmt = select(ChatSession).where(ChatSession.deleted_at.is_(None))
+        stmt = select(ChatSession).where(
+            ChatSession.tenant_id == tenant_id, ChatSession.deleted_at.is_(None)
+        )
         if cursor is not None:
             # Row-value comparison: PG compares (updated_at, id)
             # lexicographically — exactly the keyset predicate for the
@@ -57,18 +66,20 @@ class ChatSessionRepository:
         stmt = stmt.order_by(ChatSession.updated_at.desc(), ChatSession.id.desc()).limit(limit + 1)
         return (await self._session.execute(stmt)).scalars().all()
 
-    async def touch(self, session_id: UUID) -> None:
+    async def touch(self, session_id: UUID, *, tenant_id: UUID) -> None:
         """Advance `updated_at` to now; the caller owns the transaction.
 
         Message inserts do not touch their session's row, so recency ordering
         (`updated_at DESC`) needs this explicit bump per persisted turn.
         """
         await self._session.execute(
-            update(ChatSession).where(ChatSession.id == session_id).values(updated_at=func.now())
+            update(ChatSession)
+            .where(ChatSession.id == session_id, ChatSession.tenant_id == tenant_id)
+            .values(updated_at=func.now())
         )
 
     async def update_rolling_summary(
-        self, session_id: UUID, *, summary: str, through_id: UUID
+        self, session_id: UUID, *, tenant_id: UUID, summary: str, through_id: UUID
     ) -> None:
         """Store the folded summary and advance its watermark; the caller owns
         the transaction.
@@ -80,7 +91,7 @@ class ChatSessionRepository:
         """
         await self._session.execute(
             update(ChatSession)
-            .where(ChatSession.id == session_id)
+            .where(ChatSession.id == session_id, ChatSession.tenant_id == tenant_id)
             .values(rolling_summary=summary, summarized_through_id=through_id)
         )
 
@@ -108,18 +119,22 @@ class ChatMessageRepository:
         await self._session.refresh(message)
         return message
 
-    async def list_for_session(self, session_id: UUID) -> Sequence[ChatMessage]:
+    async def list_for_session(self, session_id: UUID, *, tenant_id: UUID) -> Sequence[ChatMessage]:
         """All messages of one live session, chronological."""
         stmt = (
             select(ChatMessage)
             .join(ChatSession, ChatSession.id == ChatMessage.session_id)
-            .where(ChatSession.id == session_id, ChatSession.deleted_at.is_(None))
+            .where(
+                ChatSession.id == session_id,
+                ChatSession.tenant_id == tenant_id,
+                ChatSession.deleted_at.is_(None),
+            )
             .order_by(ChatMessage.created_at.asc(), ChatMessage.id.asc())
         )
         return (await self._session.execute(stmt)).scalars().all()
 
     async def list_recent_for_session(
-        self, session_id: UUID, *, limit: int
+        self, session_id: UUID, *, tenant_id: UUID, limit: int
     ) -> Sequence[ChatMessage]:
         """Newest-first bounded read of one live session's messages.
 
@@ -130,7 +145,11 @@ class ChatMessageRepository:
         stmt = (
             select(ChatMessage)
             .join(ChatSession, ChatSession.id == ChatMessage.session_id)
-            .where(ChatSession.id == session_id, ChatSession.deleted_at.is_(None))
+            .where(
+                ChatSession.id == session_id,
+                ChatSession.tenant_id == tenant_id,
+                ChatSession.deleted_at.is_(None),
+            )
             .order_by(ChatMessage.created_at.desc(), ChatMessage.id.desc())
             .limit(limit)
         )

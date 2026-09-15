@@ -20,6 +20,7 @@ from app.core.config import get_settings
 from app.core.exceptions import LLMProviderError, SearchIndexError
 from app.models.document import Document, IndexStatus
 from app.models.document_chunk import EMBEDDING_DIM, DocumentChunk
+from app.models.tenant import DEFAULT_TENANT_ID
 from app.rag.chunker import chunk_markdown
 from app.rag.indexer import IndexingPipeline
 from app.repositories.document import DocumentRepository
@@ -36,7 +37,8 @@ ONE_SECTION = f"# Only\n\n{'c' * 900}"
 THREE_SECTION = f"# Third\n\n{'d' * 900}"
 
 
-# (doc_id, version) pairs as the real service enqueuer emits them.
+# (doc_id, version) pairs as the real service enqueuer emits them (the
+# tenant is fixed: every seeded row belongs to the default tenant).
 type EnqueuedJob = tuple[UUID, datetime]
 
 
@@ -50,11 +52,16 @@ async def seed_enqueued(
     receives them — a burst of saves, drained in order by the caller."""
     async with session_factory() as session:
         service = DocumentService(
-            session, enqueuer=lambda doc_id, updated_at: captured.append((doc_id, updated_at))
+            session,
+            enqueuer=lambda doc_id, tenant_id, updated_at: captured.append((doc_id, updated_at)),
         )
-        created = await service.create_document(DocumentCreate(content=TWO_SECTIONS))
+        created = await service.create_document(
+            DocumentCreate(content=TWO_SECTIONS), tenant_id=DEFAULT_TENANT_ID
+        )
         for content in updates:
-            await service.update_document(created.id, DocumentUpdate(content=content))
+            await service.update_document(
+                created.id, DocumentUpdate(content=content), tenant_id=DEFAULT_TENANT_ID
+            )
         return created.id
 
 
@@ -76,7 +83,9 @@ def make_pipeline(
 async def seed_document(session_factory: async_sessionmaker[AsyncSession], content: str) -> UUID:
     async with session_factory() as session:
         service = DocumentService(session)  # no enqueuer: explicit triggering
-        created = await service.create_document(DocumentCreate(content=content))
+        created = await service.create_document(
+            DocumentCreate(content=content), tenant_id=DEFAULT_TENANT_ID
+        )
         return created.id
 
 
@@ -84,7 +93,7 @@ async def index_status_of(
     session_factory: async_sessionmaker[AsyncSession], doc_id: UUID
 ) -> IndexStatus:
     async with session_factory() as session:
-        document = await DocumentRepository(session).get_by_id(doc_id)
+        document = await DocumentRepository(session).get_by_id(doc_id, tenant_id=DEFAULT_TENANT_ID)
         assert document is not None
         return document.index_status
 
@@ -105,7 +114,7 @@ async def test_process_document_marks_done_and_stores_chunks_everywhere(
         session_factory, f"---\ntitle: Indexed\ntags: [x, y]\n---\n\n{TWO_SECTIONS}"
     )
 
-    result = await pipeline.process_document(doc_id)
+    result = await pipeline.process_document(doc_id, DEFAULT_TENANT_ID)
 
     assert result is IndexStatus.DONE
     assert await index_status_of(session_factory, doc_id) is IndexStatus.DONE
@@ -132,13 +141,15 @@ async def test_update_fully_replaces_chunks_in_both_stores(
     es_store = RecordingEsStore()
     pipeline = make_pipeline(session_factory, fake_embedding_provider, es_store)
     doc_id = await seed_document(session_factory, TWO_SECTIONS)
-    assert await pipeline.process_document(doc_id) is IndexStatus.DONE
+    assert await pipeline.process_document(doc_id, DEFAULT_TENANT_ID) is IndexStatus.DONE
     assert len(await chunk_rows(session_factory, doc_id)) == 2
 
     async with session_factory() as session:
-        await DocumentService(session).update_document(doc_id, DocumentUpdate(content=ONE_SECTION))
+        await DocumentService(session).update_document(
+            doc_id, DocumentUpdate(content=ONE_SECTION), tenant_id=DEFAULT_TENANT_ID
+        )
 
-    assert await pipeline.process_document(doc_id) is IndexStatus.DONE
+    assert await pipeline.process_document(doc_id, DEFAULT_TENANT_ID) is IndexStatus.DONE
 
     chunks = await chunk_rows(session_factory, doc_id)
     assert len(chunks) == 1  # no stale rows from the previous version
@@ -156,7 +167,7 @@ async def test_embedding_failure_marks_failed_then_retry_succeeds(
     fake_embedding_provider.error = LLMProviderError("provider exploded with secret detail")
 
     with capture_logs() as logs:
-        result = await pipeline.process_document(doc_id)
+        result = await pipeline.process_document(doc_id, DEFAULT_TENANT_ID)
 
     assert result is IndexStatus.FAILED
     assert await index_status_of(session_factory, doc_id) is IndexStatus.FAILED
@@ -171,7 +182,7 @@ async def test_embedding_failure_marks_failed_then_retry_succeeds(
 
     # Retry after failure: the document is still processable.
     fake_embedding_provider.error = None
-    assert await pipeline.process_document(doc_id) is IndexStatus.DONE
+    assert await pipeline.process_document(doc_id, DEFAULT_TENANT_ID) is IndexStatus.DONE
     assert await index_status_of(session_factory, doc_id) is IndexStatus.DONE
 
 
@@ -183,14 +194,14 @@ async def test_es_failure_marks_failed_but_keeps_staged_chunks(
     doc_id = await seed_document(session_factory, TWO_SECTIONS)
     es_store.error = SearchIndexError("Search index operation failed")
 
-    result = await pipeline.process_document(doc_id)
+    result = await pipeline.process_document(doc_id, DEFAULT_TENANT_ID)
 
     assert result is IndexStatus.FAILED
     # PG chunks committed before the ES stage — staging survives the failure.
     assert len(await chunk_rows(session_factory, doc_id)) == 2
 
     es_store.error = None
-    assert await pipeline.process_document(doc_id) is IndexStatus.DONE
+    assert await pipeline.process_document(doc_id, DEFAULT_TENANT_ID) is IndexStatus.DONE
 
 
 async def test_zero_chunk_document_completes_done(session_factory, fake_embedding_provider):
@@ -198,7 +209,7 @@ async def test_zero_chunk_document_completes_done(session_factory, fake_embeddin
     pipeline = make_pipeline(session_factory, fake_embedding_provider, es_store)
     doc_id = await seed_document(session_factory, "---\ntitle: Empty\n---\n")
 
-    result = await pipeline.process_document(doc_id)
+    result = await pipeline.process_document(doc_id, DEFAULT_TENANT_ID)
 
     assert result is IndexStatus.DONE
     assert await chunk_rows(session_factory, doc_id) == []
@@ -209,7 +220,7 @@ async def test_missing_document_is_a_noop(session_factory, fake_embedding_provid
     es_store = RecordingEsStore()
     pipeline = make_pipeline(session_factory, fake_embedding_provider, es_store)
 
-    result = await pipeline.process_document(uuid4())
+    result = await pipeline.process_document(uuid4(), DEFAULT_TENANT_ID)
 
     assert result is None
     assert es_store.ensure_calls == []
@@ -221,9 +232,9 @@ async def test_soft_deleted_document_is_skipped(session_factory, fake_embedding_
     pipeline = make_pipeline(session_factory, fake_embedding_provider, es_store)
     doc_id = await seed_document(session_factory, TWO_SECTIONS)
     async with session_factory() as session:
-        await DocumentService(session).delete_document(doc_id)
+        await DocumentService(session).delete_document(doc_id, tenant_id=DEFAULT_TENANT_ID)
 
-    result = await pipeline.process_document(doc_id)
+    result = await pipeline.process_document(doc_id, DEFAULT_TENANT_ID)
 
     assert result is None
     assert await chunk_rows(session_factory, doc_id) == []
@@ -247,7 +258,7 @@ async def test_stale_version_skips_before_any_work_and_leaves_status_pending(
     stale_doc_id, stale_version = captured[0]  # the create-time job
 
     with capture_logs() as logs:
-        result = await pipeline.process_document(stale_doc_id, stale_version)
+        result = await pipeline.process_document(stale_doc_id, DEFAULT_TENANT_ID, stale_version)
 
     assert result is None
     # Zero work: no chunking cost (embedding), no store writes at all.
@@ -270,7 +281,9 @@ async def test_matching_version_runs_the_full_pipeline(session_factory, fake_emb
     captured: list[EnqueuedJob] = []
     doc_id = await seed_enqueued(session_factory, captured)
 
-    result = await pipeline.process_document(*captured[0])  # version still current
+    result = await pipeline.process_document(
+        captured[0][0], DEFAULT_TENANT_ID, captured[0][1]
+    )  # version still current
 
     assert result is IndexStatus.DONE
     assert await index_status_of(session_factory, doc_id) is IndexStatus.DONE
@@ -288,7 +301,10 @@ async def test_burst_of_saves_indexes_only_the_latest_versions_job(
     assert len(captured) == 3  # one job per save: create + two updates
 
     # Queue drain, in order: superseded jobs must skip themselves.
-    outcomes = [await pipeline.process_document(*enqueued) for enqueued in captured]
+    outcomes = [
+        await pipeline.process_document(doc_id, DEFAULT_TENANT_ID, version)
+        for doc_id, version in captured
+    ]
     assert outcomes == [None, None, IndexStatus.DONE]  # only the newest job works
 
     assert len(fake_embedding_provider.calls) == 1  # one embed pass, not three
@@ -331,8 +347,9 @@ async def indexing_client(
         es_index=es_index_name,
     )
 
-    async def run(doc_id: UUID, expected_updated_at: datetime | None) -> None:
-        await pipeline.process_document(doc_id, expected_updated_at)
+    async def run(doc_id: UUID, tenant_id: UUID, expected_updated_at: datetime | None) -> None:
+        assert tenant_id == DEFAULT_TENANT_ID
+        await pipeline.process_document(doc_id, tenant_id, expected_updated_at)
 
     monkeypatch.setattr("app.api.deps.run_indexing", run)
     transport = ASGITransport(app=app)

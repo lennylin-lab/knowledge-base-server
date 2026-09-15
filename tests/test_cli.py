@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app import cli
 from app.core.exceptions import LLMProviderError
 from app.models.document import IndexStatus
+from app.models.tenant import DEFAULT_TENANT_ID
 from app.rag.indexer import IndexingPipeline
 from app.repositories.document import DocumentRepository
 from app.schemas.document import DocumentCreate
@@ -37,7 +38,13 @@ async def seed(session_factory: async_sessionmaker[AsyncSession], *contents: str
     async with session_factory() as session:
         service = DocumentService(session)
         for content in contents:
-            ids.append((await service.create_document(DocumentCreate(content=content))).id)
+            ids.append(
+                (
+                    await service.create_document(
+                        DocumentCreate(content=content), tenant_id=DEFAULT_TENANT_ID
+                    )
+                ).id
+            )
     return ids
 
 
@@ -48,7 +55,7 @@ async def statuses_of(
         repository = DocumentRepository(session)
         result = {}
         for doc_id in ids:
-            document = await repository.get_by_id(doc_id)
+            document = await repository.get_by_id(doc_id, tenant_id=DEFAULT_TENANT_ID)
             assert document is not None
             result[doc_id] = document.index_status
         return result
@@ -58,7 +65,9 @@ async def set_status(
     session_factory: async_sessionmaker[AsyncSession], doc_id: UUID, status: IndexStatus
 ) -> None:
     async with session_factory() as session:
-        await DocumentRepository(session).set_index_status(doc_id, status)
+        await DocumentRepository(session).set_index_status(
+            doc_id, status, tenant_id=DEFAULT_TENANT_ID
+        )
         await session.commit()
 
 

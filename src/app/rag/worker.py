@@ -48,9 +48,12 @@ logger = structlog.get_logger(__name__)
 # in `WorkerSettings` uses the same constant, so the two ends cannot drift.
 INDEX_DOCUMENT_TASK = "index_document"
 
-# The raising pipeline core (`None` = missing-document / stale-version skip).
-# The datetime is the generation-guard version stamp (None disables it).
-type IndexRunner = Callable[[UUID, datetime | None], Awaitable[IndexStatus | None]]
+# The raising pipeline core (`None` = missing-document / out-of-tenant /
+# stale-version skip). The datetime is the generation-guard version stamp
+# (None disables it). `tenant_id` scopes the run — required, always provided
+# by `index_document` (legacy payloads without one are skipped, never run
+# unscoped).
+type IndexRunner = Callable[[UUID, UUID, datetime | None], Awaitable[IndexStatus | None]]
 
 
 def is_transient_index_error(exc: BaseException) -> bool:
@@ -69,15 +72,23 @@ def is_transient_index_error(exc: BaseException) -> bool:
 
 
 async def index_document(
-    ctx: dict[str, Any], doc_id: str, expected_updated_at: str | None = None
+    ctx: dict[str, Any],
+    doc_id: str,
+    tenant_id: str | None = None,
+    expected_updated_at: str | None = None,
 ) -> None:
     """ARQ task: index one document (`doc_id` is a str — JSON-safe payload).
 
+    `tenant_id` scopes the run: the pipeline's document read is tenant-
+    filtered, so a job can never index another tenant's document. A legacy
+    payload without one (pre-Stage 5 queue leftover) is skipped with a
+    warning — the CLI reindex sweep recovers the document safely.
+
     `expected_updated_at` (ISO string, JSON-safe) is the document version
     observed at enqueue time; the pipeline's generation guard uses it to
-    skip jobs superseded by a newer save. An absent (legacy payload) or
-    unparseable value degrades to no guard — the job then runs exactly
-    like a CLI sweep instead of crashing.
+    skip jobs superseded by a newer save. An absent or unparseable value
+    degrades to no guard — the job then runs exactly like a CLI sweep
+    instead of crashing.
     """
     try:
         parsed_id = UUID(doc_id)
@@ -86,9 +97,20 @@ async def index_document(
         # cannot fix the payload — log and complete.
         logger.warning("index_job_poison", document_id=doc_id)
         return
+    if tenant_id is None:
+        # Legacy payload: run unscoped jobs is never allowed — skip; the CLI
+        # sweep (which carries each document's own tenant) recovers it.
+        logger.warning("index_job_missing_tenant", document_id=doc_id)
+        return
+    try:
+        parsed_tenant_id = UUID(tenant_id)
+    except ValueError:
+        logger.warning("index_job_poison", document_id=doc_id)
+        return
     settings = get_settings()
     await run_index_job(
         parsed_id,
+        parsed_tenant_id,
         # arq sets `job_try` on the ctx (1-based attempt counter); 1 is the
         # sensible floor if a caller ever runs the task outside a worker.
         job_try=int(ctx.get("job_try", 1)),
@@ -128,6 +150,7 @@ def _coerce_expected_updated_at(doc_id: str, raw: object) -> datetime | None:
 
 async def run_index_job(
     doc_id: UUID,
+    tenant_id: UUID,
     *,
     job_try: int,
     max_tries: int,
@@ -143,13 +166,14 @@ async def run_index_job(
     settle the document here rather than raise one more `Retry`. The
     version stamp rides along on every attempt, so a retry whose document
     has since been edited skips (the newer save's job owns it) instead of
-    re-indexing an obsolete version.
+    re-indexing an obsolete version. `tenant_id` is threaded into every
+    runner call so retries stay scoped like the original job.
     """
     started = time.perf_counter()
     log = logger.bind(document_id=str(doc_id), job_try=job_try)
     log.info("index_job_started")
     try:
-        outcome = await runner(doc_id, expected_updated_at)
+        outcome = await runner(doc_id, tenant_id, expected_updated_at)
     except Exception as exc:
         error_class = type(exc).__name__
         if is_transient_index_error(exc) and job_try < max_tries:
@@ -158,7 +182,7 @@ async def run_index_job(
             raise Retry(defer=next_delay_s) from exc
         # Final attempt (budget exhausted) or a permanent failure: settle so
         # users and the CLI sweep see the document's true state.
-        await _set_index_status(session_factory, doc_id, IndexStatus.FAILED)
+        await _set_index_status(session_factory, doc_id, IndexStatus.FAILED, tenant_id)
         log.info(
             "index_job_finished",
             outcome=IndexStatus.FAILED.value,
@@ -174,7 +198,10 @@ async def run_index_job(
 
 
 async def _set_index_status(
-    session_factory: async_sessionmaker[AsyncSession], doc_id: UUID, status: IndexStatus
+    session_factory: async_sessionmaker[AsyncSession],
+    doc_id: UUID,
+    status: IndexStatus,
+    tenant_id: UUID,
 ) -> None:
     """Flip `index_status` in a small follow-up transaction; never raise.
 
@@ -184,7 +211,7 @@ async def _set_index_status(
     """
     try:
         async with session_factory() as session:
-            await DocumentRepository(session).set_index_status(doc_id, status)
+            await DocumentRepository(session).set_index_status(doc_id, status, tenant_id=tenant_id)
             await session.commit()
     except Exception:
         logger.exception("index_status_update_failed", document_id=str(doc_id))

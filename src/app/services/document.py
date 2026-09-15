@@ -29,12 +29,13 @@ logger = structlog.get_logger(__name__)
 
 # The service stays framework-free: how indexing gets scheduled (FastAPI
 # BackgroundTasks, a queue, ...) is the injecting caller's concern. The
-# enqueued `updated_at` is the document version observed at commit time —
-# the indexing pipeline's generation guard uses it to skip jobs that a
-# newer save has already superseded (see `rag/indexer.py`). Enqueues only
-# ever follow a real change: update_document's content-hash guard skips
-# byte-identical saves of already-indexed documents.
-ReindexEnqueuer = Callable[[UUID, datetime], None]
+# enqueued `tenant_id` scopes the background run (the pipeline's document
+# read is tenant-filtered); the enqueued `updated_at` is the document version
+# observed at commit time — the indexing pipeline's generation guard uses it
+# to skip jobs that a newer save has already superseded (see `rag/indexer.py`).
+# Enqueues only ever follow a real change: update_document's content-hash
+# guard skips byte-identical saves of already-indexed documents.
+ReindexEnqueuer = Callable[[UUID, UUID, datetime], None]
 
 
 def _content_hash(content: str) -> str:
@@ -101,15 +102,16 @@ class DocumentService:
         # no-op, the pre-cache behavior.
         self._cache = cache
 
-    def _enqueue_indexing(self, doc_id: UUID, updated_at: datetime) -> None:
+    def _enqueue_indexing(self, doc_id: UUID, tenant_id: UUID, updated_at: datetime) -> None:
         """Schedule re-indexing; `None` enqueuer (default) is a no-op.
 
+        `tenant_id` scopes the background run to this document's tenant;
         `updated_at` is the version stamp of the just-committed write (loaded
         back from the server by the repository's post-flush refresh) — the
         pipeline's stale-job guard compares against it.
         """
         if self._enqueuer is not None:
-            self._enqueuer(doc_id, updated_at)
+            self._enqueuer(doc_id, tenant_id, updated_at)
 
     async def _bump_search_epoch(self) -> None:
         """Bump the search-cache epoch AFTER commit — a rolled-back write must
@@ -125,10 +127,16 @@ class DocumentService:
                 "cache_error", domain="search", op="incr", error_class=type(exc).__name__
             )
 
-    async def create_document(self, payload: DocumentCreate) -> DocumentRead:
-        """Persist a new document derived from its front matter."""
+    async def create_document(self, payload: DocumentCreate, *, tenant_id: UUID) -> DocumentRead:
+        """Persist a new document derived from its front matter.
+
+        `tenant_id` is the caller's resolved tenant scope — the owning tenant
+        of the new row (required: there is no default-to-a-tenant fallback in
+        the service layer).
+        """
         title, tags = _parse_front_matter(payload.content, payload.title)
         document = Document(
+            tenant_id=tenant_id,
             title=title,
             content=payload.content,
             tags=tags,
@@ -138,18 +146,19 @@ class DocumentService:
         await self._session.commit()
         logger.info("document_created", document_id=str(document.id), title=document.title)
         # After commit only — a rolled-back write must never be indexed.
-        self._enqueue_indexing(document.id, document.updated_at)
+        self._enqueue_indexing(document.id, document.tenant_id, document.updated_at)
         await self._bump_search_epoch()
         return DocumentRead.model_validate(document)
 
-    async def get_document(self, doc_id: UUID) -> DocumentReadDetail:
+    async def get_document(self, doc_id: UUID, *, tenant_id: UUID) -> DocumentReadDetail:
         """Return one document (with content) or raise NotFoundError."""
-        document = await self._get_or_raise(doc_id)
+        document = await self._get_or_raise(doc_id, tenant_id=tenant_id)
         return DocumentReadDetail.model_validate(document)
 
     async def list_documents(
         self,
         *,
+        tenant_id: UUID,
         cursor: str | None = None,
         limit: int = 20,
         tags: Sequence[str] | None = None,
@@ -159,11 +168,13 @@ class DocumentService:
         Multiple tags AND together: a document is listed only when it carries
         every requested tag. Requested tags go through the same normalization
         as stored tags (trim, lowercase, dedupe); an empty/absent filter
-        lists everything.
+        lists everything. The listing is scoped to `tenant_id`.
         """
         decoded = decode_id_cursor(cursor) if cursor is not None else None
         normalized_tags = _normalize_tags(tags) if tags else None
-        rows = await self._repo.list_page(cursor=decoded, limit=limit, tags=normalized_tags)
+        rows = await self._repo.list_page(
+            tenant_id=tenant_id, cursor=decoded, limit=limit, tags=normalized_tags
+        )
 
         next_cursor: str | None = None
         if len(rows) > limit:
@@ -176,7 +187,9 @@ class DocumentService:
             next_cursor=next_cursor,
         )
 
-    async def update_document(self, doc_id: UUID, payload: DocumentUpdate) -> DocumentRead:
+    async def update_document(
+        self, doc_id: UUID, payload: DocumentUpdate, *, tenant_id: UUID
+    ) -> DocumentRead:
         """Apply a partial update; content changes re-derive title and tags.
 
         A write reindexes (status reset to PENDING + enqueue) iff something
@@ -188,7 +201,7 @@ class DocumentService:
         the search index; tags are a pure function of content, so the hash
         covers them) AND `index_status` is DONE.
         """
-        document = await self._get_or_raise(doc_id)
+        document = await self._get_or_raise(doc_id, tenant_id=tenant_id)
         reindex = True
 
         if payload.content is not None:
@@ -223,20 +236,22 @@ class DocumentService:
             reindexed=reindex,
         )
         if reindex:
-            self._enqueue_indexing(document.id, document.updated_at)
+            self._enqueue_indexing(document.id, document.tenant_id, document.updated_at)
         await self._bump_search_epoch()
         return DocumentRead.model_validate(document)
 
-    async def delete_document(self, doc_id: UUID) -> None:
+    async def delete_document(self, doc_id: UUID, *, tenant_id: UUID) -> None:
         """Soft-delete a document; it disappears from every read path."""
-        document = await self._get_or_raise(doc_id)
+        document = await self._get_or_raise(doc_id, tenant_id=tenant_id)
         await self._repo.soft_delete(document)
         await self._session.commit()
         logger.info("document_deleted", document_id=str(document.id))
         await self._bump_search_epoch()
 
-    async def _get_or_raise(self, doc_id: UUID) -> Document:
-        document = await self._repo.get_by_id(doc_id)
+    async def _get_or_raise(self, doc_id: UUID, *, tenant_id: UUID) -> Document:
+        document = await self._repo.get_by_id(doc_id, tenant_id=tenant_id)
         if document is None:
+            # One non-leaky 404 for both "does not exist" and "another
+            # tenant's document" (error-handling spec).
             raise NotFoundError(f"Document {doc_id} not found")
         return document

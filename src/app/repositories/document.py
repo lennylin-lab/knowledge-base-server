@@ -22,7 +22,13 @@ class TagOverlapRow(NamedTuple):
 
 
 class DocumentRepository:
-    """Every SQL statement touching the `documents` table lives here."""
+    """Every SQL statement touching the `documents` table lives here.
+
+    Tenant rule (Stage 5): every method takes a required `tenant_id` — there
+    is deliberately no all-tenants read. The one exception is
+    `list_by_index_status`, the ops-only reindex sweep (CLI), which is never
+    reachable from a request path.
+    """
 
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -34,14 +40,19 @@ class DocumentRepository:
         await self._session.refresh(document)
         return document
 
-    async def get_by_id(self, doc_id: UUID) -> Document | None:
-        """Fetch one non-deleted document."""
-        stmt = select(Document).where(Document.id == doc_id, Document.deleted_at.is_(None))
+    async def get_by_id(self, doc_id: UUID, *, tenant_id: UUID) -> Document | None:
+        """Fetch one non-deleted document within the tenant scope."""
+        stmt = select(Document).where(
+            Document.id == doc_id,
+            Document.tenant_id == tenant_id,
+            Document.deleted_at.is_(None),
+        )
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
     async def list_page(
         self,
         *,
+        tenant_id: UUID,
         cursor: UUID | None = None,
         limit: int = 20,
         tags: Sequence[str] | None = None,
@@ -49,13 +60,15 @@ class DocumentRepository:
         """Keyset-paginated listing in `id DESC` order (newest first).
 
         UUIDv7 ids encode creation time, so id order *is* creation order and
-        the primary-key index serves the sort (backward scan) — no composite
-        cursor index needed. Fetches `limit + 1` rows so the caller can tell
-        whether another page exists without a separate count query. `tags`
-        is an AND: a row matches only if its array contains every requested
-        tag (`@>`, served by the GIN tag index).
+        the (tenant_id, id) index serves the sort (backward scan) — no
+        composite cursor index needed. Fetches `limit + 1` rows so the caller
+        can tell whether another page exists without a separate count query.
+        `tags` is an AND: a row matches only if its array contains every
+        requested tag (`@>`, served by the GIN tag index).
         """
-        stmt = select(Document).where(Document.deleted_at.is_(None))
+        stmt = select(Document).where(
+            Document.tenant_id == tenant_id, Document.deleted_at.is_(None)
+        )
         if tags:
             stmt = stmt.where(Document.tags.contains(list(tags)))
         if cursor is not None:
@@ -75,16 +88,24 @@ class DocumentRepository:
         # the DB clock stays authoritative, same policy as the column defaults.
         document.deleted_at = func.now()
 
-    async def set_index_status(self, doc_id: UUID, status: IndexStatus) -> None:
+    async def set_index_status(self, doc_id: UUID, status: IndexStatus, *, tenant_id: UUID) -> None:
         """One UPDATE, no ORM load; the caller owns the transaction boundary."""
         await self._session.execute(
-            update(Document).where(Document.id == doc_id).values(index_status=status)
+            update(Document)
+            .where(Document.id == doc_id, Document.tenant_id == tenant_id)
+            .values(index_status=status)
         )
 
     async def list_by_index_status(
         self, statuses: Sequence[IndexStatus], *, limit: int
     ) -> Sequence[Document]:
-        """Live documents in any of `statuses`, oldest first (bounded sweep)."""
+        """Live documents in any of `statuses`, oldest first (bounded sweep).
+
+        OPS-ONLY (the CLI reindex sweep): the single deliberate cross-tenant
+        read — background compensation work, never reachable from a request.
+        Rows carry their `tenant_id`, which the caller threads into the
+        pipeline so each per-document indexing job stays tenant-scoped.
+        """
         stmt = (
             select(Document)
             .where(Document.index_status.in_(list(statuses)), Document.deleted_at.is_(None))
@@ -94,7 +115,12 @@ class DocumentRepository:
         return (await self._session.execute(stmt)).scalars().all()
 
     async def find_by_tag_overlap(
-        self, tags: Sequence[str], *, exclude_id: UUID, limit: int
+        self,
+        tags: Sequence[str],
+        *,
+        tenant_id: UUID,
+        exclude_id: UUID,
+        limit: int,
     ) -> Sequence[TagOverlapRow]:
         """Association tag leg: live documents sharing at least one tag.
 
@@ -110,6 +136,7 @@ class DocumentRepository:
         stmt = (
             select(Document.id, Document.title, Document.tags)
             .where(
+                Document.tenant_id == tenant_id,
                 Document.deleted_at.is_(None),
                 Document.id != exclude_id,
                 Document.tags.overlap(list(tags)),

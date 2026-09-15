@@ -46,6 +46,7 @@ class ReplaceChunksFn(Protocol):
         client: AsyncElasticsearch,
         *,
         index: str,
+        tenant_id: str,
         document_id: UUID,
         title: str,
         tags: Sequence[str],
@@ -88,10 +89,15 @@ class IndexingPipeline:
         self._replace_chunks = replace_chunks
 
     async def process_document(
-        self, doc_id: UUID, expected_updated_at: datetime | None = None
+        self, doc_id: UUID, tenant_id: UUID, expected_updated_at: datetime | None = None
     ) -> IndexStatus | None:
         """Index one document; `None` means nothing was indexed (missing,
-        soft-deleted, or a stale version skipped by the generation guard).
+        soft-deleted, out-of-tenant, or a stale version skipped by the
+        generation guard).
+
+        `tenant_id` is the owning tenant of the job: the document read is
+        tenant-filtered, so a job can never index (or even load) another
+        tenant's document — the PG boundary the ES filter mirrors.
 
         `expected_updated_at` is the generation guard: the document version
         observed when the job was enqueued. A mismatch (the document was
@@ -102,25 +108,26 @@ class IndexingPipeline:
         this runs as a background task and must not propagate.
         """
         try:
-            return await self.process_document_raising(doc_id, expected_updated_at)
+            return await self.process_document_raising(doc_id, tenant_id, expected_updated_at)
         except Exception as exc:
-            await self._mark_failed(doc_id, exc)
+            await self._mark_failed(doc_id, tenant_id, exc)
             return IndexStatus.FAILED
 
     async def process_document_raising(
-        self, doc_id: UUID, expected_updated_at: datetime | None = None
+        self, doc_id: UUID, tenant_id: UUID, expected_updated_at: datetime | None = None
     ) -> IndexStatus | None:
         """The raising core of `process_document` (queue-mode entry).
 
         Stage errors PROPAGATE — typed provider/search errors, connection
         failures — so a queue worker can classify them for retry; the caller
-        owns settling `index_status=failed`. A missing/soft-deleted document
-        is still a clean skip (`None`), and success still sets `done` here.
+        owns settling `index_status=failed`. A missing/soft-deleted/
+        out-of-tenant document is still a clean skip (`None`), and success
+        still sets `done` here.
         """
         started = time.perf_counter()
         log = logger.bind(document_id=str(doc_id))
         async with self._session_factory() as session:
-            document = await DocumentRepository(session).get_by_id(doc_id)
+            document = await DocumentRepository(session).get_by_id(doc_id, tenant_id=tenant_id)
             if document is None:
                 # Background race after a delete: nothing to index.
                 log.info("document_index_skipped", reason="missing")
@@ -154,13 +161,16 @@ class IndexingPipeline:
         await self._replace_chunks(
             self._es_client,
             index=self._es_index,
+            tenant_id=str(document.tenant_id),
             document_id=document.id,
             title=title,
             tags=tags,
             chunks=chunks,
         )
         async with self._session_factory() as session:
-            await DocumentRepository(session).set_index_status(document.id, IndexStatus.DONE)
+            await DocumentRepository(session).set_index_status(
+                document.id, IndexStatus.DONE, tenant_id=document.tenant_id
+            )
             await session.commit()
         log.info(
             "document_indexed",
@@ -169,7 +179,7 @@ class IndexingPipeline:
         )
         return IndexStatus.DONE
 
-    async def _mark_failed(self, doc_id: UUID, exc: Exception) -> None:
+    async def _mark_failed(self, doc_id: UUID, tenant_id: UUID, exc: Exception) -> None:
         """Flip to `failed` in a small follow-up transaction; never raise."""
         # Error class only — chunk text/content never reaches the logs.
         logger.warning(
@@ -179,7 +189,9 @@ class IndexingPipeline:
         )
         try:
             async with self._session_factory() as session:
-                await DocumentRepository(session).set_index_status(doc_id, IndexStatus.FAILED)
+                await DocumentRepository(session).set_index_status(
+                    doc_id, IndexStatus.FAILED, tenant_id=tenant_id
+                )
                 await session.commit()
         except Exception:
             # The DB itself is unhappy; the doc stays in its previous status
@@ -206,15 +218,18 @@ def build_default_pipeline() -> IndexingPipeline:
     )
 
 
-async def run_indexing(doc_id: UUID, expected_updated_at: datetime | None = None) -> None:
+async def run_indexing(
+    doc_id: UUID, tenant_id: UUID, expected_updated_at: datetime | None = None
+) -> None:
     """BackgroundTasks entry point after document create/update.
 
-    `expected_updated_at` carries the document version observed at commit
-    time, enabling the pipeline's stale-job guard.
+    `tenant_id` scopes the whole run (the pipeline's document read is
+    tenant-filtered). `expected_updated_at` carries the document version
+    observed at commit time, enabling the pipeline's stale-job guard.
     """
     pipeline = build_default_pipeline()
     try:
-        await pipeline.process_document(doc_id, expected_updated_at)
+        await pipeline.process_document(doc_id, tenant_id, expected_updated_at)
     except Exception:
         # process_document already swallows stage errors; this guards only
         # its own failure paths so the background task can never crash.
@@ -224,21 +239,21 @@ async def run_indexing(doc_id: UUID, expected_updated_at: datetime | None = None
 
 
 async def run_indexing_raw(
-    doc_id: UUID, expected_updated_at: datetime | None = None
+    doc_id: UUID, tenant_id: UUID, expected_updated_at: datetime | None = None
 ) -> IndexStatus | None:
     """Queue-mode entry point (raising): the pipeline core for the ARQ worker.
 
     Like `run_indexing`, one pipeline is built and closed per run; unlike it,
     stage errors propagate (typed provider/search/connection classes) so the
     worker can retry them — settling `failed` is the worker's decision, not
-    the pipeline's. `None` is the missing-document / stale-version skip
-    outcome. `expected_updated_at` threads the generation guard through so
-    a retry whose document has since been edited skips instead of re-indexing
-    an obsolete version.
+    the pipeline's. `None` is the missing-document / out-of-tenant /
+    stale-version skip outcome. `expected_updated_at` threads the generation
+    guard through so a retry whose document has since been edited skips
+    instead of re-indexing an obsolete version.
     """
     pipeline = build_default_pipeline()
     try:
-        return await pipeline.process_document_raising(doc_id, expected_updated_at)
+        return await pipeline.process_document_raising(doc_id, tenant_id, expected_updated_at)
     finally:
         await _aclose_quietly(pipeline, doc_id)
 

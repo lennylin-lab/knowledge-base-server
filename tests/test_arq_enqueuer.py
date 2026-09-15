@@ -24,6 +24,7 @@ import app.api.deps as deps
 from app.api.deps import get_db
 from app.main import create_app
 from app.models.document import IndexStatus
+from app.models.tenant import DEFAULT_TENANT_ID
 from app.repositories.document import DocumentRepository
 from fakes import hermetic_settings
 
@@ -81,15 +82,15 @@ def test_empty_redis_url_keeps_the_background_tasks_path(monkeypatch: pytest.Mon
 
     enqueuer = deps.make_index_enqueuer(background_tasks)
 
-    doc_id = UUID(int=42)
-    enqueuer(doc_id, ENQUEUED_AT)
+    doc_id, tenant_id = UUID(int=42), DEFAULT_TENANT_ID
+    enqueuer(doc_id, tenant_id, ENQUEUED_AT)
     # Exactly today's scheduling semantics: one background task invoking
     # run_indexing with the doc id — plus the version stamp the pipeline's
     # generation guard compares against.
     assert len(background_tasks.tasks) == 1
     task = background_tasks.tasks[0]
     assert task.func is deps.run_indexing
-    assert task.args == (doc_id, ENQUEUED_AT)
+    assert task.args == (doc_id, tenant_id, ENQUEUED_AT)
     assert task.kwargs == {}
     assert deps._shared_arq_pool is None
 
@@ -102,14 +103,15 @@ async def test_configured_redis_url_enqueues_on_the_shared_pool(
     monkeypatch.setattr(deps, "_shared_arq_pool", stub)
 
     enqueuer = deps.make_index_enqueuer(BackgroundTasks())
-    doc_id = UUID(int=7)
+    doc_id, tenant_id = UUID(int=7), DEFAULT_TENANT_ID
 
     with capture_logs() as logs:
-        enqueuer(doc_id, ENQUEUED_AT)
+        enqueuer(doc_id, tenant_id, ENQUEUED_AT)
         await drain_enqueues()
 
-    # The payload carries the version stamp as an ISO string (JSON-safe).
-    assert stub.jobs == [("index_document", (str(doc_id), ENQUEUED_AT.isoformat()))]
+    # The payload carries the tenant id and the version stamp as JSON-safe
+    # strings.
+    assert stub.jobs == [("index_document", (str(doc_id), str(tenant_id), ENQUEUED_AT.isoformat()))]
     enqueued = [entry for entry in logs if entry["event"] == "index_enqueued"]
     assert len(enqueued) == 1
     assert enqueued[0]["document_id"] == str(doc_id)
@@ -131,7 +133,7 @@ async def test_pool_is_built_lazily_and_shared_across_enqueuers(
     for _ in range(2):
         # Fresh enqueuer per request (get_document_service is per-request)...
         enqueuer = deps.make_index_enqueuer(BackgroundTasks())
-        enqueuer(UUID(int=1), ENQUEUED_AT)
+        enqueuer(UUID(int=1), DEFAULT_TENANT_ID, ENQUEUED_AT)
         await drain_enqueues()
 
     assert len(created) == 1  # ...but only ONE pool per process
@@ -147,7 +149,7 @@ async def test_enqueue_failure_degrades_to_a_warning(
     enqueuer = deps.make_index_enqueuer(BackgroundTasks())
 
     with capture_logs() as logs:
-        enqueuer(UUID(int=9), ENQUEUED_AT)  # must not raise
+        enqueuer(UUID(int=9), DEFAULT_TENANT_ID, ENQUEUED_AT)  # must not raise
         await drain_enqueues()
 
     failures = [entry for entry in logs if entry["event"] == "index_enqueue_failed"]
@@ -217,12 +219,17 @@ async def test_document_create_and_update_enqueue_arq_jobs(
     # alongside — the generation guard's payload.
     assert stub.jobs[0][1][0] == doc_id
     assert stub.jobs[1][1][0] == doc_id
-    create_version = datetime.fromisoformat(stub.jobs[0][1][1])
-    update_version = datetime.fromisoformat(stub.jobs[1][1][1])
+    # Payload shape: (document_id, tenant_id, version stamp).
+    assert stub.jobs[0][1][1] == str(DEFAULT_TENANT_ID)
+    assert stub.jobs[1][1][1] == str(DEFAULT_TENANT_ID)
+    create_version = datetime.fromisoformat(stub.jobs[0][1][2])
+    update_version = datetime.fromisoformat(stub.jobs[1][1][2])
 
     # The queue owns indexing now: the document itself stays pending.
     async with factory() as session:
-        document = await DocumentRepository(session).get_by_id(UUID(doc_id))
+        document = await DocumentRepository(session).get_by_id(
+            UUID(doc_id), tenant_id=DEFAULT_TENANT_ID
+        )
         assert document is not None
         assert document.index_status is IndexStatus.PENDING
         # The update job carries the document's CURRENT version; the create
@@ -253,7 +260,7 @@ async def test_enqueue_failure_still_writes_201_and_leaves_pending(
     assert created.json()["index_status"] == "pending"
 
     async with factory() as session:
-        document = await DocumentRepository(session).get_by_id(doc_id)
+        document = await DocumentRepository(session).get_by_id(doc_id, tenant_id=DEFAULT_TENANT_ID)
         assert document is not None
         assert document.index_status is IndexStatus.PENDING
 

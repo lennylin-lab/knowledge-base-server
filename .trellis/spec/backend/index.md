@@ -45,6 +45,7 @@ spec on purpose.
 | [Chat Guidelines](./chat-guidelines.md) | conversation-history contracts: token budget, long-turn guardrail, rolling summary, offline token counter; SSE progress-event ordering contracts; gateway chat-adapter boundary (no tools/MCP forwarding) | Filled |
 | [Quality Guidelines](./quality-guidelines.md) | toolchain gates, offline AI test strategy, review checklist, forbidden patterns | Filled |
 | [Cache Guidelines](./cache-guidelines.md) | opt-in Redis cache: Cache/NullCache/RedisCache primitive, key shapes, best-effort degradation, epoch invalidation | Filled |
+| [Auth & Tenancy](./auth-tenancy.md) | OIDC/service-account boundary, Principal contracts, error matrix (401/403/404/503), tenant isolation + RBAC conventions | Filled |
 
 ---
 

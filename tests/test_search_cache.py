@@ -9,6 +9,7 @@ from structlog.testing import capture_logs
 
 import app.rag.retriever as retriever_module
 from app.core.cache import SEARCH_EPOCH_KEY
+from app.models.tenant import DEFAULT_TENANT_ID
 from app.rag.retriever import Retriever, SearchOutcome, _VectorLeg
 from app.repositories.document_chunk import ChunkRow
 from app.search.es import EsChunkHit
@@ -34,7 +35,11 @@ class StubRetrieverWorld:
             return [EsChunkHit(document_id=doc_id, chunk_index=chunk_idx, score=5.0)]
 
         async def fake_vector_leg(
-            self_retriever: Retriever, query: str, *, tag: str | None
+            self_retriever: Retriever,
+            query: str,
+            *,
+            tenant_id: object,
+            tag: str | None,
         ) -> _VectorLeg:
             self.vector_calls += 1
             row = ChunkRow(
@@ -73,8 +78,8 @@ async def test_identical_query_within_epoch_hits_cache_without_legs(world):
     cache = FakeCache()
     retriever = world.make_retriever(cache)
 
-    first = await retriever.retrieve("some query")
-    second = await retriever.retrieve("some query")
+    first = await retriever.retrieve("some query", tenant_id=DEFAULT_TENANT_ID)
+    second = await retriever.retrieve("some query", tenant_id=DEFAULT_TENANT_ID)
 
     assert world.search_calls == 1 and world.vector_calls == 1  # legs NOT re-run
     assert second == first
@@ -85,10 +90,10 @@ async def test_identical_query_within_epoch_hits_cache_without_legs(world):
 async def test_epoch_bump_forces_a_recompute(world):
     cache = FakeCache()
     retriever = world.make_retriever(cache)
-    await retriever.retrieve("q")
+    await retriever.retrieve("q", tenant_id=DEFAULT_TENANT_ID)
 
     await cache.incr(SEARCH_EPOCH_KEY)  # what DocumentService does after commit
-    await retriever.retrieve("q")
+    await retriever.retrieve("q", tenant_id=DEFAULT_TENANT_ID)
 
     assert world.search_calls == 2 and world.vector_calls == 2
 
@@ -96,9 +101,9 @@ async def test_epoch_bump_forces_a_recompute(world):
 async def test_limit_and_tag_variants_key_independently(world):
     cache = FakeCache()
     retriever = world.make_retriever(cache)
-    await retriever.retrieve("q", limit=5)
-    await retriever.retrieve("q", limit=10)
-    await retriever.retrieve("q", limit=10, tag="x")
+    await retriever.retrieve("q", tenant_id=DEFAULT_TENANT_ID, limit=5)
+    await retriever.retrieve("q", tenant_id=DEFAULT_TENANT_ID, limit=10)
+    await retriever.retrieve("q", tenant_id=DEFAULT_TENANT_ID, limit=10, tag="x")
 
     assert world.search_calls == 3  # each variant computed
     assert len(cache.store) == 3  # three distinct outcome keys (epoch is read, not written)
@@ -107,7 +112,7 @@ async def test_limit_and_tag_variants_key_independently(world):
 async def test_outcome_json_round_trip_field_exact(world):
     cache = FakeCache()
     retriever = world.make_retriever(cache)
-    outcome = await retriever.retrieve("q")
+    outcome = await retriever.retrieve("q", tenant_id=DEFAULT_TENANT_ID)
 
     restored = SearchOutcome.from_json(outcome.to_json())
     assert restored.mode == outcome.mode
@@ -130,8 +135,8 @@ async def test_hit_and_miss_events_are_logged_without_query_text(world):
     cache = FakeCache()
     retriever = world.make_retriever(cache)
     with capture_logs() as logs:
-        await retriever.retrieve("sensitive-query-text")
-        await retriever.retrieve("sensitive-query-text")
+        await retriever.retrieve("sensitive-query-text", tenant_id=DEFAULT_TENANT_ID)
+        await retriever.retrieve("sensitive-query-text", tenant_id=DEFAULT_TENANT_ID)
     assert any(e["event"] == "cache_miss" and e["domain"] == "search" for e in logs)
     assert any(e["event"] == "cache_hit" and e["domain"] == "search" for e in logs)
     # Query text never appears in the log stream (only q_length at the service).
@@ -140,6 +145,6 @@ async def test_hit_and_miss_events_are_logged_without_query_text(world):
 
 async def test_cache_none_wiring_keeps_compute_path(world):
     retriever = world.make_retriever(None)
-    await retriever.retrieve("q")
-    await retriever.retrieve("q")
+    await retriever.retrieve("q", tenant_id=DEFAULT_TENANT_ID)
+    await retriever.retrieve("q", tenant_id=DEFAULT_TENANT_ID)
     assert world.search_calls == 2  # no caching at all — pre-cache behavior

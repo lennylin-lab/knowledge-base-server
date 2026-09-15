@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import NotFoundError, ValidationError
 from app.models.document import Document, IndexStatus
+from app.models.tenant import DEFAULT_TENANT_ID
 from app.schemas.document import DocumentCreate, DocumentUpdate
 from app.services.document import DocumentService, ReindexEnqueuer
 
@@ -27,7 +28,12 @@ async def create_raw(
 ) -> Document:
     """Insert a document bypassing the service (explicit timestamps for ties)."""
     document = Document(
-        title=title, content="raw", tags=tags, created_at=created_at, updated_at=created_at
+        tenant_id=DEFAULT_TENANT_ID,
+        title=title,
+        content="raw",
+        tags=tags,
+        created_at=created_at,
+        updated_at=created_at,
     )
     session.add(document)
     await session.flush()
@@ -46,7 +52,9 @@ async def test_create_extracts_title_and_tags_from_front_matter(db_session):
     service = make_service(db_session)
     content = "---\ntitle: FM Title\ntags: [kotlin, fp]\n---\nbody"
 
-    result = await service.create_document(DocumentCreate(content=content))
+    result = await service.create_document(
+        DocumentCreate(content=content), tenant_id=DEFAULT_TENANT_ID
+    )
 
     assert result.title == "FM Title"
     assert result.tags == ["kotlin", "fp"]
@@ -57,9 +65,11 @@ async def test_create_title_falls_back_to_request_then_untitled(db_session):
     service = make_service(db_session)
 
     from_request = await service.create_document(
-        DocumentCreate(content="no fm here", title="Request Title")
+        DocumentCreate(content="no fm here", title="Request Title"), tenant_id=DEFAULT_TENANT_ID
     )
-    from_default = await service.create_document(DocumentCreate(content="no fm here"))
+    from_default = await service.create_document(
+        DocumentCreate(content="no fm here"), tenant_id=DEFAULT_TENANT_ID
+    )
 
     assert from_request.title == "Request Title"
     assert from_default.title == "Untitled"
@@ -76,7 +86,9 @@ async def test_create_title_falls_back_to_request_then_untitled(db_session):
 async def test_create_normalizes_tags(db_session, tags_yaml, expected):
     service = make_service(db_session)
 
-    result = await service.create_document(DocumentCreate(content=f"---\n{tags_yaml}\n---\nbody"))
+    result = await service.create_document(
+        DocumentCreate(content=f"---\n{tags_yaml}\n---\nbody"), tenant_id=DEFAULT_TENANT_ID
+    )
 
     assert result.tags == expected
 
@@ -92,7 +104,9 @@ async def test_create_invalid_tags_raises_validation_error(db_session, tags_yaml
     service = make_service(db_session)
 
     with pytest.raises(ValidationError) as exc_info:
-        await service.create_document(DocumentCreate(content=f"---\n{tags_yaml}\n---\nbody"))
+        await service.create_document(
+            DocumentCreate(content=f"---\n{tags_yaml}\n---\nbody"), tenant_id=DEFAULT_TENANT_ID
+        )
 
     assert exc_info.value.details["field"] == "tags"
 
@@ -101,7 +115,9 @@ async def test_create_malformed_yaml_raises_validation_error(db_session):
     service = make_service(db_session)
 
     with pytest.raises(ValidationError) as exc_info:
-        await service.create_document(DocumentCreate(content="---\n a: b\n  c: d\ne: f\n---\n"))
+        await service.create_document(
+            DocumentCreate(content="---\n a: b\n  c: d\ne: f\n---\n"), tenant_id=DEFAULT_TENANT_ID
+        )
 
     assert "front matter" in exc_info.value.message
 
@@ -110,16 +126,18 @@ async def test_get_missing_document_raises_not_found(db_session):
     service = make_service(db_session)
 
     with pytest.raises(NotFoundError):
-        await service.get_document(uuid4())
+        await service.get_document(uuid4(), tenant_id=DEFAULT_TENANT_ID)
 
 
 async def test_list_filters_by_normalized_tag(db_session):
     service = make_service(db_session)
-    await service.create_document(DocumentCreate(content="---\ntags: [Python]\n---\n"))
-    await service.create_document(DocumentCreate(content="untagged"))
+    await service.create_document(
+        DocumentCreate(content="---\ntags: [Python]\n---\n"), tenant_id=DEFAULT_TENANT_ID
+    )
+    await service.create_document(DocumentCreate(content="untagged"), tenant_id=DEFAULT_TENANT_ID)
 
-    exact = await service.list_documents(tags=["python"])
-    upper = await service.list_documents(tags=[" PYTHON "])
+    exact = await service.list_documents(tags=["python"], tenant_id=DEFAULT_TENANT_ID)
+    upper = await service.list_documents(tags=[" PYTHON "], tenant_id=DEFAULT_TENANT_ID)
 
     assert [item.title for item in exact.items] == ["Untitled"]
     assert [item.title for item in upper.items] == ["Untitled"]
@@ -128,14 +146,20 @@ async def test_list_filters_by_normalized_tag(db_session):
 async def test_list_requires_every_requested_tag(db_session):
     service = make_service(db_session)
     await service.create_document(
-        DocumentCreate(content="---\ntitle: Both\ntags: [Python, Async]\n---\n")
+        DocumentCreate(content="---\ntitle: Both\ntags: [Python, Async]\n---\n"),
+        tenant_id=DEFAULT_TENANT_ID,
     )
-    await service.create_document(DocumentCreate(content="---\ntitle: Solo\ntags: [python]\n---\n"))
-    await service.create_document(DocumentCreate(content="untagged"))
+    await service.create_document(
+        DocumentCreate(content="---\ntitle: Solo\ntags: [python]\n---\n"),
+        tenant_id=DEFAULT_TENANT_ID,
+    )
+    await service.create_document(DocumentCreate(content="untagged"), tenant_id=DEFAULT_TENANT_ID)
 
-    both = await service.list_documents(tags=["PYTHON", "async"])
-    deduped = await service.list_documents(tags=["PYTHON", " Async ", "python"])
-    unfiltered = await service.list_documents(tags=[])
+    both = await service.list_documents(tags=["PYTHON", "async"], tenant_id=DEFAULT_TENANT_ID)
+    deduped = await service.list_documents(
+        tags=["PYTHON", " Async ", "python"], tenant_id=DEFAULT_TENANT_ID
+    )
+    unfiltered = await service.list_documents(tags=[], tenant_id=DEFAULT_TENANT_ID)
 
     assert [item.title for item in both.items] == ["Both"]
     assert [item.title for item in deduped.items] == ["Both"]
@@ -144,12 +168,21 @@ async def test_list_requires_every_requested_tag(db_session):
 
 async def test_list_paginates_disjoint_pages_newest_first(db_session):
     service = make_service(db_session)
-    created = [await service.create_document(DocumentCreate(content=f"doc {i}")) for i in range(5)]
+    created = [
+        await service.create_document(
+            DocumentCreate(content=f"doc {i}"), tenant_id=DEFAULT_TENANT_ID
+        )
+        for i in range(5)
+    ]
     created_ids = [doc.id for doc in created]
 
-    first = await service.list_documents(limit=2)
-    second = await service.list_documents(limit=2, cursor=first.next_cursor)
-    third = await service.list_documents(limit=2, cursor=second.next_cursor)
+    first = await service.list_documents(limit=2, tenant_id=DEFAULT_TENANT_ID)
+    second = await service.list_documents(
+        limit=2, cursor=first.next_cursor, tenant_id=DEFAULT_TENANT_ID
+    )
+    third = await service.list_documents(
+        limit=2, cursor=second.next_cursor, tenant_id=DEFAULT_TENANT_ID
+    )
 
     assert [item.id for item in first.items] == list(reversed(created_ids[-2:]))
     assert [item.id for item in second.items] == list(reversed(created_ids[1:3]))
@@ -164,8 +197,10 @@ async def test_pagination_survives_identical_created_at_via_id_tiebreak(db_sessi
     await create_raw(db_session, title="b", tags=[], created_at=same_ts)
     service = make_service(db_session)
 
-    first = await service.list_documents(limit=1)
-    second = await service.list_documents(limit=1, cursor=first.next_cursor)
+    first = await service.list_documents(limit=1, tenant_id=DEFAULT_TENANT_ID)
+    second = await service.list_documents(
+        limit=1, cursor=first.next_cursor, tenant_id=DEFAULT_TENANT_ID
+    )
 
     assert len(first.items) == 1
     assert len(second.items) == 1
@@ -178,17 +213,19 @@ async def test_invalid_cursor_raises_validation_error(db_session):
 
     # Valid base64 ("aGVsbG8=" == "hello"), but not a cursor payload.
     with pytest.raises(ValidationError):
-        await service.list_documents(cursor="aGVsbG8=")
+        await service.list_documents(cursor="aGVsbG8=", tenant_id=DEFAULT_TENANT_ID)
 
 
 async def test_update_rederives_title_and_tags_from_new_content(db_session):
     service = make_service(db_session)
     created = await service.create_document(
-        DocumentCreate(content="---\ntitle: Old\ntags: [old]\n---\n")
+        DocumentCreate(content="---\ntitle: Old\ntags: [old]\n---\n"), tenant_id=DEFAULT_TENANT_ID
     )
 
     updated = await service.update_document(
-        created.id, DocumentUpdate(content="---\ntitle: New\ntags: [fresh]\n---\n")
+        created.id,
+        DocumentUpdate(content="---\ntitle: New\ntags: [fresh]\n---\n"),
+        tenant_id=DEFAULT_TENANT_ID,
     )
 
     assert updated.title == "New"
@@ -198,10 +235,12 @@ async def test_update_rederives_title_and_tags_from_new_content(db_session):
 async def test_update_title_only_keeps_tags(db_session):
     service = make_service(db_session)
     created = await service.create_document(
-        DocumentCreate(content="---\ntitle: Old\ntags: [keep]\n---\n")
+        DocumentCreate(content="---\ntitle: Old\ntags: [keep]\n---\n"), tenant_id=DEFAULT_TENANT_ID
     )
 
-    updated = await service.update_document(created.id, DocumentUpdate(title="Renamed"))
+    updated = await service.update_document(
+        created.id, DocumentUpdate(title="Renamed"), tenant_id=DEFAULT_TENANT_ID
+    )
 
     assert updated.title == "Renamed"
     assert updated.tags == ["keep"]
@@ -209,11 +248,15 @@ async def test_update_title_only_keeps_tags(db_session):
 
 async def test_update_resets_index_status_to_pending(db_session):
     service = make_service(db_session)
-    created = await service.create_document(DocumentCreate(content="body"))
+    created = await service.create_document(
+        DocumentCreate(content="body"), tenant_id=DEFAULT_TENANT_ID
+    )
     # Simulate the future pipeline having finished this document.
     await mark_done(db_session, created.id)
 
-    updated = await service.update_document(created.id, DocumentUpdate(title="touch"))
+    updated = await service.update_document(
+        created.id, DocumentUpdate(title="touch"), tenant_id=DEFAULT_TENANT_ID
+    )
 
     assert updated.index_status == IndexStatus.PENDING
 
@@ -222,69 +265,83 @@ async def test_update_missing_document_raises_not_found(db_session):
     service = make_service(db_session)
 
     with pytest.raises(NotFoundError):
-        await service.update_document(uuid4(), DocumentUpdate(title="x"))
+        await service.update_document(
+            uuid4(), DocumentUpdate(title="x"), tenant_id=DEFAULT_TENANT_ID
+        )
 
 
 async def test_soft_deleted_document_is_invisible(db_session):
     service = make_service(db_session)
-    created = await service.create_document(DocumentCreate(content="---\ntitle: X\n---\n"))
+    created = await service.create_document(
+        DocumentCreate(content="---\ntitle: X\n---\n"), tenant_id=DEFAULT_TENANT_ID
+    )
 
-    await service.delete_document(created.id)
+    await service.delete_document(created.id, tenant_id=DEFAULT_TENANT_ID)
 
     with pytest.raises(NotFoundError):
-        await service.get_document(created.id)
-    listing = await service.list_documents()
+        await service.get_document(created.id, tenant_id=DEFAULT_TENANT_ID)
+    listing = await service.list_documents(tenant_id=DEFAULT_TENANT_ID)
     assert listing.items == []
     with pytest.raises(NotFoundError):
-        await service.delete_document(created.id)
+        await service.delete_document(created.id, tenant_id=DEFAULT_TENANT_ID)
 
 
 async def test_delete_missing_document_raises_not_found(db_session):
     service = make_service(db_session)
 
     with pytest.raises(NotFoundError):
-        await service.delete_document(uuid4())
+        await service.delete_document(uuid4(), tenant_id=DEFAULT_TENANT_ID)
 
 
 # --- indexing enqueue wiring (services stay framework-free) ---
 
 
-def capture_enqueues(captured: list[tuple[UUID, datetime]]) -> ReindexEnqueuer:
-    """An enqueuer recording (doc_id, version) pairs — the ReindexEnqueuer shape."""
-    return lambda doc_id, updated_at: captured.append((doc_id, updated_at))
+def capture_enqueues(captured: list[tuple[UUID, UUID, datetime]]) -> ReindexEnqueuer:
+    """An enqueuer recording (doc_id, tenant, version) triples — the shape."""
+    return lambda doc_id, tenant_id, updated_at: captured.append((doc_id, tenant_id, updated_at))
 
 
 async def test_create_enqueues_id_and_version_once_after_commit(db_session):
-    captured: list[tuple[UUID, datetime]] = []
+    captured: list[tuple[UUID, UUID, datetime]] = []
     service = DocumentService(db_session, enqueuer=capture_enqueues(captured))
 
-    created = await service.create_document(DocumentCreate(content="body"))
+    created = await service.create_document(
+        DocumentCreate(content="body"), tenant_id=DEFAULT_TENANT_ID
+    )
 
     # The version stamp is the committed write's updated_at (the value the
     # pipeline's generation guard compares against).
-    assert captured == [(created.id, created.updated_at)]
+    assert captured == [(created.id, DEFAULT_TENANT_ID, created.updated_at)]
 
 
 async def test_update_enqueues_id_and_version_once_after_commit(db_session):
-    captured: list[tuple[UUID, datetime]] = []
+    captured: list[tuple[UUID, UUID, datetime]] = []
     service = DocumentService(db_session, enqueuer=capture_enqueues(captured))
-    created = await service.create_document(DocumentCreate(content="body"))
+    created = await service.create_document(
+        DocumentCreate(content="body"), tenant_id=DEFAULT_TENANT_ID
+    )
     captured.clear()
 
-    updated = await service.update_document(created.id, DocumentUpdate(title="touch"))
+    updated = await service.update_document(
+        created.id, DocumentUpdate(title="touch"), tenant_id=DEFAULT_TENANT_ID
+    )
 
-    assert captured == [(created.id, updated.updated_at)]
+    assert captured == [(created.id, DEFAULT_TENANT_ID, updated.updated_at)]
     assert captured[0][1] != created.updated_at  # a new write bumps the version
 
 
 async def test_failed_write_does_not_enqueue(db_session):
-    captured: list[tuple[UUID, datetime]] = []
+    captured: list[tuple[UUID, UUID, datetime]] = []
     service = DocumentService(db_session, enqueuer=capture_enqueues(captured))
 
     with pytest.raises(ValidationError):
-        await service.create_document(DocumentCreate(content="---\ntags: notalist\n---\n"))
+        await service.create_document(
+            DocumentCreate(content="---\ntags: notalist\n---\n"), tenant_id=DEFAULT_TENANT_ID
+        )
     with pytest.raises(NotFoundError):
-        await service.update_document(uuid4(), DocumentUpdate(title="x"))
+        await service.update_document(
+            uuid4(), DocumentUpdate(title="x"), tenant_id=DEFAULT_TENANT_ID
+        )
 
     assert captured == []  # enqueue happens only after a successful commit
 
@@ -292,19 +349,25 @@ async def test_failed_write_does_not_enqueue(db_session):
 async def test_omitted_enqueuer_is_a_noop(db_session):
     service = DocumentService(db_session)  # default: no background indexing
 
-    created = await service.create_document(DocumentCreate(content="body"))
-    updated = await service.update_document(created.id, DocumentUpdate(title="touch"))
+    created = await service.create_document(
+        DocumentCreate(content="body"), tenant_id=DEFAULT_TENANT_ID
+    )
+    updated = await service.update_document(
+        created.id, DocumentUpdate(title="touch"), tenant_id=DEFAULT_TENANT_ID
+    )
 
     assert updated.index_status == IndexStatus.PENDING
 
 
 async def test_delete_does_not_enqueue(db_session):
-    captured: list[tuple[UUID, datetime]] = []
+    captured: list[tuple[UUID, UUID, datetime]] = []
     service = DocumentService(db_session, enqueuer=capture_enqueues(captured))
-    created = await service.create_document(DocumentCreate(content="body"))
+    created = await service.create_document(
+        DocumentCreate(content="body"), tenant_id=DEFAULT_TENANT_ID
+    )
     captured.clear()
 
-    await service.delete_document(created.id)
+    await service.delete_document(created.id, tenant_id=DEFAULT_TENANT_ID)
 
     assert captured == []
 
@@ -316,7 +379,9 @@ async def test_create_stores_sha256_content_hash(db_session):
     service = make_service(db_session)
     content = "---\ntitle: Hashed\n---\nbody"
 
-    created = await service.create_document(DocumentCreate(content=content))
+    created = await service.create_document(
+        DocumentCreate(content=content), tenant_id=DEFAULT_TENANT_ID
+    )
 
     document = await db_session.get(Document, created.id)
     assert document is not None
@@ -324,101 +389,125 @@ async def test_create_stores_sha256_content_hash(db_session):
 
 
 async def test_update_identical_content_on_done_document_skips_reindex(db_session):
-    captured: list[tuple[UUID, datetime]] = []
+    captured: list[tuple[UUID, UUID, datetime]] = []
     service = DocumentService(db_session, enqueuer=capture_enqueues(captured))
     content = "---\ntitle: Same\n---\nbody"
-    created = await service.create_document(DocumentCreate(content=content))
+    created = await service.create_document(
+        DocumentCreate(content=content), tenant_id=DEFAULT_TENANT_ID
+    )
     await mark_done(db_session, created.id)
     captured.clear()
 
-    updated = await service.update_document(created.id, DocumentUpdate(content=content))
+    updated = await service.update_document(
+        created.id, DocumentUpdate(content=content), tenant_id=DEFAULT_TENANT_ID
+    )
 
     assert updated.index_status == IndexStatus.DONE
     assert captured == []
 
 
 async def test_update_identical_content_on_failed_document_retries(db_session):
-    captured: list[tuple[UUID, datetime]] = []
+    captured: list[tuple[UUID, UUID, datetime]] = []
     service = DocumentService(db_session, enqueuer=capture_enqueues(captured))
     content = "retry body"
-    created = await service.create_document(DocumentCreate(content=content))
+    created = await service.create_document(
+        DocumentCreate(content=content), tenant_id=DEFAULT_TENANT_ID
+    )
     document = await db_session.get(Document, created.id)
     assert document is not None
     document.index_status = IndexStatus.FAILED
     await db_session.flush()
     captured.clear()
 
-    updated = await service.update_document(created.id, DocumentUpdate(content=content))
+    updated = await service.update_document(
+        created.id, DocumentUpdate(content=content), tenant_id=DEFAULT_TENANT_ID
+    )
 
     assert updated.index_status == IndexStatus.PENDING
-    assert captured == [(created.id, updated.updated_at)]
+    assert captured == [(created.id, DEFAULT_TENANT_ID, updated.updated_at)]
 
 
 async def test_update_changed_content_stores_new_hash_and_enqueues(db_session):
-    captured: list[tuple[UUID, datetime]] = []
+    captured: list[tuple[UUID, UUID, datetime]] = []
     service = DocumentService(db_session, enqueuer=capture_enqueues(captured))
-    created = await service.create_document(DocumentCreate(content="old body"))
+    created = await service.create_document(
+        DocumentCreate(content="old body"), tenant_id=DEFAULT_TENANT_ID
+    )
     await mark_done(db_session, created.id)
     captured.clear()
     new_content = "new body"
 
-    updated = await service.update_document(created.id, DocumentUpdate(content=new_content))
+    updated = await service.update_document(
+        created.id, DocumentUpdate(content=new_content), tenant_id=DEFAULT_TENANT_ID
+    )
 
     assert updated.index_status == IndexStatus.PENDING
-    assert captured == [(created.id, updated.updated_at)]
+    assert captured == [(created.id, DEFAULT_TENANT_ID, updated.updated_at)]
     document = await db_session.get(Document, created.id)
     assert document is not None
     assert document.content_hash == hashlib.sha256(new_content.encode("utf-8")).hexdigest()
 
 
 async def test_update_identical_content_with_new_title_reindexes(db_session):
-    captured: list[tuple[UUID, datetime]] = []
+    captured: list[tuple[UUID, UUID, datetime]] = []
     service = DocumentService(db_session, enqueuer=capture_enqueues(captured))
-    created = await service.create_document(DocumentCreate(content="plain body", title="Old"))
+    created = await service.create_document(
+        DocumentCreate(content="plain body", title="Old"), tenant_id=DEFAULT_TENANT_ID
+    )
     await mark_done(db_session, created.id)
     captured.clear()
 
     updated = await service.update_document(
-        created.id, DocumentUpdate(content="plain body", title="New")
+        created.id, DocumentUpdate(content="plain body", title="New"), tenant_id=DEFAULT_TENANT_ID
     )
 
     assert updated.title == "New"
     assert updated.index_status == IndexStatus.PENDING
-    assert captured == [(created.id, updated.updated_at)]
+    assert captured == [(created.id, DEFAULT_TENANT_ID, updated.updated_at)]
 
 
 async def test_title_only_same_title_skips_done_document(db_session):
-    captured: list[tuple[UUID, datetime]] = []
+    captured: list[tuple[UUID, UUID, datetime]] = []
     service = DocumentService(db_session, enqueuer=capture_enqueues(captured))
-    created = await service.create_document(DocumentCreate(content="---\ntitle: Same\n---\n"))
+    created = await service.create_document(
+        DocumentCreate(content="---\ntitle: Same\n---\n"), tenant_id=DEFAULT_TENANT_ID
+    )
     await mark_done(db_session, created.id)
     captured.clear()
 
-    updated = await service.update_document(created.id, DocumentUpdate(title="Same"))
+    updated = await service.update_document(
+        created.id, DocumentUpdate(title="Same"), tenant_id=DEFAULT_TENANT_ID
+    )
 
     assert updated.index_status == IndexStatus.DONE
     assert captured == []
 
 
 async def test_title_only_new_title_reindexes(db_session):
-    captured: list[tuple[UUID, datetime]] = []
+    captured: list[tuple[UUID, UUID, datetime]] = []
     service = DocumentService(db_session, enqueuer=capture_enqueues(captured))
-    created = await service.create_document(DocumentCreate(content="---\ntitle: Old\n---\n"))
+    created = await service.create_document(
+        DocumentCreate(content="---\ntitle: Old\n---\n"), tenant_id=DEFAULT_TENANT_ID
+    )
     await mark_done(db_session, created.id)
     captured.clear()
 
-    updated = await service.update_document(created.id, DocumentUpdate(title="New"))
+    updated = await service.update_document(
+        created.id, DocumentUpdate(title="New"), tenant_id=DEFAULT_TENANT_ID
+    )
 
     assert updated.title == "New"
     assert updated.index_status == IndexStatus.PENDING
-    assert captured == [(created.id, updated.updated_at)]
+    assert captured == [(created.id, DEFAULT_TENANT_ID, updated.updated_at)]
 
 
 async def test_null_content_hash_is_treated_as_changed(db_session):
-    captured: list[tuple[UUID, datetime]] = []
+    captured: list[tuple[UUID, UUID, datetime]] = []
     service = DocumentService(db_session, enqueuer=capture_enqueues(captured))
     content = "pre-backfill body"
-    created = await service.create_document(DocumentCreate(content=content))
+    created = await service.create_document(
+        DocumentCreate(content=content), tenant_id=DEFAULT_TENANT_ID
+    )
     # Simulate a row predating the hash backfill: status done, hash unknown.
     document = await db_session.get(Document, created.id)
     assert document is not None
@@ -427,10 +516,12 @@ async def test_null_content_hash_is_treated_as_changed(db_session):
     await db_session.flush()
     captured.clear()
 
-    updated = await service.update_document(created.id, DocumentUpdate(content=content))
+    updated = await service.update_document(
+        created.id, DocumentUpdate(content=content), tenant_id=DEFAULT_TENANT_ID
+    )
 
     assert updated.index_status == IndexStatus.PENDING
-    assert captured == [(created.id, updated.updated_at)]
+    assert captured == [(created.id, DEFAULT_TENANT_ID, updated.updated_at)]
     document = await db_session.get(Document, created.id)
     assert document is not None
     assert document.content_hash == hashlib.sha256(content.encode("utf-8")).hexdigest()
@@ -439,7 +530,9 @@ async def test_null_content_hash_is_treated_as_changed(db_session):
 async def test_skipped_update_does_not_bump_updated_at(db_session):
     service = make_service(db_session)
     content = "identical body"
-    created = await service.create_document(DocumentCreate(content=content))
+    created = await service.create_document(
+        DocumentCreate(content=content), tenant_id=DEFAULT_TENANT_ID
+    )
     # Force DONE via raw SQL: the ORM write path would bump updated_at
     # (onupdate), which is exactly the version this test guards. Expire so
     # the service re-reads the DONE status from the row.
@@ -448,6 +541,8 @@ async def test_skipped_update_does_not_bump_updated_at(db_session):
     )
     db_session.expire_all()
 
-    updated = await service.update_document(created.id, DocumentUpdate(content=content))
+    updated = await service.update_document(
+        created.id, DocumentUpdate(content=content), tenant_id=DEFAULT_TENANT_ID
+    )
 
     assert updated.updated_at == created.updated_at

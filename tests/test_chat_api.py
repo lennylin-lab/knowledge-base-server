@@ -21,8 +21,9 @@ from httpx import ASGITransport, AsyncClient
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from app.api.deps import build_chat_service, get_chat_service
+from app.api.deps import build_chat_service, get_chat_service, get_tenant_scope
 from app.core.database import get_db
+from app.models.tenant import DEFAULT_TENANT_ID
 from app.rag.retriever import SearchOutcome
 from app.services.chat import ChatService
 from fakes import StubRetriever, hermetic_settings, parse_sse, retrieved_chunk, scripted_chat_model
@@ -400,3 +401,10 @@ async def test_deleted_session_cannot_be_continued(db_chat_client):
 
     assert resp.status_code == 404
     assert resp.json()["error"]["code"] == "not_found"
+
+
+@pytest.fixture(autouse=True)
+def _offline_tenant_scope(app: FastAPI) -> None:
+    """DB-free contract tests: the tenant-scope dependency is overridden with
+    the constant default tenant so no request ever touches a database."""
+    app.dependency_overrides[get_tenant_scope] = lambda: DEFAULT_TENANT_ID

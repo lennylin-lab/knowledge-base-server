@@ -347,12 +347,15 @@ class RewriteOutcome:
 class _ChatTurn:
     """Persistence context for one `ask` run (absent in stateless mode).
 
+    `tenant_id` is the caller's tenant scope: the session lives in it, every
+    session/message read filters on it, and retrieval is scoped to it.
     `carried` is the previous run's persisted sources (empty when there is
     nothing to carry or the feature is off) — read in the prelude, re-emitted
     as the run's first `sources` batch and injected as leading context.
     """
 
     session_id: UUID
+    tenant_id: UUID
     history: list[ModelMessage]
     carried: list[SearchHit] = dataclasses_field(default_factory=list)
 
@@ -457,9 +460,18 @@ class ChatService:
         return max(self._history_token_budget - self._reserved_summary_tokens(summary), 0)
 
     async def ask(
-        self, question: str, *, limit: int = 8, session_id: UUID | None = None
+        self,
+        question: str,
+        *,
+        limit: int = 8,
+        session_id: UUID | None = None,
+        tenant_id: UUID,
     ) -> AsyncIterator[ChatStreamEvent]:
         """Run one QA turn, yielding typed stream events in contract order.
+
+        `tenant_id` is the caller's resolved tenant scope — sessions created
+        here are owned by it and every session/history read filters on it;
+        the agent's retrieval tool is scoped to it as well.
 
         `run_id` is bound into structlog contextvars for the whole generator,
         so every log line of the run (including retrieval legs inside tool
@@ -477,7 +489,7 @@ class ChatService:
 
         # Session prelude — BEFORE the first event: a missing session must
         # surface as a 404 envelope, never as a mid-stream failure.
-        turn = await self._prepare_turn(question, session_id)
+        turn = await self._prepare_turn(question, session_id, tenant_id=tenant_id)
         if turn is not None:
             structlog.contextvars.bind_contextvars(session_id=str(turn.session_id))
 
@@ -485,7 +497,9 @@ class ChatService:
         # drains. Keeps `agents/` free of any streaming knowledge.
         pending: list[list[SearchHit]] = []
         collector = SourceCollector(on_append=pending.append)
-        deps = ChatDeps(retriever=self._retriever, limit=limit, collector=collector)
+        deps = ChatDeps(
+            retriever=self._retriever, limit=limit, collector=collector, tenant_id=tenant_id
+        )
 
         logger.info("agent_run_started", agent="qa", question_length=len(question))
         yield RunStartedEvent(
@@ -606,7 +620,7 @@ class ChatService:
         # to a later turn. `latency_ms` was fixed before it so `done` keeps
         # reporting the answer's own latency.
         if turn is not None:
-            await self._maybe_update_rolling_summary(turn.session_id)
+            await self._maybe_update_rolling_summary(turn.session_id, tenant_id=turn.tenant_id)
         yield DoneEvent(
             run_id=run_id,
             outcome="success",
@@ -671,7 +685,9 @@ class ChatService:
             )
         return RewriteOutcome(query=resolved, event=event)
 
-    async def _prepare_turn(self, question: str, session_id: UUID | None) -> _ChatTurn | None:
+    async def _prepare_turn(
+        self, question: str, session_id: UUID | None, *, tenant_id: UUID
+    ) -> _ChatTurn | None:
         """Resolve the session, assemble history, persist the user message.
 
         One transaction: new sessions are created here (title derived from
@@ -699,19 +715,24 @@ class ChatService:
             summary: str | None = None
             carried: list[SearchHit] = []
             if session_id is None:
-                chat_session = await sessions.create(ChatSession(title=derive_title(question)))
+                chat_session = await sessions.create(
+                    ChatSession(tenant_id=tenant_id, title=derive_title(question))
+                )
                 logger.info(
                     "session_created", session_id=str(chat_session.id), title=chat_session.title
                 )
                 history_rows: Sequence[ChatMessage] = ()
             else:
-                existing = await sessions.get_by_id(session_id)
+                existing = await sessions.get_by_id(session_id, tenant_id=tenant_id)
                 if existing is None:
+                    # Non-leaky 404: another tenant's session is "not found".
                     raise NotFoundError(f"Chat session {session_id} not found")
                 chat_session = existing
                 if self._summary_agent is not None:
                     summary = existing.rolling_summary or None
-                rows = await messages.list_recent_for_session(session_id, limit=HISTORY_READ_LIMIT)
+                rows = await messages.list_recent_for_session(
+                    session_id, tenant_id=tenant_id, limit=HISTORY_READ_LIMIT
+                )
                 history_rows = select_history_window(
                     rows,
                     budget=self._turn_budget(summary),
@@ -753,7 +774,7 @@ class ChatService:
             await messages.add(
                 ChatMessage(session_id=chat_session.id, role=MessageRole.USER, content=question)
             )
-            await sessions.touch(chat_session.id)
+            await sessions.touch(chat_session.id, tenant_id=tenant_id)
             await session.commit()
             logger.info(
                 "chat_message_persisted",
@@ -768,7 +789,9 @@ class ChatService:
                 history = carried_prefix(carried) + history
             if summary:
                 history = summary_prefix(summary) + history
-            return _ChatTurn(session_id=chat_session.id, history=history, carried=carried)
+            return _ChatTurn(
+                session_id=chat_session.id, tenant_id=tenant_id, history=history, carried=carried
+            )
 
     async def _persist_assistant_message(
         self, turn: _ChatTurn, *, content: str, run_id: str, sources: list[SearchHit]
@@ -795,7 +818,7 @@ class ChatService:
                     sources=[hit.model_dump(mode="json") for hit in sources] or None,
                 )
             )
-            await ChatSessionRepository(session).touch(turn.session_id)
+            await ChatSessionRepository(session).touch(turn.session_id, tenant_id=turn.tenant_id)
             await session.commit()
             logger.info(
                 "chat_message_persisted",
@@ -804,7 +827,7 @@ class ChatService:
                 content_length=len(content),
             )
 
-    async def _maybe_update_rolling_summary(self, session_id: UUID) -> None:
+    async def _maybe_update_rolling_summary(self, session_id: UUID, *, tenant_id: UUID) -> None:
         """Fold newly evicted turns into the session's rolling summary; never raises.
 
         Best-effort maintenance after a successful turn: a failure here must
@@ -831,11 +854,13 @@ class ChatService:
             return
         try:
             async with self._session_factory() as session:
-                chat_session = await ChatSessionRepository(session).get_by_id(session_id)
+                chat_session = await ChatSessionRepository(session).get_by_id(
+                    session_id, tenant_id=tenant_id
+                )
                 if chat_session is None:
                     return
                 rows = await ChatMessageRepository(session).list_recent_for_session(
-                    session_id, limit=HISTORY_READ_LIMIT
+                    session_id, tenant_id=tenant_id, limit=HISTORY_READ_LIMIT
                 )
                 existing_summary = chat_session.rolling_summary or None
                 watermark = chat_session.summarized_through_id
@@ -872,7 +897,7 @@ class ChatService:
                 return
             async with self._session_factory() as session:
                 await ChatSessionRepository(session).update_rolling_summary(
-                    session_id, summary=new_summary, through_id=through_id
+                    session_id, tenant_id=tenant_id, summary=new_summary, through_id=through_id
                 )
                 await session.commit()
             # Numbers only — summary and turn contents are user data.

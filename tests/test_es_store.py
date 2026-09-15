@@ -12,6 +12,7 @@ import pytest
 from elasticsearch import NotFoundError
 
 from app.core.exceptions import SearchIndexError
+from app.models.tenant import DEFAULT_TENANT_ID
 from app.rag.chunker import Chunk
 from app.search.es import ensure_index, replace_document_chunks
 
@@ -160,6 +161,7 @@ async def test_replace_indexes_chunks_with_deterministic_ids(es_client, es_index
     await replace_document_chunks(
         es_client,
         index=es_index_name,
+        tenant_id=str(DEFAULT_TENANT_ID),
         document_id=doc_id,
         title="Indexed Note",
         tags=["kotlin", "fp"],
@@ -182,6 +184,7 @@ async def test_replace_indexes_chunks_with_deterministic_ids(es_client, es_index
     assert stored["_source"]["title"] == "Indexed Note"
     assert stored["_source"]["tags"] == ["kotlin", "fp"]
     assert stored["_source"]["document_id"] == str(doc_id)
+    assert stored["_source"]["tenant_id"] == str(DEFAULT_TENANT_ID)
 
 
 async def test_replace_shrinks_without_leaving_orphans(es_client, es_index_name):
@@ -192,6 +195,7 @@ async def test_replace_shrinks_without_leaving_orphans(es_client, es_index_name)
     await replace_document_chunks(
         es_client,
         index=es_index_name,
+        tenant_id=str(DEFAULT_TENANT_ID),
         document_id=doc_id,
         title="A",
         tags=[],
@@ -200,6 +204,7 @@ async def test_replace_shrinks_without_leaving_orphans(es_client, es_index_name)
     await replace_document_chunks(
         es_client,
         index=es_index_name,
+        tenant_id=str(DEFAULT_TENANT_ID),
         document_id=other_id,
         title="B",
         tags=[],
@@ -209,6 +214,7 @@ async def test_replace_shrinks_without_leaving_orphans(es_client, es_index_name)
     await replace_document_chunks(
         es_client,
         index=es_index_name,
+        tenant_id=str(DEFAULT_TENANT_ID),
         document_id=doc_id,
         title="A",
         tags=[],
@@ -229,13 +235,20 @@ async def test_replace_with_no_chunks_clears_the_document(es_client, es_index_na
     await replace_document_chunks(
         es_client,
         index=es_index_name,
+        tenant_id=str(DEFAULT_TENANT_ID),
         document_id=doc_id,
         title="A",
         tags=[],
         chunks=[_chunk("a"), _chunk("b")],
     )
     await replace_document_chunks(
-        es_client, index=es_index_name, document_id=doc_id, title="A", tags=[], chunks=[]
+        es_client,
+        index=es_index_name,
+        tenant_id=str(DEFAULT_TENANT_ID),
+        document_id=doc_id,
+        title="A",
+        tags=[],
+        chunks=[],
     )
 
     assert await _count_for(es_client, es_index_name, str(doc_id)) == 0
@@ -246,6 +259,7 @@ async def test_missing_index_failure_is_wrapped_as_search_index_error(es_client,
         await replace_document_chunks(
             es_client,
             index=f"{es_index_name}-never-created",
+            tenant_id=str(DEFAULT_TENANT_ID),
             document_id=uuid4(),
             title="A",
             tags=[],

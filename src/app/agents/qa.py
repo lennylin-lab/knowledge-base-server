@@ -13,6 +13,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from uuid import UUID
 
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.models import Model
@@ -102,12 +103,15 @@ class ChatDeps:
     """Per-request agent dependencies; the agent itself stays stateless.
 
     The natural seam for later multi-turn state (history, session ids) — the
-    agent's signature never changes.
+    agent's signature never changes. `tenant_id` scopes every retrieval call:
+    the retriever applies it to both legs, so an agent tool can never pull
+    another tenant's chunks.
     """
 
     retriever: Retriever
     limit: int
     collector: SourceCollector
+    tenant_id: UUID
 
     def record_external_tool_call(self) -> None:
         """Satisfies `mcp.tools.McpCallObserver` structurally (no import needed).
@@ -145,7 +149,9 @@ async def search_knowledge(ctx: RunContext[ChatDeps], query: str) -> str:
     blocks (`[1] title ... content`) whose bracketed numbers are the citation
     handles for the answer, or an explicit no-results marker.
     """
-    outcome = await ctx.deps.retriever.retrieve(query, limit=ctx.deps.limit)
+    outcome = await ctx.deps.retriever.retrieve(
+        query, limit=ctx.deps.limit, tenant_id=ctx.deps.tenant_id
+    )
     hits = [to_search_hit(item) for item in outcome.items]
     # Offset before appending: batch N numbers past everything already
     # collected, so citations stay unique for the whole run.

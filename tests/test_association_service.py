@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from structlog.testing import capture_logs
 
 from app.core.exceptions import AppError, LLMProviderError, NotFoundError
+from app.models.tenant import DEFAULT_TENANT_ID
 from app.repositories.document_chunk import DocumentChunkRepository
 from app.schemas.document import DocumentCreate
 from app.services.agents import AssociationService
@@ -66,13 +67,15 @@ def pick(document_id: UUID, reason: str = "Scripted reason.") -> dict[str, str]:
 
 
 async def make_document(session: AsyncSession, content: str) -> object:
-    return await DocumentService(session).create_document(DocumentCreate(content=content))
+    return await DocumentService(session).create_document(
+        DocumentCreate(content=content), tenant_id=DEFAULT_TENANT_ID
+    )
 
 
 async def soft_delete(session_factory: async_sessionmaker[AsyncSession], doc_id: UUID) -> None:
     """Soft-delete via the service on a fresh session (commits the delete)."""
     async with session_factory() as session:
-        await DocumentService(session).delete_document(doc_id)
+        await DocumentService(session).delete_document(doc_id, tenant_id=DEFAULT_TENANT_ID)
 
 
 async def seed_three_docs(seed_indexed, second: str, third: str) -> tuple[UUID, UUID, UUID]:
@@ -93,7 +96,7 @@ async def test_vector_leg_surfaces_neighbor_and_excludes_self(session_factory, s
         scripted_association_model([pick(python_id, "Same-notebook neighbor.")], prompts=prompts),
     )
 
-    result = await service.associate_document(kotlin_id)
+    result = await service.associate_document(kotlin_id, tenant_id=DEFAULT_TENANT_ID)
 
     # The vector leg surfaced exactly the Python doc; the join carried its
     # deterministic metadata plus the scripted reason.
@@ -122,7 +125,7 @@ async def test_tag_leg_surfaces_shared_tag_document(session_factory, seed_indexe
         session_factory, scripted_association_model([pick(jvm_id)], prompts=prompts)
     )
 
-    result = await service.associate_document(kotlin_id)
+    result = await service.associate_document(kotlin_id, tenant_id=DEFAULT_TENANT_ID)
 
     assert [item.document_id for item in result.associations] == [jvm_id]
     assert result.associations[0].title == "JVM Internals"
@@ -140,7 +143,7 @@ async def test_unindexed_source_degrades_to_tag_only_candidates(db_session, sess
         session_factory, scripted_association_model([pick(neighbor.id)], prompts=prompts)
     )
 
-    result = await service.associate_document(source.id)
+    result = await service.associate_document(source.id, tenant_id=DEFAULT_TENANT_ID)
 
     # No chunks on the source: the vector leg cannot run, the tag leg still
     # delivers candidates — no crash, no empty result while tags match.
@@ -161,7 +164,7 @@ async def test_soft_deleted_vector_neighbor_is_invisible(session_factory, seed_i
         session_factory, scripted_association_model([pick(jvm_id)], prompts=prompts)
     )
 
-    result = await service.associate_document(kotlin_id)
+    result = await service.associate_document(kotlin_id, tenant_id=DEFAULT_TENANT_ID)
 
     # The deleted Python doc's chunks still exist in PG but its rows are gone
     # from the candidates (live-doc join); the tag-leg JVM doc survives.
@@ -178,7 +181,7 @@ async def test_soft_deleted_tag_neighbor_is_invisible(session_factory, seed_inde
         session_factory, scripted_association_model([pick(python_id)], prompts=prompts)
     )
 
-    result = await service.associate_document(kotlin_id)
+    result = await service.associate_document(kotlin_id, tenant_id=DEFAULT_TENANT_ID)
 
     assert "JVM Internals" not in prompts[0]
     assert [item.document_id for item in result.associations] == [python_id]
@@ -212,7 +215,7 @@ async def test_vector_leg_keeps_min_distance_across_source_chunks(
     )
     event.listen(db_engine.sync_engine, "before_cursor_execute", _count_cosine)
     try:
-        result = await service.associate_document(source.id)
+        result = await service.associate_document(source.id, tenant_id=DEFAULT_TENANT_ID)
     finally:
         event.remove(db_engine.sync_engine, "before_cursor_execute", _count_cosine)
 
@@ -231,7 +234,7 @@ async def test_no_candidates_short_circuits_without_llm_call(db_session, session
     )
 
     with capture_logs() as logs:
-        result = await service.associate_document(created.id)
+        result = await service.associate_document(created.id, tenant_id=DEFAULT_TENANT_ID)
 
     assert result.associations == []
     assert result.document_id == created.id
@@ -255,7 +258,7 @@ async def test_hallucinated_and_duplicate_ids_are_dropped(db_session, session_fa
     )
 
     with capture_logs() as logs:
-        result = await service.associate_document(source.id)
+        result = await service.associate_document(source.id, tenant_id=DEFAULT_TENANT_ID)
 
     # Only the real candidate survives; the invented id and the repeat are
     # dropped, so every returned id came from the deterministic candidate set.
@@ -274,7 +277,7 @@ async def test_malformed_model_output_maps_to_clean_internal_error(db_session, s
     )
 
     with capture_logs() as logs, pytest.raises(AppError) as exc_info:
-        await service.associate_document(source.id)
+        await service.associate_document(source.id, tenant_id=DEFAULT_TENANT_ID)
 
     # Structured-output validation retries inside the framework; once
     # exhausted the failure surfaces as the generic 500 envelope — no pydantic
@@ -295,21 +298,21 @@ async def test_missing_document_raises_not_found_before_any_model_call(session_f
     )
 
     with pytest.raises(NotFoundError):
-        await service.associate_document(uuid4())
+        await service.associate_document(uuid4(), tenant_id=DEFAULT_TENANT_ID)
 
     assert prompts == []
 
 
 async def test_soft_deleted_source_raises_not_found(db_session, session_factory):
     created = await make_document(db_session, ALPHA_SOURCE)
-    await DocumentService(db_session).delete_document(created.id)
+    await DocumentService(db_session).delete_document(created.id, tenant_id=DEFAULT_TENANT_ID)
     prompts: list[str] = []
     service = make_service(
         session_factory, scripted_association_model([pick(uuid4())], prompts=prompts)
     )
 
     with pytest.raises(NotFoundError):
-        await service.associate_document(created.id)
+        await service.associate_document(created.id, tenant_id=DEFAULT_TENANT_ID)
 
     assert prompts == []
 
@@ -323,7 +326,7 @@ async def test_run_lifecycle_logged_without_reasons_or_titles(db_session, sessio
     )
 
     with capture_logs() as logs:
-        await service.associate_document(source.id)
+        await service.associate_document(source.id, tenant_id=DEFAULT_TENANT_ID)
 
     started = next(entry for entry in logs if entry["event"] == "agent_run_started")
     finished = next(entry for entry in logs if entry["event"] == "agent_run_finished")
@@ -362,7 +365,7 @@ async def test_provider_failure_wraps_into_llm_provider_error_and_logs_failure(
     )
 
     with capture_logs() as logs, pytest.raises(LLMProviderError) as exc_info:
-        await service.associate_document(source.id)
+        await service.associate_document(source.id, tenant_id=DEFAULT_TENANT_ID)
 
     # Provider internals stay out of the response; they went to logs only.
     assert "upstream exploded" not in exc_info.value.message

@@ -18,7 +18,8 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from pydantic import SecretStr
 
-from app.api.deps import build_writing_service, get_writing_service
+from app.api.deps import build_writing_service, get_tenant_scope, get_writing_service
+from app.models.tenant import DEFAULT_TENANT_ID
 from app.rag.retriever import SearchOutcome
 from app.schemas.writing import DRAFT_MAX_CHARS
 from app.services.agents import WritingService
@@ -256,3 +257,10 @@ async def test_build_writing_service_mode_tracks_the_embedding_wiring():
 
     assert bm25_only._mode == "bm25"
     assert hybrid._mode == "hybrid"
+
+
+@pytest.fixture(autouse=True)
+def _offline_tenant_scope(app: FastAPI) -> None:
+    """DB-free contract tests: the tenant-scope dependency is overridden with
+    the constant default tenant so no request ever touches a database."""
+    app.dependency_overrides[get_tenant_scope] = lambda: DEFAULT_TENANT_ID

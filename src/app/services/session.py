@@ -47,10 +47,13 @@ class ChatSessionService:
         self._sessions = ChatSessionRepository(session)
         self._messages = ChatMessageRepository(session)
 
-    async def list_sessions(self, *, cursor: str | None = None, limit: int = 20) -> SessionPage:
-        """Keyset-paginated listing, most recently updated first."""
+    async def list_sessions(
+        self, *, tenant_id: UUID, cursor: str | None = None, limit: int = 20
+    ) -> SessionPage:
+        """Keyset-paginated listing, most recently updated first, scoped to
+        the caller's tenant."""
         decoded = decode_cursor(cursor) if cursor is not None else None
-        rows = await self._sessions.list_page(cursor=decoded, limit=limit)
+        rows = await self._sessions.list_page(tenant_id=tenant_id, cursor=decoded, limit=limit)
 
         next_cursor: str | None = None
         if len(rows) > limit:
@@ -63,12 +66,12 @@ class ChatSessionService:
             next_cursor=next_cursor,
         )
 
-    async def get_session(self, session_id: UUID) -> SessionDetail:
+    async def get_session(self, session_id: UUID, *, tenant_id: UUID) -> SessionDetail:
         """Return one live session with its messages, chronological."""
-        chat_session = await self._get_or_raise(session_id)
+        chat_session = await self._get_or_raise(session_id, tenant_id=tenant_id)
         messages: Sequence[MessageRead] = [
             MessageRead.model_validate(message)
-            for message in await self._messages.list_for_session(session_id)
+            for message in await self._messages.list_for_session(session_id, tenant_id=tenant_id)
         ]
         return SessionDetail(
             id=chat_session.id,
@@ -78,16 +81,18 @@ class ChatSessionService:
             messages=list(messages),
         )
 
-    async def delete_session(self, session_id: UUID) -> None:
+    async def delete_session(self, session_id: UUID, *, tenant_id: UUID) -> None:
         """Soft-delete a session; it disappears from every read path."""
-        chat_session = await self._get_or_raise(session_id)
+        chat_session = await self._get_or_raise(session_id, tenant_id=tenant_id)
         await self._sessions.soft_delete(chat_session)
         await self._session.commit()
         logger.info("session_deleted", session_id=str(chat_session.id))
 
-    async def _get_or_raise(self, session_id: UUID) -> ChatSession:
+    async def _get_or_raise(self, session_id: UUID, *, tenant_id: UUID) -> ChatSession:
         """Fetch one live session; soft-deleted counts as missing."""
-        chat_session = await self._sessions.get_by_id(session_id)
+        chat_session = await self._sessions.get_by_id(session_id, tenant_id=tenant_id)
         if chat_session is None:
+            # One non-leaky 404 for both "does not exist" and "another
+            # tenant's session".
             raise NotFoundError(f"Chat session {session_id} not found")
         return chat_session

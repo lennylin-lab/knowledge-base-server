@@ -15,6 +15,7 @@ from structlog.testing import capture_logs
 
 from app.agents.writing import DEFAULT_INSTRUCTION, render_writing_prompt
 from app.core.exceptions import SearchIndexError
+from app.models.tenant import DEFAULT_TENANT_ID
 from app.rag.retriever import RetrievedChunk, SearchOutcome
 from app.schemas.chat import (
     AnswerDeltaEvent,
@@ -46,7 +47,12 @@ def _make_retriever(item: RetrievedChunk | None = None) -> StubRetriever:
 async def _collect(
     service: WritingService, draft: str, instruction: str | None = None, *, limit: int = 8
 ) -> list[object]:
-    return [event async for event in service.suggest(draft, instruction, limit=limit)]
+    return [
+        event
+        async for event in service.suggest(
+            draft, instruction, tenant_id=DEFAULT_TENANT_ID, limit=limit
+        )
+    ]
 
 
 def _names(events: list[object]) -> list[str]:
@@ -123,7 +129,7 @@ async def test_suggest_with_tool_call_streams_started_sources_deltas_done_in_ord
     assert sources.items[0].content == "zorblat everywhere"
 
     # The tool forwarded the run's limit to the retriever.
-    assert retriever.calls == [("zorblat", 5)]
+    assert retriever.calls == [("zorblat", 5, DEFAULT_TENANT_ID)]
     # The model saw the draft verbatim plus the default instruction.
     assert prompts and DRAFT in prompts[0]
     assert DEFAULT_INSTRUCTION in prompts[0]
@@ -217,7 +223,10 @@ async def test_each_retrieval_flushes_its_own_sources_event():
         "AnswerDeltaEvent",
         "DoneEvent",
     ]
-    assert retriever.calls == [("zorblat", 8), ("quibnard", 8)]
+    assert retriever.calls == [
+        ("zorblat", 8, DEFAULT_TENANT_ID),
+        ("quibnard", 8, DEFAULT_TENANT_ID),
+    ]
     done = events[-1]
     assert isinstance(done, DoneEvent)
     assert done.tool_calls == 2

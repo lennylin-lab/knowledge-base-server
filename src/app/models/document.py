@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime
 from enum import StrEnum
 
-from sqlalchemy import DateTime, Index, Text, func
+from sqlalchemy import DateTime, ForeignKey, Index, Text, func
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.dialects.postgresql import ARRAY, UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -36,9 +36,16 @@ class Document(Base):
         # Listing needs no extra index: UUIDv7 ids order by creation time, so
         # the keyset `ORDER BY id DESC` rides the primary-key index.
         Index("ix_documents_tags", "tags", postgresql_using="gin"),
+        # Tenant listing keyset: every read filters tenant_id, then orders by
+        # id DESC (uuid7 creation order) — the composite serves the scan.
+        Index("ix_documents_tenant_id", "tenant_id", "id"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid7)
+    # Owning tenant (Stage 5): non-null, every query filters it. FK to tenants.
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
     title: Mapped[str] = mapped_column(Text, nullable=False, default="Untitled")
     content: Mapped[str] = mapped_column(Text, nullable=False)
     # SHA-256 hex digest of `content` (front matter included); the service

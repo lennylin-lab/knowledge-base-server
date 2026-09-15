@@ -10,7 +10,14 @@ import uuid
 from datetime import datetime
 from enum import StrEnum
 
-from sqlalchemy import DateTime, ForeignKey, Index, Text, func, text
+from sqlalchemy import (
+    DateTime,
+    ForeignKey,
+    Index,
+    Text,
+    func,
+    text,
+)
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -33,9 +40,19 @@ class ChatSession(Base):
     __table_args__ = (
         # Keyset pagination cursor support: ORDER BY updated_at DESC, id DESC.
         Index("ix_chat_sessions_updated_at_id", text("updated_at DESC, id DESC")),
+        # Tenant listing keyset: tenant filter + the (updated_at, id) ordering.
+        Index(
+            "ix_chat_sessions_tenant_updated_id",
+            "tenant_id",
+            text("updated_at DESC, id DESC"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid7)
+    # Owning tenant (Stage 5): non-null, every session query filters it.
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
     title: Mapped[str] = mapped_column(Text, nullable=False, default="New chat")
     # Reserved for multi-user: schema is ready, auth is not (project convention).
     owner_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)

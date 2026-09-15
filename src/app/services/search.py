@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from uuid import UUID
 
 import structlog
 
@@ -18,19 +19,25 @@ class SearchService:
     def __init__(self, retriever: Retriever) -> None:
         self._retriever = retriever
 
-    async def search(self, q: str, *, limit: int = 10, tag: str | None = None) -> SearchResponse:
+    async def search(
+        self, q: str, *, tenant_id: UUID, limit: int = 10, tag: str | None = None
+    ) -> SearchResponse:
         """Run one hybrid search and map the outcome to response schemas.
 
-        The query text never reaches the logs — queries may contain sensitive
-        phrasing, so the event carries `q_length` only (see logging spec).
-        The `*_gated` counters expose how many candidates each relevance gate
-        dropped (raw leg sizes minus survivors; the relative floor's drops
-        are `fused_gated`), and `vector_rescued` how many rows the rescue
-        tier admitted — counts only, never query text.
+        `tenant_id` is required and structural: the retriever filters BOTH
+        legs (and hydration) on it, so results never cross the tenant
+        boundary. The query text never reaches the logs — queries may contain
+        sensitive phrasing, so the event carries `q_length` only (see logging
+        spec). The `*_gated` counters expose how many candidates each
+        relevance gate dropped (raw leg sizes minus survivors; the relative
+        floor's drops are `fused_gated`), and `vector_rescued` how many rows
+        the rescue tier admitted — counts only, never query text.
         """
         started = time.perf_counter()
         normalized_tag = tag.strip().lower() if tag else None
-        outcome = await self._retriever.retrieve(q, limit=limit, tag=normalized_tag)
+        outcome = await self._retriever.retrieve(
+            q, limit=limit, tenant_id=tenant_id, tag=normalized_tag
+        )
         response = SearchResponse(
             mode=outcome.mode,
             items=[

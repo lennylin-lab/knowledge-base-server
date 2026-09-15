@@ -15,7 +15,7 @@ from collections.abc import AsyncIterator
 from fastapi import APIRouter
 from sse_starlette.sse import EventSourceResponse
 
-from app.api.deps import ChatServiceDep
+from app.api.deps import ChatScope, ChatServiceDep
 from app.schemas.chat import (
     AnswerDeltaEvent,
     ChatRequest,
@@ -72,9 +72,13 @@ async def _primed_sse(
 
 
 @router.post("", response_class=EventSourceResponse, response_model=None)
-async def chat(payload: ChatRequest, service: ChatServiceDep) -> EventSourceResponse:
+async def chat(
+    payload: ChatRequest, service: ChatServiceDep, tenant: ChatScope
+) -> EventSourceResponse:
     """Stream a knowledge-grounded answer as SSE."""
-    events = service.ask(payload.question, limit=payload.limit, session_id=payload.session_id)
+    events = service.ask(
+        payload.question, limit=payload.limit, session_id=payload.session_id, tenant_id=tenant
+    )
     # Prime the generator through its first event BEFORE the SSE response is
     # constructed: sse-starlette sends `http.response.start` before pulling
     # the first body item, so an eager pre-stream failure (session 404) must

@@ -27,6 +27,7 @@ import pytest
 from elasticsearch import AsyncElasticsearch
 
 from app.core.config import get_settings
+from app.models.tenant import DEFAULT_TENANT_ID
 from app.rag.chunker import Chunk
 from app.search.es import ensure_index, replace_document_chunks
 from app.search.queries import bm25_chunk_query
@@ -186,6 +187,7 @@ async def test_title_match_is_not_double_counted_via_breadcrumb(es_client, es_in
         await replace_document_chunks(
             es_client,
             index=es_index_name,
+            tenant_id=str(DEFAULT_TENANT_ID),
             document_id=uuid4(),
             title=title,
             tags=[],

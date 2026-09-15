@@ -15,6 +15,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.chat import ChatMessage, ChatSession, MessageRole
+from app.models.tenant import DEFAULT_TENANT_ID
 from app.repositories.chat import ChatMessageRepository, ChatSessionRepository
 
 pytestmark = pytest.mark.db
@@ -32,7 +33,7 @@ async def _seed_session(
 ) -> ChatSession:
     """Insert one session (optionally with messages) and commit."""
     chat_session = await ChatSessionRepository(db_session).create(
-        ChatSession(title=title, updated_at=updated_at)
+        ChatSession(tenant_id=DEFAULT_TENANT_ID, title=title, updated_at=updated_at)
     )
     message_repo = ChatMessageRepository(db_session)
     for index, (role, content) in enumerate(messages):

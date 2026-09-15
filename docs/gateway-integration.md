@@ -370,3 +370,18 @@ server QA agent 的 `search_knowledge` 和外部 MCP 工具因此不能依赖当
 Gateway 的完整客户端 contract 见 Gateway 仓库的
 `docs/gateway-client-contract.md`；server 的基础启动、数据库和 Elasticsearch
 要求见 server 根目录 `README.md`。
+
+## 11. 业务身份 / 租户 RBAC 与 Gateway 的边界
+
+server 侧的业务资源（documents/sessions/operations）授权与 Gateway 的模型
+授权相互独立：
+
+- Gateway key（`KB_CHAT_API_KEY`）只用于 server 调用 Gateway 的模型 API，
+  不是用户身份；它不能访问 server 的业务资源路由。
+- 用户身份与租户 RBAC（OIDC/Keycloak 兼容验证、`tenant_memberships` 角色
+  矩阵、401/403/404 语义）见 `docs/identity-tenants.md`。启用
+  `KB_OIDC_ISSUER` 后，业务客户端调用 `/api/v1/*` 需要 `Authorization:
+  Bearer <user access token>`；`/api/v1/chat` 的 SSE 协议不变。
+- 资源角色永远不会隐含模型权限；Gateway 的 model policy（允许的公开模型、
+  quota、限流）只在 Gateway 侧配置，与本文第 5/8 节的验证方式一致，且与
+  RBAC 改动无关（opt-in `live_gateway` 探针独立于默认测试套件）。

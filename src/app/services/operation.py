@@ -82,7 +82,9 @@ class AgentOperationService:
 
     # --- create / inspect / resume ---
 
-    async def create_operation(self, payload: OperationCreate) -> OperationReadDetail:
+    async def create_operation(
+        self, payload: OperationCreate, *, tenant_id: UUID
+    ) -> OperationReadDetail:
         """Persist one completed draft operation (explicit submission path).
 
         Idempotent on `idempotency_key`: a retry resolves to the original
@@ -91,7 +93,9 @@ class AgentOperationService:
         creation, not at apply time.
         """
         if payload.idempotency_key is not None:
-            existing = await self._ops.get_by_idempotency_key(payload.idempotency_key)
+            existing = await self._ops.get_by_idempotency_key(
+                payload.idempotency_key, tenant_id=tenant_id
+            )
             if existing is not None:
                 logger.info(
                     "operation_idempotent_create",
@@ -100,9 +104,10 @@ class AgentOperationService:
                 )
                 return OperationReadDetail.model_validate(existing)
 
-        document = await self._load_live_document(payload.document_id)
+        document = await self._load_live_document(payload.document_id, tenant_id=tenant_id)
         _parse_front_matter(payload.draft.content, payload.draft.title)  # validate early
         operation = AgentOperation(
+            tenant_id=tenant_id,
             document_id=document.id,
             base_document_version=payload.base_document_version,
             state=OperationState.COMPLETED,
@@ -118,7 +123,9 @@ class AgentOperationService:
             await self._session.rollback()
             if payload.idempotency_key is None:
                 raise
-            existing = await self._ops.get_by_idempotency_key(payload.idempotency_key)
+            existing = await self._ops.get_by_idempotency_key(
+                payload.idempotency_key, tenant_id=tenant_id
+            )
             if existing is None:
                 raise
             return OperationReadDetail.model_validate(existing)
@@ -130,26 +137,28 @@ class AgentOperationService:
         )
         return OperationReadDetail.model_validate(operation)
 
-    async def get_operation(self, operation_id: UUID) -> OperationReadDetail:
+    async def get_operation(self, operation_id: UUID, *, tenant_id: UUID) -> OperationReadDetail:
         """Inspect one operation, draft payload included."""
-        operation = await self._get_or_raise(operation_id)
+        operation = await self._get_or_raise(operation_id, tenant_id=tenant_id)
         return OperationReadDetail.model_validate(operation)
 
-    async def list_operations(self, document_id: UUID) -> list[OperationReadDetail]:
+    async def list_operations(
+        self, document_id: UUID, *, tenant_id: UUID
+    ) -> list[OperationReadDetail]:
         """One document's operations, newest first (explicit audit view)."""
-        await self._load_live_document(document_id)
-        rows = await self._ops.list_for_document(document_id)
+        await self._load_live_document(document_id, tenant_id=tenant_id)
+        rows = await self._ops.list_for_document(document_id, tenant_id=tenant_id)
         return [OperationReadDetail.model_validate(row) for row in rows]
 
     async def resume_operation(
-        self, operation_id: UUID, payload: OperationTransition
+        self, operation_id: UUID, payload: OperationTransition, *, tenant_id: UUID
     ) -> OperationReadDetail:
         """Explicitly resume an interrupted (or failed) operation.
 
         Marks it completed — optionally with an amended draft — so it becomes
         applicable. Running and already-applied operations cannot resume.
         """
-        operation = await self._get_or_raise(operation_id)
+        operation = await self._get_or_raise(operation_id, tenant_id=tenant_id)
         if operation.state not in (OperationState.INTERRUPTED, OperationState.FAILED):
             raise ConflictError(
                 f"Operation {operation_id} cannot be resumed from state '{operation.state.value}'",
@@ -167,7 +176,9 @@ class AgentOperationService:
 
     # --- apply (atomic, optimistic concurrency, idempotent) ---
 
-    async def apply_operation(self, operation_id: UUID, payload: ApplyRequest) -> ApplyResult:
+    async def apply_operation(
+        self, operation_id: UUID, payload: ApplyRequest, *, tenant_id: UUID
+    ) -> ApplyResult:
         """Publish a draft as one document revision — the only publish path.
 
         Guards, in order, all before any mutation: the operation must be
@@ -180,10 +191,10 @@ class AgentOperationService:
         commit together; indexing is enqueued only after that commit, so an
         enqueue failure leaves durable content `pending` for the retry sweep.
         """
-        operation = await self._get_or_raise(operation_id)
+        operation = await self._get_or_raise(operation_id, tenant_id=tenant_id)
 
         if operation.state is OperationState.APPLIED:
-            return await self._applied_result(operation)
+            return await self._applied_result(operation, tenant_id=tenant_id)
 
         if operation.state not in _APPLICABLE_STATES:
             raise ConflictError(
@@ -209,7 +220,7 @@ class AgentOperationService:
                 },
             )
 
-        document = await self._load_live_document(operation.document_id)
+        document = await self._load_live_document(operation.document_id, tenant_id=tenant_id)
         if (
             operation.base_document_version is None
             or document.updated_at != operation.base_document_version
@@ -246,6 +257,7 @@ class AgentOperationService:
 
         revision = await self._revisions.create(
             DocumentRevision(
+                tenant_id=operation.tenant_id,
                 document_id=document.id,
                 operation_id=operation.id,
                 title=title,
@@ -271,30 +283,30 @@ class AgentOperationService:
         # document stays `pending` if enqueueing fails; the CLI reindex sweep
         # (or a re-save) finishes it — durable content, never lost.
         if self._enqueuer is not None:
-            self._enqueuer(document.id, document.updated_at)
+            self._enqueuer(document.id, document.tenant_id, document.updated_at)
         return ApplyResult(
             operation=OperationReadDetail.model_validate(operation),
             revision=RevisionRead.model_validate(revision),
             document=DocumentInResult.model_validate(document),
         )
 
-    async def _applied_result(self, operation: AgentOperation) -> ApplyResult:
+    async def _applied_result(self, operation: AgentOperation, *, tenant_id: UUID) -> ApplyResult:
         """Idempotent repeat of an already-applied operation: read back the
         original revision; no second revision is ever created."""
         revision_id = operation.result.get("revision_id") if operation.result else None
         revision = (
-            await self._revisions.get_by_id(UUID(str(revision_id)))
+            await self._revisions.get_by_id(UUID(str(revision_id)), tenant_id=tenant_id)
             if revision_id is not None
             else None
         )
         if revision is None:
-            revision = await self._revisions.get_by_operation_id(operation.id)
+            revision = await self._revisions.get_by_operation_id(operation.id, tenant_id=tenant_id)
         if revision is None:
             raise ConflictError(
                 f"Operation {operation.id} is applied but has no revision record",
                 details={"state": operation.state.value},
             )
-        document = await self._load_live_document(operation.document_id)
+        document = await self._load_live_document(operation.document_id, tenant_id=tenant_id)
         logger.info("operation_apply_idempotent", operation_id=str(operation.id))
         return ApplyResult(
             operation=OperationReadDetail.model_validate(operation),
@@ -305,7 +317,7 @@ class AgentOperationService:
     # --- structured draft run (writing agent wiring) ---
 
     async def draft_document(
-        self, document_id: UUID, instruction: str | None, *, limit: int = 8
+        self, document_id: UUID, instruction: str | None, *, tenant_id: UUID, limit: int = 8
     ) -> OperationReadDetail:
         """Run the writing agent's structured output against a live document
         and persist the result as a draft operation.
@@ -320,9 +332,10 @@ class AgentOperationService:
             raise ChatUnavailableError(
                 "Drafting is not configured: set CHAT_API_KEY to enable it",
             )
-        document = await self._load_live_document(document_id)
+        document = await self._load_live_document(document_id, tenant_id=tenant_id)
         operation = await self._ops.create(
             AgentOperation(
+                tenant_id=tenant_id,
                 document_id=document.id,
                 base_document_version=document.updated_at,
                 state=OperationState.RUNNING,
@@ -334,7 +347,9 @@ class AgentOperationService:
 
         collector = SourceCollector()
         assert self._retriever is not None  # guaranteed by the _agent wiring
-        deps = WritingDeps(retriever=self._retriever, limit=limit, collector=collector)
+        deps = WritingDeps(
+            retriever=self._retriever, limit=limit, collector=collector, tenant_id=tenant_id
+        )
         try:
             result = await self._agent.run(
                 render_writing_prompt(document.content, instruction), deps=deps
@@ -361,18 +376,20 @@ class AgentOperationService:
 
     # --- internals ---
 
-    async def _load_live_document(self, document_id: UUID | None) -> Document:
-        """Fetch one live document; soft-deleted counts as missing."""
+    async def _load_live_document(self, document_id: UUID | None, *, tenant_id: UUID) -> Document:
+        """Fetch one live document in the tenant scope; soft-deleted counts as
+        missing."""
         if document_id is None:
             raise NotFoundError("Operation has no target document")
-        document = await self._documents.get_by_id(document_id)
+        document = await self._documents.get_by_id(document_id, tenant_id=tenant_id)
         if document is None:
             raise NotFoundError(f"Document {document_id} not found")
         return document
 
-    async def _get_or_raise(self, operation_id: UUID) -> AgentOperation:
-        operation = await self._ops.get_by_id(operation_id)
+    async def _get_or_raise(self, operation_id: UUID, *, tenant_id: UUID) -> AgentOperation:
+        operation = await self._ops.get_by_id(operation_id, tenant_id=tenant_id)
         if operation is None:
+            # Non-leaky 404: another tenant's operation is "not found".
             raise NotFoundError(f"Operation {operation_id} not found")
         return operation
 

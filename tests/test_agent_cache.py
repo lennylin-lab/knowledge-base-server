@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.exceptions import AppError
 from app.models.document import Document as DocumentModel
+from app.models.tenant import DEFAULT_TENANT_ID
 from app.services.agents import AssociationService, SummarizeService
 from app.services.document import (
     DocumentCreate,
@@ -76,7 +77,9 @@ def make_associator(
 
 
 async def make_document(session: AsyncSession, content: str) -> object:
-    return await DocumentService(session).create_document(DocumentCreate(content=content))
+    return await DocumentService(session).create_document(
+        DocumentCreate(content=content), tenant_id=DEFAULT_TENANT_ID
+    )
 
 
 async def test_second_summarize_unchanged_document_skips_the_agent(db_session, session_factory):
@@ -87,8 +90,8 @@ async def test_second_summarize_unchanged_document_skips_the_agent(db_session, s
         session_factory, scripted_summarize_model(["First summary."], prompts=prompts), cache
     )
 
-    first = await service.summarize_document(created.id)  # type: ignore[attr-defined]
-    second = await service.summarize_document(created.id)  # type: ignore[attr-defined]
+    first = await service.summarize_document(created.id, tenant_id=DEFAULT_TENANT_ID)  # type: ignore[attr-defined]
+    second = await service.summarize_document(created.id, tenant_id=DEFAULT_TENANT_ID)  # type: ignore[attr-defined]
 
     assert first.summary == "First summary."
     assert second.summary == "First summary."  # payload equals the computed one
@@ -106,15 +109,16 @@ async def test_edited_content_changes_hash_so_cache_misses(db_session, session_f
         scripted_summarize_model(["First.", "Second."], prompts=prompts),
         cache,
     )
-    await service.summarize_document(created.id)  # type: ignore[attr-defined]
+    await service.summarize_document(created.id, tenant_id=DEFAULT_TENANT_ID)  # type: ignore[attr-defined]
 
     async with session_factory() as session:
         await DocumentService(session).update_document(
             created.id,
             DocumentUpdate(content=EDITED_DOC),  # type: ignore[arg-type]
+            tenant_id=DEFAULT_TENANT_ID,
         )
 
-    result = await service.summarize_document(created.id)  # type: ignore[attr-defined]
+    result = await service.summarize_document(created.id, tenant_id=DEFAULT_TENANT_ID)  # type: ignore[attr-defined]
     assert result.summary == "Second."  # fresh run after the edit
     assert len(prompts) == 2
 
@@ -132,8 +136,8 @@ async def test_null_content_hash_document_is_never_cached(db_session, session_fa
         )
         await session.commit()
 
-    first = await service.summarize_document(created.id)  # type: ignore[attr-defined]
-    second = await service.summarize_document(created.id)  # type: ignore[attr-defined]
+    first = await service.summarize_document(created.id, tenant_id=DEFAULT_TENANT_ID)  # type: ignore[attr-defined]
+    second = await service.summarize_document(created.id, tenant_id=DEFAULT_TENANT_ID)  # type: ignore[attr-defined]
     assert first.summary == second.summary == "Once."
     assert len(prompts) == 2  # always a miss
     assert cache.set_calls == 0  # never stored
@@ -148,7 +152,7 @@ async def test_summarize_error_result_is_never_cached(db_session, session_factor
         cache,
     )
     with pytest.raises(AppError):
-        await service.summarize_document(created.id)  # type: ignore[attr-defined]
+        await service.summarize_document(created.id, tenant_id=DEFAULT_TENANT_ID)  # type: ignore[attr-defined]
     assert cache.set_calls == 0
 
 
@@ -165,8 +169,8 @@ async def test_second_association_within_ttl_skips_the_agent(db_session, session
         cache,
     )
 
-    first = await service.associate_document(source.id)  # type: ignore[attr-defined]
-    second = await service.associate_document(source.id)  # type: ignore[attr-defined]
+    first = await service.associate_document(source.id, tenant_id=DEFAULT_TENANT_ID)  # type: ignore[attr-defined]
+    second = await service.associate_document(source.id, tenant_id=DEFAULT_TENANT_ID)  # type: ignore[attr-defined]
 
     assert [item.document_id for item in first.associations] == [neighbor.id]
     assert [item.document_id for item in second.associations] == [neighbor.id]
@@ -193,8 +197,8 @@ async def test_association_null_content_hash_is_never_cached(db_session, session
         )
         await session.commit()
 
-    await service.associate_document(source.id)  # type: ignore[attr-defined]
-    await service.associate_document(source.id)  # type: ignore[attr-defined]
+    await service.associate_document(source.id, tenant_id=DEFAULT_TENANT_ID)  # type: ignore[attr-defined]
+    await service.associate_document(source.id, tenant_id=DEFAULT_TENANT_ID)  # type: ignore[attr-defined]
     assert len(prompts) == 2
     assert cache.set_calls == 0
 
@@ -209,5 +213,5 @@ async def test_association_error_result_is_never_cached(db_session, session_fact
         cache,
     )
     with pytest.raises(AppError):
-        await service.associate_document(source.id)  # type: ignore[attr-defined]
+        await service.associate_document(source.id, tenant_id=DEFAULT_TENANT_ID)  # type: ignore[attr-defined]
     assert cache.set_calls == 0

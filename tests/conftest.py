@@ -48,6 +48,7 @@ from app.core.database import Base, get_db
 from app.llm.embeddings import EmbeddingProvider
 from app.main import create_app
 from app.models.document import IndexStatus
+from app.models.tenant import DEFAULT_TENANT_ID
 from app.rag.indexer import IndexingPipeline
 from app.schemas.document import DocumentCreate
 from app.services.document import DocumentService
@@ -207,10 +208,24 @@ def test_database_url() -> Iterator[str]:
 
 
 async def _truncate(engine: AsyncEngine) -> None:
-    """Empty every table between tests; CASCADE covers FK relations."""
+    """Empty every table between tests; CASCADE covers FK relations.
+
+    The deterministic default tenant is re-inserted afterwards: Stage 5
+    services require a tenant scope (FK-enforced), and the test database is
+    schema-created (never migrated), so the 0010 backfill row must be seeded
+    here — the same fixed id the migration uses.
+    """
     table_names = ", ".join(Base.metadata.tables)
     async with engine.begin() as conn:
         await conn.execute(text(f"TRUNCATE TABLE {table_names} CASCADE"))
+        await conn.execute(
+            text(
+                "INSERT INTO tenants (id, slug, name, status) "
+                "VALUES (:id, 'default', 'Default tenant', 'active') "
+                "ON CONFLICT (slug) DO NOTHING"
+            ),
+            {"id": DEFAULT_TENANT_ID},
+        )
 
 
 @pytest.fixture
@@ -246,6 +261,16 @@ def fake_embedding_provider() -> FakeEmbeddingProvider:
 
 
 @pytest.fixture
+def tenant_id() -> UUID:
+    """The deterministic default tenant every seeded row belongs to.
+
+    The same constant migration 0010 backfills; the `db_engine` fixture
+    seeds the matching `tenants` row, so FK-enforced writes succeed.
+    """
+    return DEFAULT_TENANT_ID
+
+
+@pytest.fixture
 async def seed_indexed(
     session_factory: async_sessionmaker[AsyncSession],
     es_client: AsyncElasticsearch,
@@ -260,7 +285,7 @@ async def seed_indexed(
     async def seed(provider: EmbeddingProvider, content: str) -> UUID:
         async with session_factory() as session:
             created = await DocumentService(session).create_document(
-                DocumentCreate(content=content)
+                DocumentCreate(content=content), tenant_id=DEFAULT_TENANT_ID
             )
         pipeline = IndexingPipeline(
             session_factory=session_factory,
@@ -268,7 +293,7 @@ async def seed_indexed(
             es_client=es_client,
             es_index=es_index_name,
         )
-        assert await pipeline.process_document(created.id) is IndexStatus.DONE
+        assert await pipeline.process_document(created.id, DEFAULT_TENANT_ID) is IndexStatus.DONE
         return created.id
 
     yield seed
