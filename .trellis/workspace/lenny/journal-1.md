@@ -434,3 +434,25 @@ Completed 09-15-gateway-integration-v2 across three trellis-implement dispatches
 ### Status
 
 [OK] **Completed**
+
+
+## Session 20: Document summary/associations SSE endpoints
+<!-- trellis-session: v=2 fp=cacdd4d31413e351 -->
+
+**Date**: 2026-09-15
+**Task**: Document summary/associations SSE endpoints
+**Branch**: `main`
+
+### Summary
+
+Planned and implemented 09-15-document-agent-sse. User resolved the PRD's open question in favor of typed progress events. Both document agent endpoints (POST /documents/{id}/summary and /associations) now stream SSE via a new shared serializer (api/v1/endpoints/sse.py; chat delegates unchanged) and schemas/agent_stream.py event contract (run_started, summary_progress per map/reduce pass, summary, associations, done; chat ErrorEvent reused). Services gained stream generators with 404 gate pre-first-yield (pre-stream 404 envelopes preserved), cache-hit shortcut with no model call, and single terminal error events; coroutine methods kept as draining wrappers. Offline tests via shared parse_sse cover success/cache/error/multi-pass/no-candidate paths; gates independently re-verified: ruff/format/mypy clean, pytest 661 passed / 11 deselected. spec(backend)/error-handling.md documents the agent SSE contract. No defects found by trellis-check.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `a16d933` | feat(api): stream document summary and associations over SSE |
+
+### Status
+
+[OK] **Completed**

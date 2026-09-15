@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 19
+- **Total Sessions**: 20
 - **Last Active**: 2026-09-15
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~436 | Active |
+| `journal-1.md` | ~458 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 20 | 2026-09-15 | Document summary/associations SSE endpoints | `a16d933` | `main` |
 | 19 | 2026-09-15 | Gateway identity, tenancy, and RBAC implemented | `5dcd7ce` | `main` |
 | 18 | 2026-09-15 | Gateway integration verified end-to-end | `ea58301` | `main` |
 | 17 | 2026-09-14 | Agent document drafting and persistence | `ddbc8b2`, `8e0e32b` | `feat/agent-document-persistence` |
