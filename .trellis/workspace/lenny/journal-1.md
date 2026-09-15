@@ -456,3 +456,25 @@ Planned and implemented 09-15-document-agent-sse. User resolved the PRD's open q
 ### Status
 
 [OK] **Completed**
+
+
+## Session 21: Gateway v1.2 integration and defect filing
+<!-- trellis-session: v=2 fp=52c7b01763d325f9 -->
+
+**Date**: 2026-09-16
+**Task**: Gateway v1.2 integration and defect filing
+**Branch**: `main`
+
+### Summary
+
+Completed 09-16-gateway-v1-2-integration per docs/gateway-v1.2-integration.md §7 checklist. Gateway schema upgraded 3→4 (dirty=false), stack rebuilt healthy, key lifecycle verified. Capability matrix verified (only seed gateway-echo; no self-built models so no §2.1 UPDATE targets). Fake-mode smoke reached terminal done but exposed a genuine gateway defect: streamed tool-call deltas lack function.name/id so the server tool loop cannot dispatch (non-streaming correct) — filed lennylin-lab/knowledge-base-gateway#2. Real-model e2e blocked: only fake providers configured in gateway. 429 verification passed (rate_limit_exceeded + Retry-After: 46) with policy restored and independently DB-confirmed (120/8/1000000). Zero server code changes; offline baseline 660 passed / 11 deselected / 1 environmental failure (user .env OIDC vars leak into test fixtures — candidate test-isolation follow-up). Spec: chat-guidelines gateway adapter convention updated for v1.2 tools passthrough with streaming-defect caveat. Follow-ups: gateway #2 fix + real-provider rerun of stages 3-4; test isolation task.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `1f63d21` | docs(gateway): record v1.2 integration evidence; update adapter spec |
+
+### Status
+
+[OK] **Completed**
