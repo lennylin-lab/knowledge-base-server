@@ -412,3 +412,25 @@ Ran 09-15-gateway-integration to completion via trellis-implement/trellis-check 
 ### Status
 
 [OK] **Completed**
+
+
+## Session 19: Gateway identity, tenancy, and RBAC implemented
+<!-- trellis-session: v=2 fp=bf773575071f09ce -->
+
+**Date**: 2026-09-15
+**Task**: Gateway identity, tenancy, and RBAC implemented
+**Branch**: `main`
+
+### Summary
+
+Completed 09-15-gateway-integration-v2 across three trellis-implement dispatches plus a full-scope trellis-check pass. Chat provider secrets moved behind the gateway (service-account KB_CHAT_* keys, opt-in live_gateway probe suite, default suite offline). New src/app/auth/ boundary: Principal, JWKS-caching TokenVerifier (iss/aud/sig/exp/leeway/typ, generic 401), constant-time service-account path. Tenant schema via Alembic 0010 (tenants/users/tenant_memberships, deterministic default-tenant backfill). Resource isolation via 0011 (non-null tenant_id on documents/revisions/sessions/operations; scoping through services, repos, ES term filter, cache keys, index-queue payloads; uniform non-leaky 404). RBAC matrix in auth/rbac.py (tenant_admin/editor/member/viewer; service accounts internal-only; 403 forbidden; default-tenant compatibility mode when OIDC unconfigured). Gates independently re-verified: ruff/format/mypy clean, pytest 646 passed / 11 deselected. Spec: new backend/auth-tenancy.md. Docs: identity-tenants.md runbook + gateway doc section. No gateway defect; no issue filed.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `5dcd7ce` | feat(auth): gateway identity, tenant isolation, and RBAC |
+
+### Status
+
+[OK] **Completed**
