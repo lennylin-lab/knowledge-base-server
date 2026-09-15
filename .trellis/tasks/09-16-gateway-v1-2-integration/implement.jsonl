@@ -1,0 +1,7 @@
+{"file":"docs/gateway-v1.2-integration.md","reason":"Authoritative v1.2 upgrade guide: upgrade order, capability declaration SQL, fake-mode smoke, real-model e2e, 429 behavior, §7 acceptance checklist."}
+{"file":"docs/gateway-integration.md","reason":"v1.1 baseline: ports, key minting via admin API, KB_CHAT_* wiring, error table — all still valid and reused."}
+{"file":".trellis/tasks/archive/2026-09/09-15-gateway-integration/implement.md","reason":"Verified v1.1 procedure and evidence (probe hygiene, key mint/revoke, SSE parsing, port-8010 probe server pattern)."}
+{"file":".trellis/spec/backend/index.md","reason":"Project conventions and layering for any evidence recording touching server docs."}
+{"file":".trellis/spec/backend/chat-guidelines.md","reason":"Gateway chat-adapter boundary convention — v1.2 tools passthrough lifts the documented tools/MCP limitation; verify before updating the convention."}
+{"file":"src/app/llm/models.py","reason":"Chat client construction (pydantic-ai OpenAIChatModel over AsyncOpenAI) — must need zero changes; confirms tool loop path."}
+{"file":"src/app/services/chat.py","reason":"Chat SSE orchestration and finished-log fields (tool_calls, carried_sources) used as smoke-acceptance signals."}

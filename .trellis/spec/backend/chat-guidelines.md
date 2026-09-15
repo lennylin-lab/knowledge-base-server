@@ -461,19 +461,28 @@ if outcome.event is not None:
 
 ---
 
-## Convention: Gateway chat adapter boundary (verified 2026-09-15)
+## Convention: Gateway chat adapter boundary (updated 2026-09-16, gateway v1.2)
 
-**What**: When `KB_CHAT_BASE_URL` points at the knowledge-base-gateway
-(OpenAI-compatible proxy), only plain chat completions are functional end-to-end.
-The gateway tolerates a `tools` array but does **not** functionally forward
-tool-calling or MCP. Agents must not rely on tool execution through the
-gateway adapter; treat gateway-routed chat as tools-free.
+**What**: When `KB_CHAT_BASE_URL` points at the knowledge-base-gateway,
+chat completions with `tools` / `tool_choice` passthrough are supported as
+of gateway v1.2 (capability-matrix gated — the model's catalog row must
+declare `tools: true`, else 400 `capability_not_supported`). The QA agent's
+`search_knowledge` tool loop can run through the gateway.
 
-**Why**: Live integration verification (direct `gateway-echo` probes +
-server `/api/v1/chat` SSE smoke) confirmed this matches the gateway's
-documented contract. Assuming tool forwarding silently drops tool calls —
-RAG-through-gateway acceptance is blocked until the gateway lands
-tools/MCP forwarding.
+**Status caveat (2026-09-16 verification, task 09-16-gateway-v1-2-integration)**:
+non-streaming tool calls work, but **streamed tool-call deltas currently
+arrive without `function.name`/`id`**, so the server cannot dispatch them
+inside an SSE run — tracked upstream as
+lennylin-lab/knowledge-base-gateway#2. Until that is fixed, gateway-routed
+streaming runs behave tools-free; rely on tools only over non-streaming or
+after #2 closes. Real-model e2e acceptance (v1.1 deferred item) additionally
+requires a real provider configured in the gateway. MCP forwarding remains
+unsupported.
+
+**Why**: Live v1.2 verification (schema v4, capability matrix via
+`/v1/models`, fake-mode smoke, 429/quota probe) confirmed the upgraded
+contract; the defect was reproduced minimally and filed rather than
+worked around.
 
 **Related facts from the same verification**:
 - Server SSE vocabulary (`run_started` → progress events → terminal
@@ -482,4 +491,7 @@ tools/MCP forwarding.
 - Known gap: server request-id is not injected into the OpenAI client, so
   gateway `X-Request-Id`/`X-Trace-Id` correlation is not yet propagated
   from the server side (candidate future task).
-- Operational details live in `docs/gateway-integration.md`.
+- Streaming usage now counts toward gateway quotas (v1.2); 429s carry
+  `Retry-After` and must not be retried inside the quota window.
+- Operational details live in `docs/gateway-integration.md` and
+  `docs/gateway-v1.2-integration.md`.

@@ -1,0 +1,4 @@
+{"file":"docs/gateway-v1.2-integration.md","reason":"Verify every §7 checklist item has sanitized evidence in implement.md."}
+{"file":"docs/gateway-integration.md","reason":"Verify v1.1 doc still accurate post-upgrade; only update on contradiction."}
+{"file":".trellis/spec/backend/chat-guidelines.md","reason":"Verify the tools/MCP 'documented limitation' convention was updated if v1.2 passthrough is confirmed."}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Verify no server code changed and offline gates still green."}
