@@ -214,7 +214,16 @@ the same discipline with their own event vocabulary
 |--------|-------------|
 | summary | `run_started` (run_id, kind, document_id) → `summary_progress`* (phase `map_pass`/`reduce_pass`, 1-based `pass_index`, `passes_total` = map passes + 1; fixed grammar — also on single-pass summaries) → `summary` (full `SummaryResult` flat) → `done` |
 | associations | `run_started` → `associations` (full `AssociationsResult` flat; structured output stays atomic — no partial events) → `done` |
-| both, failure after 200 | already-emitted events stand → exactly one `error` (chat's `ErrorEvent`, reused so there is one error dialect) → close |
+| draft | `run_started` → `draft` (`OperationDraftEvent`: operation_id, state, full `DraftContent` flat; structured output atomic — no partial events) → `done` |
+| all, failure after 200 | already-emitted events stand → exactly one `error` (chat's `ErrorEvent`, reused so there is one error dialect) → close |
+
+The draft stream (`POST /operations/draft`, `services/operation.py`) adds one
+persistence-timing rule on top of the shared discipline: the operation's
+terminal state (`completed`/`failed`) is committed BEFORE the terminal event
+is yielded, so a client that stops reading never sees success for unpersisted
+work. Mid-stream failure leaves the operation durably `failed` with error
+details and resumable via `/resume`; the stream ends at the draft — it never
+auto-applies.
 
 Cache hits keep the same `run_started` → result → `done` shape with no
 progress events and no model call. The pre-stream rule is unchanged: the
