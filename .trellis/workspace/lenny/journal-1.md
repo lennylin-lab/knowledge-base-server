@@ -500,3 +500,25 @@ Retested gateway issue #2 across two fix iterations (no Trellis task, per user c
 ### Status
 
 [OK] **Completed**
+
+
+## Session 23: All agent endpoints verified through gateway with real model
+<!-- trellis-session: v=2 fp=85fa49b3700f541d -->
+
+**Date**: 2026-09-16
+**Task**: All agent endpoints verified through gateway with real model
+**Branch**: `main`
+
+### Summary
+
+Extended real-model gateway verification (KB_CHAT_MODEL=gpt-5.5, probe server on 8010) from chat to the remaining agent endpoints, all over SSE: (1) POST /documents/{id}/summary — run_started, 3 summary_progress (map passes + reduce), summary payload (document_id/summary/model/latency_ms), done; (2) POST /documents/{id}/associations — run_started, associations payload with candidate metadata (title/tags/reason/signal incl. cosine distance + shared tags), done; (3) POST /writing/suggest — run_started, status, answer deltas with a correct technical rewrite, done. No UTF-8 corruption anywhere (fake-only issue #3 does not affect real adapters). Writing first attempt returned 400 validation_failed for missing draft field — correct pre-stream envelope behavior, retried with valid body. Cleanup: probe server stopped, gateway key revoked, temp captures shredded. Journal recorded; no Trellis task per user choice.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `6b4f678` | docs(spec): clear gateway streaming-tools caveat after real-model e2e |
+
+### Status
+
+[OK] **Completed**
