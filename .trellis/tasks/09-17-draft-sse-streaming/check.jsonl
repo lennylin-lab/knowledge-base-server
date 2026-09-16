@@ -1,0 +1,3 @@
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Required validation and review gates"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Verify SSE error dialect and priming-pattern compliance"}
+{"file": ".trellis/spec/backend/chat-guidelines.md", "reason": "Verify stream discipline and additive-only event contracts"}
