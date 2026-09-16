@@ -16,7 +16,7 @@ import structlog
 from openai import AsyncOpenAI, Omit
 
 from app.core.cache import Cache, cache_key
-from app.core.config import Settings
+from app.core.config import EMBEDDING_DIM_FALLBACK, Settings
 from app.core.exceptions import LLMProviderError, LLMRateLimitedError
 
 logger = structlog.get_logger(__name__)
@@ -62,13 +62,19 @@ class OpenAIEmbeddingProvider:
 
         `dimensions` overrides `EMBEDDING_DIM` — the startup-discovered
         `embedding_dim` is threaded through here (`api/deps.py`); the env
-        value remains the fallback.
+        value remains the fallback, then the pgvector-column-width constant
+        (an unset/empty dim means "discover from the gateway").
         """
+        resolved = (
+            dimensions
+            if dimensions is not None
+            else (settings.EMBEDDING_DIM or EMBEDDING_DIM_FALLBACK)
+        )
         return cls(
             base_url=settings.EMBEDDING_BASE_URL,
             api_key=settings.EMBEDDING_API_KEY.get_secret_value(),
             model=settings.EMBEDDING_MODEL,
-            dimensions=settings.EMBEDDING_DIM if dimensions is None else dimensions,
+            dimensions=resolved,
         )
 
     async def embed_texts(self, texts: list[str]) -> list[list[float]]:

@@ -250,3 +250,31 @@ uv run pytest
       latency (~11.5s for "hi") exceeded the old budget, failing the
       startup probe spuriously.
 - Cleanup: probe server stopped; gateway key revoked; temp files shredded.
+
+## Retest round 2: gateway #6/#7 fixes — 2026-09-16
+
+- [x] #6 verified: gateway working-tree fix (catalog-injected dimensions;
+      `EmbeddingsRequest.Dimensions` from `embedding_dim`) rebuilt and live —
+      `/v1/embeddings` with `qwen3-embedding` (Qwen3-Embedding-4B via
+      `openai-embed` per-provider credential) returns exactly **1536-wide**
+      vectors + usage. Real-model embedding proxy now functional.
+- [x] #7 verified: reset the qwen3-embedding policy row's chat slot to NULL
+      (undoing the workaround) — no-`model` request still backfills to
+      `gpt-5.5` and streams (3 chunks, model echoed). Multi-row default
+      resolution fixed.
+- [x] Server-level real-embedding e2e: probe server with
+      `KB_EMBEDDING_BASE_URL` → gateway, `KB_EMBEDDING_MODEL=qwen3-embedding`,
+      `KB_EMBEDDING_DIM=` (empty) → boots cleanly, log shows
+      `embedding_dim=1536, embedding_dim_source=discovered`, no mismatch
+      warning; hybrid search with a gateway-embedded query returns
+      semantically correct hits (Vue query → Vue doc top-3).
+- [x] Follow-up server fix: empty/whitespace `KB_EMBEDDING_DIM` used to
+      crash Settings (int parsing); now `int | None` with
+      `_empty_dim_means_discover` validator; fallback chain
+      discovered → env → `EMBEDDING_DIM_FALLBACK` (1536, config) wired
+      through `effective_embedding_dim` and `from_settings`; +2 offline
+      tests (684 passed / 11 deselected / 1 pre-existing env failure).
+- Known remaining external item: upstream chat vendor still rejects
+  tools+stream (400 direct-verified) — QA full generation pending vendor;
+  everything else on the v1.3 checklist is closed.
+- Cleanup: probe server stopped; gateway key revoked; temp files shredded.

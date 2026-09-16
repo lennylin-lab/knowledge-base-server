@@ -100,10 +100,13 @@ def effective_chat_model(settings: Settings) -> str:
 
 
 def effective_embedding_dim(settings: Settings) -> int:
-    """Discovered `embedding_dim` wins; `KB_EMBEDDING_DIM` is the fallback."""
+    """Discovered `embedding_dim` wins; `KB_EMBEDDING_DIM` is the fallback,
+    then the pgvector column width (an unset/empty dim means "discover")."""
     if _resolved_embedding_dim is not None:
         return _resolved_embedding_dim
-    return settings.EMBEDDING_DIM
+    if settings.EMBEDDING_DIM is not None:
+        return settings.EMBEDDING_DIM
+    return PGVECTOR_EMBEDDING_DIM
 
 
 async def resolve_model_control_plane(settings: Settings, *, client: object | None = None) -> None:
@@ -126,7 +129,7 @@ async def resolve_model_control_plane(settings: Settings, *, client: object | No
             "model_control_plane_resolved",
             chat_model=settings.DEFAULT_CHAT_MODEL,
             chat_model_source="unconfigured",
-            embedding_dim=settings.EMBEDDING_DIM,
+            embedding_dim=effective_embedding_dim(settings),
             embedding_dim_source="env",
             thresholds={key: "env" for key in RETRIEVER_THRESHOLD_KEYS},
         )

@@ -4,8 +4,12 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from pydantic import SecretStr
+from pydantic import SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Last-resort vector width when neither the gateway catalog nor the env
+# provides one; must match the pgvector column width (models/document_chunk).
+EMBEDDING_DIM_FALLBACK = 1536
 
 
 class Settings(BaseSettings):
@@ -38,7 +42,18 @@ class Settings(BaseSettings):
     EMBEDDING_MODEL: str = "text-embedding-3-small"
     # Fixed vector dimension — see database-guidelines.md; changing it is a
     # dedicated new-column + backfill migration, never a casual edit.
-    EMBEDDING_DIM: int = 1536
+    # Gateway v1.3: empty/whitespace means "discover from the gateway model
+    # catalog" (fallback: the pgvector column width, deps.effective_embedding_dim).
+    EMBEDDING_DIM: int | None = None
+
+    @field_validator("EMBEDDING_DIM", mode="before")
+    @classmethod
+    def _empty_dim_means_discover(cls, value: object) -> object:
+        """`KB_EMBEDDING_DIM=` (empty) means "discover from the gateway"."""
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
     CHAT_BASE_URL: str = "https://api.openai.com/v1"
     CHAT_API_KEY: SecretStr = SecretStr("")
     # Optional (gateway v1.3 model control plane): when unset, the server

@@ -392,3 +392,28 @@ def test_effective_chat_model_env_beats_resolved_beats_legacy_default():
         assert effective_chat_model(settings) == MODEL
     finally:
         deps_module._resolved_chat_model = None
+
+
+async def test_empty_embedding_dim_parses_to_none_and_falls_back():
+    """`KB_EMBEDDING_DIM=` means discover; the pgvector width is the last resort."""
+    settings = hermetic_settings(EMBEDDING_DIM="")
+    assert settings.EMBEDDING_DIM is None
+    deps_module.reset_model_control_plane()
+    try:
+        assert deps_module.effective_embedding_dim(settings) == 1536
+        settings_set = hermetic_settings(EMBEDDING_DIM=768)
+        assert deps_module.effective_embedding_dim(settings_set) == 768
+    finally:
+        deps_module.reset_model_control_plane()
+
+
+async def test_discovered_dim_wins_over_empty_env_dim():
+    settings = hermetic_settings(CHAT_MODEL=MODEL, CHAT_API_KEY=CHAT_KEY, EMBEDDING_DIM="")
+    assert settings.EMBEDDING_DIM is None
+    client = mock_client(lambda request: httpx2.Response(200, json=model_resource(dim=2560)))
+    deps_module.reset_model_control_plane()
+    try:
+        facts = await discover(settings, client=client)
+        assert facts is not None and facts.embedding_dim == 2560
+    finally:
+        deps_module.reset_model_control_plane()
