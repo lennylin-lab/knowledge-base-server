@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 24
-- **Last Active**: 2026-09-16
+- **Total Sessions**: 25
+- **Last Active**: 2026-09-17
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~550 | Active |
+| `journal-1.md` | ~573 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 25 | 2026-09-17 | Draft endpoint SSE streaming | `9be2b39`, `ea841d0` | `main` |
 | 24 | 2026-09-16 | Gateway v1.3 model control plane adopted; deferred items closed via #5/#6/#7/#8 retests | `ef63ba1`, `cdf4ec3`, `cfc642c`, `ce1e75f`, `ab520a0` | `main` |
 | 23 | 2026-09-16 | All agent endpoints verified through gateway with real model | `6b4f678` | `main` |
 | 22 | 2026-09-16 | Gateway issue #2 retests passed; real-model e2e acceptance done | `1f63d21` | `main` |

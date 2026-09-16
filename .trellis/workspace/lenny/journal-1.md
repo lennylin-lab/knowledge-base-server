@@ -548,3 +548,26 @@ Planned and completed 09-16-gateway-v1-3-integration (user approved typed plan).
 ### Status
 
 [OK] **Completed**
+
+
+## Session 25: Draft endpoint SSE streaming
+<!-- trellis-session: v=2 fp=1868736766f118b7 -->
+
+**Date**: 2026-09-17
+**Task**: Draft endpoint SSE streaming
+**Branch**: `main`
+
+### Summary
+
+Converted POST /operations/draft from sync JSON to SSE (run_started -> draft -> done, one terminal error). Terminal operation state committed before terminal event; priming pattern keeps 404/503 as JSON; failed ops stay resumable; no auto-apply. Added additive OperationDraftEvent, scripted_draft_model fake, and full success/failure/pre-stream test coverage. All gates pass (ruff, strict mypy, 688 tests; one pre-existing env-only RBAC failure unrelated). Spec updated with draft event order + persistence-timing rule.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `9be2b39` | feat(operations): stream POST /operations/draft as SSE |
+| `ea841d0` | docs(spec): add draft SSE event order and persistence-timing rule to error-handling |
+
+### Status
+
+[OK] **Completed**
