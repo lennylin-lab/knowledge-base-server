@@ -304,3 +304,24 @@ uv run pytest
   traffic outside the fake-ip proxy (direct DNS + rule exemption for
   api.longxiadev.store / router.tumuer.me), or pin stable DNS in the
   container.
+
+## Retest round 4: upstream direct route + full QA — 2026-09-16
+
+- [x] Container route fixed: gateway compose now pins
+      `api.longxiadev.store=104.21.92.140` and
+      `router.tumuer.me=172.67.194.139` via `extra_hosts` (both domains are
+      behind Cloudflare; the fake-ip proxy path was dropping streaming
+      connections). Container chat verified direct to the CF edge.
+- [x] Full QA loop success re-confirmed through the gateway (round 1:
+      run_started → tool_call_started → sources → tool_call_finished →
+      169 answer_delta → done; tool_calls=1, outcome=success).
+- [x] Remaining intermittence quantified: 1 success / 4 network-class
+      failures across 5 rounds, failures at 17–25s with status 0; the
+      vendor itself is unstable today — host-direct control shows 200s but
+      first-token latency swings 1.6s→29s for the same "hi". Both container
+      routes (proxied and direct-CF) flake at different times; failures
+      surface correctly as terminal server `error` events and the breaker
+      cycles back to closed (no stuck state).
+- Verdict: stack behavior correct; upstream vendor availability/latency is
+  the outstanding instability (watch longxiadev; consider a backup model
+  route / second provider).
