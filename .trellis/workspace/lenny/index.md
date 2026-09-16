@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 21
+- **Total Sessions**: 22
 - **Last Active**: 2026-09-16
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~480 | Active |
+| `journal-1.md` | ~502 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 22 | 2026-09-16 | Gateway issue #2 retests passed; real-model e2e acceptance done | `1f63d21` | `main` |
 | 21 | 2026-09-16 | Gateway v1.2 integration and defect filing | `1f63d21` | `main` |
 | 20 | 2026-09-15 | Document summary/associations SSE endpoints | `a16d933` | `main` |
 | 19 | 2026-09-15 | Gateway identity, tenancy, and RBAC implemented | `5dcd7ce` | `main` |

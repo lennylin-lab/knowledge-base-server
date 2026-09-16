@@ -478,3 +478,25 @@ Completed 09-16-gateway-v1-2-integration per docs/gateway-v1.2-integration.md §
 ### Status
 
 [OK] **Completed**
+
+
+## Session 22: Gateway issue #2 retests passed; real-model e2e acceptance done
+<!-- trellis-session: v=2 fp=1bb6748bc785a20e -->
+
+**Date**: 2026-09-16
+**Task**: Gateway issue #2 retests passed; real-model e2e acceptance done
+**Branch**: `main`
+
+### Summary
+
+Retested gateway issue #2 across two fix iterations (no Trellis task, per user choice). First retest of 5bd165b: identity present but repeated in every args delta -> tool name concatenated server-side, dispatch still failed; findings posted as sanitized issue comment. Second retest of b887664: name/id only on opening fragment; openai SDK accumulation verified correct; server e2e tool loop reached terminal done. Then completed the deferred v1.2 real-model e2e: created gpt-5.5 catalog/provider/route/policy rows in gateway DB (env OPENAI key initially INVALID_API_KEY, user fixed), probe server via gateway with KB_CHAT_MODEL=gpt-5.5. Turn 1: run_started -> tool_call_started -> sources(4 docs) -> tool_call_finished(success) -> done, tool_calls=1, citations [1,2,3] within 4 sources. Follow-up same session: carried_sources=4, tool_calls=3, outcome=success. Key minted/revoked, probe server stopped, temp files shredded. Gateway v1.2 acceptance checklist now fully closed; spec adapter convention's tools caveat satisfied.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `1f63d21` | docs(gateway): record v1.2 integration evidence; update adapter spec |
+
+### Status
+
+[OK] **Completed**
