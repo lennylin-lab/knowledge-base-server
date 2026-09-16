@@ -72,20 +72,6 @@ service-account principals pass no user-resource scope dependency.
 
 ## 4. Enabling OIDC (Keycloak-compatible)
 
-### Local Compose stack
-
-`docker compose up -d` starts Keycloak on host port **8180** with a pre-imported
-realm `kb` (client `kb-web`, audience `kb-api`). Before the first start, run
-`./docker/keycloak/ensure-realm-import.sh` to copy `kb-realm.json.example` into
-the gitignored import path. Dev user credentials belong in `.env` (see
-`.env.example`); `./docker/keycloak/bootstrap-dev-user.sh` creates the Keycloak
-user via the Admin API and inserts the user's `sub` into `users` /
-`tenant_memberships`. After migrations, set
-`KB_OIDC_ISSUER=http://localhost:8180/realms/kb` and
-`KB_OIDC_AUDIENCE=kb-api` in `.env`.
-
-### External or production IdP
-
 1. Run migrations so `tenants` / `users` / `tenant_memberships` exist
    (`uv run alembic upgrade head`; migration 0010 also creates the default
    tenant deterministically).

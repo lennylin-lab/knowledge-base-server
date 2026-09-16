@@ -50,36 +50,6 @@ services:
       timeout: 3s
       retries: 12
 
-  # Local OIDC IdP for user login (dev only). Imports realm `kb` from
-  # docker/keycloak/import/kb-realm.json (copy from kb-realm.json.example;
-  # gitignored). Dev user credentials live in .env — see bootstrap-dev-user.sh.
-  # Admin console: http://localhost:8180. Host port 8180 avoids clashing with
-  # other local services on 8080.
-  keycloak:
-    image: quay.io/keycloak/keycloak:26.0
-    command: start-dev --import-realm
-    environment:
-      KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN:-admin}
-      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin}
-      KC_HTTP_ENABLED: "true"
-      KC_HOSTNAME: localhost
-      KC_HOSTNAME_PORT: "8180"
-      KC_HOSTNAME_STRICT: "false"
-      KC_HOSTNAME_STRICT_HTTPS: "false"
-      KC_HEALTH_ENABLED: "true"
-    ports:
-      - "8180:8080"
-    volumes:
-      - ./docker/keycloak/import:/opt/keycloak/data/import
-      - keycloakdata:/opt/keycloak/data
-    healthcheck:
-      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/8080"]
-      interval: 10s
-      timeout: 5s
-      retries: 18
-      start_period: 90s
-
 volumes:
   pgdata:
   esdata:
-  keycloakdata:

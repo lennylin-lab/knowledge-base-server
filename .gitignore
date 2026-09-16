@@ -22,9 +22,6 @@ htmlcov/
 # MCP server config (may hold real API keys in `env`); copy from mcp.json.example
 mcp.json
 
-# Keycloak realm import (local copy; template is kb-realm.json.example)
-docker/keycloak/import/kb-realm.json
-
 # Claude Code local settings (machine-specific) and transient temp files
 .claude/settings.local.json
 .claude/*.tmp.*

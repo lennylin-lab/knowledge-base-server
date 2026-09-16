@@ -33,9 +33,8 @@ cp .env.example .env   # adjust if needed; defaults match docker-compose.yml
 #    the fetched zip (infini's download mirrors can throttle to KB/s).
 curl -fL --retry 5 -o docker/elasticsearch/elasticsearch-analysis-ik-8.17.3.zip \
   https://release.infinilabs.com/analysis-ik/stable/elasticsearch-analysis-ik-8.17.3.zip
-./docker/keycloak/ensure-realm-import.sh   # once; creates gitignored kb-realm.json
 docker compose up -d
-docker compose ps      # wait until postgres, elasticsearch, redis, keycloak report healthy
+docker compose ps      # wait until both report healthy
 
 # 4. Apply database migrations
 uv run alembic upgrade head
@@ -52,33 +51,6 @@ curl -i http://localhost:8000/nope   # 404 with the standard error envelope
 ```
 
 Interactive docs: <http://localhost:8000/docs>.
-
-### Optional: enable OIDC (Compose Keycloak)
-
-`docker compose` now includes a **dev-only** Keycloak on host port **8180**
-(realm `kb`, client `kb-web`, audience `kb-api`). Realm structure is tracked as
-`docker/keycloak/import/kb-realm.json.example`; the import file and dev
-credentials are local-only (see `.env.example`). Admin console:
-<http://localhost:8180> (defaults `admin` / `admin` unless overridden in `.env`).
-
-```bash
-# After migrations, register the dev user's OIDC subject in PostgreSQL:
-./docker/keycloak/bootstrap-dev-user.sh
-
-# In .env (uncomment or add):
-# KB_OIDC_ISSUER=http://localhost:8180/realms/kb
-# KB_OIDC_AUDIENCE=kb-api
-
-# Fetch a token and call the API:
-TOKEN=$(curl -s -X POST http://localhost:8180/realms/kb/protocol/openid-connect/token \
-  -H 'Content-Type: application/x-www-form-urlencoded' \
-  -d 'grant_type=password&client_id=kb-web&username=dev&password=dev&scope=openid' \
-  | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])')
-curl -s http://localhost:8000/api/v1/documents -H "Authorization: Bearer $TOKEN"
-```
-
-With `KB_OIDC_ISSUER` empty (default), the server stays in single-user
-compatibility mode. See `docs/identity-tenants.md` for production IdP wiring.
 
 ## Re-indexing after a search-index change
 
