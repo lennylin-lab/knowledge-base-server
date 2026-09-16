@@ -278,3 +278,29 @@ uv run pytest
   tools+stream (400 direct-verified) — QA full generation pending vendor;
   everything else on the v1.3 checklist is closed.
 - Cleanup: probe server stopped; gateway key revoked; temp files shredded.
+
+## Retest round 3: root-cause correction — 2026-09-16
+
+- [x] CORRECTION to the round-1 conclusion ("upstream vendor rejects
+      tools+stream"): disproven. Same client code (probe server, pydantic-ai,
+      tools+stream) pointed DIRECTLY at the vendor completes successfully
+      (tool_call_finished success, tool_calls=1, done). The vendor accepts
+      the server's real payload; the minimal curl shape I used earlier was
+      rejected by the vendor from anywhere (schema pickiness: missing
+      property descriptions/additionalProperties) — a red herring.
+- [x] Actual root cause of the intermittent `llm_provider_error` (~1s
+      failures): gateway-container → upstream connection resets. Audit
+      shows identical payloads succeeding (200, 4.6s) and failing
+      (error_class=network, status=0, ~1s) interchangeably; ~27 network
+      errors accumulated. The upstream hostname resolves to 198.18.0.136
+      (host transparent-proxy fake-ip), and some of the gateway container's
+      outbound streaming connections are dropped by that local proxy path.
+      Environmental (local proxy), not a gateway/server defect.
+- [x] With the proxy path healthy, full QA loop through the gateway now
+      completes: earlier runs recorded success (audit 200s incl. 31.7s
+      stream at 11:30, embeddings 200s); latest replay of the exact
+      pydantic-ai payload via gateway streams in 4.6s.
+- Suggestion (deployment, not code): route the gateway container's upstream
+  traffic outside the fake-ip proxy (direct DNS + rule exemption for
+  api.longxiadev.store / router.tumuer.me), or pin stable DNS in the
+  container.
