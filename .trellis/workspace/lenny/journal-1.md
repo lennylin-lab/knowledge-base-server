@@ -522,3 +522,29 @@ Extended real-model gateway verification (KB_CHAT_MODEL=gpt-5.5, probe server on
 ### Status
 
 [OK] **Completed**
+
+
+## Session 24: Gateway v1.3 model control plane adopted; deferred items closed via #5/#6/#7/#8 retests
+<!-- trellis-session: v=2 fp=f20202c3e92db58e -->
+
+**Date**: 2026-09-16
+**Task**: Gateway v1.3 model control plane adopted; deferred items closed via #5/#6/#7/#8 retests
+**Branch**: `main`
+
+### Summary
+
+Planned and completed 09-16-gateway-v1-3-integration (user approved typed plan). Server: llm/discovery.py (model facts, optional KB_CHAT_MODEL with startup default-model probe and fail-fast), empty-string normalization for CHAT_MODEL and EMBEDDING_DIM, llm/profile.py retrieval-profile overrides at the _build_retriever choke point with per-item source logging, embedding dim discovery threaded into provider+cache, 24 offline tests (684 passed / 1 pre-existing env failure). Ops: gateway schema v5, embeddings capability declared, default-model slots set, /v1/embeddings smoke. Deferred items closed across retests after gateway fixes: #5 per-provider credentials verified (tumuer Qwen3 embeddings upstream with own key), #6 catalog-injected dimensions verified (1536-wide real vectors), #7 multi-row default backfill fix verified, #8 min-of-declared ceilings verified live (cross-row 5/min proof, restored). Flakiness root-caused to local transparent-proxy network resets on gateway-container upstream connections (corrected earlier vendor-rejection hypothesis; direct pydantic-ai tools+stream works). Remaining externals: chat vendor intermittent tools+stream rejections; suggestion to route gateway container outside fake-ip proxy. Spec: gateway model control plane convention added to backend/chat-guidelines.md.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `ef63ba1` | feat(llm): adopt gateway v1.3 model control plane |
+| `cdf4ec3` | chore(task): retest deferred v1.3 items after gateway per-provider creds |
+| `cfc642c` | fix(config): empty KB_EMBEDDING_DIM means discover-from-gateway |
+| `ce1e75f` | docs(task): correct v1.3 flakiness root cause to local proxy network resets |
+| `ab520a0` | docs(task): verify gateway #8 min-of-declared ceilings live |
+
+### Status
+
+[OK] **Completed**
