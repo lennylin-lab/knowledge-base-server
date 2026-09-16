@@ -11,7 +11,9 @@ Drafts live only on `agent_operations` — nothing here touches
 
 from __future__ import annotations
 
-from uuid import UUID
+import time
+from collections.abc import AsyncIterator
+from uuid import UUID, uuid4
 
 import structlog
 from pydantic_ai import Agent
@@ -27,6 +29,7 @@ from app.agents.writing import (
     render_writing_prompt,
 )
 from app.core.exceptions import (
+    AppError,
     ChatUnavailableError,
     ConflictError,
     NotFoundError,
@@ -36,6 +39,13 @@ from app.models.operation import AgentOperation, DocumentRevision, OperationStat
 from app.rag.retriever import Retriever
 from app.repositories.document import DocumentRepository
 from app.repositories.operation import AgentOperationRepository, DocumentRevisionRepository
+from app.schemas.agent_stream import (
+    AgentDoneEvent,
+    AgentRunStartedEvent,
+    AgentStreamEvent,
+    OperationDraftEvent,
+)
+from app.schemas.chat import ErrorEvent
 from app.schemas.operation import (
     ApplyRequest,
     ApplyResult,
@@ -70,14 +80,14 @@ class AgentOperationService:
         self._revisions = DocumentRevisionRepository(session)
         self._documents = DocumentRepository(session)
         self._enqueuer = enqueuer
-        # Optional LLM wiring for the structured draft run (`draft_document`);
+        # Optional LLM wiring for the structured draft run (`draft_document_stream`);
         # None = create/inspect/apply still work, drafting 503s at call time.
         # The agent is built once per service alongside its model wiring;
         # per-run state rides in WritingDeps, never on the agent.
         self._agent: Agent[WritingDeps, DraftOutput] | None = (
             build_draft_agent(model) if model is not None and retriever is not None else None
         )
-        # Kept for the per-run WritingDeps construction in `draft_document`.
+        # Kept for the per-run WritingDeps construction in `draft_document_stream`.
         self._retriever = retriever
 
     # --- create / inspect / resume ---
@@ -316,18 +326,46 @@ class AgentOperationService:
 
     # --- structured draft run (writing agent wiring) ---
 
-    async def draft_document(
+    async def draft_document_stream(
         self, document_id: UUID, instruction: str | None, *, tenant_id: UUID, limit: int = 8
-    ) -> OperationReadDetail:
-        """Run the writing agent's structured output against a live document
-        and persist the result as a draft operation.
+    ) -> AsyncIterator[AgentStreamEvent]:
+        """Stream one structured draft run as typed events (design: agent stream).
 
-        Lifecycle: `running` row committed BEFORE the model call (so a lost
-        process leaves an inspectable, resumable `running`/`interrupted`
-        record, never a silent partial draft in chat) -> `completed` with the
-        structured draft on success -> `failed` with error details on
-        provider failure, then the mapped AppError re-raises.
+        Contract order: `run_started` → `draft` (operation_id, state, flat
+        draft content) → `done`. Persistence timing is preserved from the
+        synchronous endpoint: the `running` row commits BEFORE the model call
+        (a lost process leaves an inspectable, resumable record), and the
+        terminal state (`completed`/`failed` + error details) commits BEFORE
+        the corresponding terminal event — a client that stops reading never
+        sees success for unpersisted work. The stream ends with the draft,
+        never an apply.
+
+        Pre-stream failures (drafting not configured → 503, missing/soft-
+        deleted document → 404) raise before the first yield so the priming
+        endpoint keeps its HTTP envelopes; everything after that becomes a
+        terminal `error` event — nothing raises out of this generator once
+        it has yielded.
         """
+        yielded = False
+        try:
+            async for event in self._draft_events(
+                document_id, instruction, tenant_id=tenant_id, limit=limit
+            ):
+                yielded = True
+                yield event
+        except AppError as failure:
+            if not yielded:
+                raise  # pre-stream (config gate / document load): envelope applies
+            yield ErrorEvent(code=failure.code, message=failure.message)
+
+    async def _draft_events(
+        self, document_id: UUID, instruction: str | None, *, tenant_id: UUID, limit: int
+    ) -> AsyncIterator[AgentStreamEvent]:
+        """Internal event generator; raises `AppError` on any failure."""
+        started = time.perf_counter()
+        # The configuration gate and the document load come before anything
+        # else: both must stay clean HTTP errors, and no operation row is
+        # created for a request that could never run.
         if self._agent is None:
             raise ChatUnavailableError(
                 "Drafting is not configured: set CHAT_API_KEY to enable it",
@@ -342,8 +380,12 @@ class AgentOperationService:
             )
         )
         await self._session.commit()
-        log = logger.bind(operation_id=str(operation.id), document_id=str(document.id))
+        run_id = uuid4().hex
+        log = logger.bind(
+            operation_id=str(operation.id), document_id=str(document.id), run_id=run_id
+        )
         log.info("operation_draft_started")
+        yield AgentRunStartedEvent(run_id=run_id, kind="draft", document_id=document.id)
 
         collector = SourceCollector()
         assert self._retriever is not None  # guaranteed by the _agent wiring
@@ -356,6 +398,9 @@ class AgentOperationService:
             )
         except Exception as exc:
             failure = _as_app_error(exc)
+            # Terminal state commits BEFORE the terminal event (the wrapper
+            # turns this raise into the single `error`): the failed operation
+            # is durable and resumable even if the client stops reading.
             operation.state = OperationState.FAILED
             operation.error = {"error_class": type(exc).__name__}
             await self._ops.update(operation)
@@ -371,8 +416,15 @@ class AgentOperationService:
         operation.state = OperationState.COMPLETED
         operation = await self._ops.update(operation)
         await self._session.commit()
-        log.info("operation_draft_finished", tool_calls=collector.tool_calls)
-        return OperationReadDetail.model_validate(operation)
+        latency_ms = round((time.perf_counter() - started) * 1000, 2)
+        log.info("operation_draft_finished", tool_calls=collector.tool_calls, latency_ms=latency_ms)
+        yield OperationDraftEvent(
+            operation_id=operation.id,
+            state="completed",
+            content=result.output.content,
+            title=result.output.title,
+        )
+        yield AgentDoneEvent(run_id=run_id, outcome="success", latency_ms=latency_ms)
 
     # --- internals ---
 

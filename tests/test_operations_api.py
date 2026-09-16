@@ -1,29 +1,68 @@
 """Agent-operation API contract: explicit drafts, stale-apply rejection,
-idempotent apply/resume, and the chat-history firewall.
+idempotent apply/resume, the chat-history firewall, and the SSE draft stream.
 
 Every test asserts the PRD review gates directly: no partial draft in
 `chat_messages`, a stale apply publishes nothing, a duplicate apply creates
-no second revision.
+no second revision. The streaming draft tests follow the associations/summary
+API pattern: the dependency is overridden with a FunctionModel-backed service
+over the test database, so no request reaches a real provider.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime
 from uuid import UUID, uuid4
 
+import httpx
 import pytest
+from fastapi import FastAPI
+from httpx import ASGITransport, AsyncClient
+from openai import APIStatusError
 from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.api.deps import SessionDep, get_agent_operation_service
 from app.models.chat import ChatMessage
 from app.models.operation import AgentOperation, DocumentRevision, OperationState
 from app.models.tenant import DEFAULT_TENANT_ID
+from app.rag.retriever import SearchOutcome
+from app.services.operation import AgentOperationService
 from app.utils.ids import uuid7
+from fakes import StubRetriever, parse_sse, scripted_draft_model
 
 pytestmark = pytest.mark.db
 
 FM_DOC = "---\ntitle: Base Note\ntags: [api]\n---\n\nOriginal body.\n"
 DRAFT_CONTENT = "---\ntitle: Drafted Note\ntags: [api, drafted]\n---\n\nDrafted body.\n"
+DRAFT_TITLE = "Generated Draft"
+
+
+@pytest.fixture
+def install_scripted_draft(
+    app: FastAPI, session_factory: async_sessionmaker[AsyncSession]
+) -> Callable[[], list[str]]:
+    """Swap the operation dependency for a scripted, offline draft service.
+
+    Returns an installer whose result is the shared prompt recorder — what
+    actually reached the model, in order (its length is the model-call count).
+    """
+    prompts: list[str] = []
+
+    def _override(session: SessionDep) -> AgentOperationService:
+        return AgentOperationService(
+            session,
+            model=scripted_draft_model(DRAFT_CONTENT, DRAFT_TITLE, prompts=prompts),
+            retriever=StubRetriever(
+                outcome=SearchOutcome(mode="bm25", items=[], es_hits=0, vector_hits=0)
+            ),
+        )
+
+    def _install() -> list[str]:
+        app.dependency_overrides[get_agent_operation_service] = _override
+        return prompts
+
+    return _install
 
 
 async def _seed_document(db_client, content: str = FM_DOC) -> dict:
@@ -231,3 +270,130 @@ async def test_operations_never_touch_chat_history(db_client, db_session):
 
     count = (await db_session.execute(select(func.count()).select_from(ChatMessage))).scalar_one()
     assert count == 0
+
+
+# --- streaming draft (SSE) ---
+
+
+async def test_draft_streams_event_order_and_persists_completed(
+    db_client, db_session, install_scripted_draft
+):
+    """Canonical order run_started -> draft -> done; the operation lands
+    `completed` with the structured draft, and chat history stays untouched."""
+    document = await _seed_document(db_client)
+    prompts = install_scripted_draft()
+
+    resp = await db_client.post(f"/api/v1/operations/draft?document_id={document['id']}")
+
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/event-stream")
+    events = parse_sse(resp.text)
+    assert [name for name, _ in events] == ["run_started", "draft", "done"]
+    run_started = events[0][1]
+    assert run_started["kind"] == "draft"
+    assert run_started["document_id"] == document["id"]
+    assert run_started["run_id"]
+    body = events[1][1]
+    assert set(body) == {"operation_id", "state", "content", "title"}
+    assert body["state"] == "completed"
+    assert body["content"] == DRAFT_CONTENT
+    assert body["title"] == DRAFT_TITLE
+    done = events[2][1]
+    assert done["run_id"] == run_started["run_id"]
+    assert done["outcome"] == "success"
+    assert done["latency_ms"] >= 0
+    assert len(prompts) == 1  # exactly one model call
+
+    # Terminal state persisted BEFORE the draft event: fully inspectable.
+    op_resp = await db_client.get(f"/api/v1/operations/{body['operation_id']}")
+    operation = op_resp.json()
+    assert operation["state"] == "completed"
+    assert operation["draft"]["content"] == DRAFT_CONTENT
+    assert operation["error"] is None
+
+    count = (await db_session.execute(select(func.count()).select_from(ChatMessage))).scalar_one()
+    assert count == 0  # the chat-history firewall holds for streamed drafts too
+
+
+async def test_draft_provider_failure_emits_single_error_leaves_failed_resumable(
+    app, db_client, db_session, session_factory
+):
+    """Mid-stream provider failure: run_started stands, exactly one terminal
+    `error`, and the operation is durably `failed` with error details — and
+    still resumable."""
+    document = await _seed_document(db_client)
+    prompts: list[str] = []
+
+    def _override(session: SessionDep) -> AgentOperationService:
+        return AgentOperationService(
+            session,
+            model=scripted_draft_model(
+                "never",
+                fail=APIStatusError(
+                    "upstream exploded",
+                    response=httpx.Response(
+                        500, request=httpx.Request("POST", "http://provider.test/v1/chat")
+                    ),
+                    body=None,
+                ),
+                prompts=prompts,
+            ),
+            retriever=StubRetriever(
+                outcome=SearchOutcome(mode="bm25", items=[], es_hits=0, vector_hits=0)
+            ),
+        )
+
+    app.dependency_overrides[get_agent_operation_service] = _override
+
+    resp = await db_client.post(f"/api/v1/operations/draft?document_id={document['id']}")
+
+    # Streaming had already begun: run_started stands, one terminal error, no done.
+    assert resp.status_code == 200
+    events = parse_sse(resp.text)
+    assert [name for name, _ in events] == ["run_started", "error"]
+    assert events[-1][1]["code"] == "llm_provider_error"
+    assert "upstream exploded" not in events[-1][1]["message"]  # no internals leak
+
+    row = (
+        await db_session.execute(select(AgentOperation).order_by(AgentOperation.created_at))
+    ).scalar_one()
+    assert row.state is OperationState.FAILED
+    assert row.error == {"error_class": "APIStatusError"}
+
+    resumed = await db_client.post(f"/api/v1/operations/{row.id}/resume", json={})
+    assert resumed.status_code == 200
+    assert resumed.json()["state"] == "completed"
+    app.dependency_overrides.clear()
+
+
+async def test_draft_of_missing_document_returns_404_envelope(db_client, install_scripted_draft):
+    """Pre-stream failure: the priming pull keeps the 404 a JSON envelope,
+    never a 200 stream."""
+    missing = uuid4()
+    install_scripted_draft()
+
+    resp = await db_client.post(f"/api/v1/operations/draft?document_id={missing}")
+
+    assert resp.status_code == 404
+    assert resp.json()["error"]["code"] == "not_found"
+
+
+async def test_unconfigured_draft_returns_503_envelope(app):
+    """No LLM wiring in the service (no model/retriever): the draft gate
+    fires pre-stream as chat's one no-LLM-fallback 503 code."""
+    document_id = uuid4()
+
+    async def _override(session: SessionDep) -> AgentOperationService:
+        return AgentOperationService(session)  # no model, no retriever
+
+    app.dependency_overrides[get_agent_operation_service] = _override
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        resp = await ac.post(f"/api/v1/operations/draft?document_id={document_id}")
+
+    assert resp.status_code == 503
+    assert resp.headers["content-type"].startswith("application/json")
+    error = resp.json()["error"]
+    assert error["code"] == "chat_unavailable"
+    assert error["message"]
+    app.dependency_overrides.clear()

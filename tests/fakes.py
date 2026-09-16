@@ -518,6 +518,41 @@ def scripted_association_model(
     return FunctionModel(function, model_name="scripted-association")
 
 
+def scripted_draft_model(
+    content: str,
+    title: str | None = None,
+    *,
+    prompts: list[str] | None = None,
+    fail: Exception | None = None,
+) -> FunctionModel:
+    """FunctionModel scripting one structured-output draft run (writing agent).
+
+    Same trick as `scripted_association_model`: the model calls the agent's
+    single output tool with `{"content": ..., "title": ...}` so pydantic-ai
+    validates it into `DraftOutput` exactly as a real provider would. `prompts`
+    collects the run's user prompt; `fail` raises instead, for provider-
+    failure mapping.
+    """
+    payload = {"content": content, "title": title}
+
+    async def function(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        if fail is not None:
+            raise fail
+        if prompts is not None:
+            prompts.append(_first_user_prompt(messages))
+        assert info.output_tools, "draft agent must use structured output"
+        return ModelResponse(
+            parts=[
+                ToolCallPart(
+                    tool_name=info.output_tools[0].name,
+                    args=json.dumps(payload),
+                )
+            ]
+        )
+
+    return FunctionModel(function, model_name="scripted-draft")
+
+
 def hermetic_settings(**overrides: object) -> Settings:
     """Settings constructed WITHOUT the ambient `.env` file.
 

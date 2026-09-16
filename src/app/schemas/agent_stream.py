@@ -20,7 +20,7 @@ from pydantic import BaseModel
 from app.schemas.agents import AssociationsResult, SummaryResult
 from app.schemas.chat import ErrorEvent
 
-AgentKind = Literal["summary", "associations"]
+AgentKind = Literal["summary", "associations", "draft"]
 """Which agent run the stream carries."""
 
 
@@ -62,6 +62,22 @@ class AssociationsResultEvent(AssociationsResult):
     payload (deterministic candidate metadata plus LLM reasons), flat."""
 
 
+class OperationDraftEvent(BaseModel):
+    """The completed draft operation — additive draft-stream result event.
+
+    Emitted AFTER the operation's terminal state (`completed`) is committed,
+    right before the terminal `done`: a client that stops reading never sees
+    a draft for unpersisted work. The payload is flat (operation identity,
+    state, draft content) — never an auto-publish signal; applying stays the
+    explicit `POST /operations/{id}/apply` endpoint.
+    """
+
+    operation_id: UUID
+    state: Literal["completed"]
+    content: str
+    title: str | None
+
+
 class AgentDoneEvent(BaseModel):
     """Terminal success event; the stream closes right after it."""
 
@@ -75,6 +91,7 @@ AgentStreamEvent = (
     | SummaryProgressEvent
     | SummaryResultEvent
     | AssociationsResultEvent
+    | OperationDraftEvent
     | AgentDoneEvent
     | ErrorEvent
 )
