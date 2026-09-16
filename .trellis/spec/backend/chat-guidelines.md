@@ -461,28 +461,30 @@ if outcome.event is not None:
 
 ---
 
-## Convention: Gateway chat adapter boundary (updated 2026-09-16, gateway v1.2)
+## Convention: Gateway chat adapter boundary (updated 2026-09-16, gateway v1.2 + #2 fix)
 
 **What**: When `KB_CHAT_BASE_URL` points at the knowledge-base-gateway,
 chat completions with `tools` / `tool_choice` passthrough are supported as
 of gateway v1.2 (capability-matrix gated — the model's catalog row must
 declare `tools: true`, else 400 `capability_not_supported`). The QA agent's
-`search_knowledge` tool loop can run through the gateway.
+`search_knowledge` tool loop runs through the gateway in both non-streaming
+and streaming mode. MCP forwarding remains unsupported.
 
-**Status caveat (2026-09-16 verification, task 09-16-gateway-v1-2-integration)**:
-non-streaming tool calls work, but **streamed tool-call deltas currently
-arrive without `function.name`/`id`**, so the server cannot dispatch them
-inside an SSE run — tracked upstream as
-lennylin-lab/knowledge-base-gateway#2. Until that is fixed, gateway-routed
-streaming runs behave tools-free; rely on tools only over non-streaming or
-after #2 closes. Real-model e2e acceptance (v1.1 deferred item) additionally
-requires a real provider configured in the gateway. MCP forwarding remains
-unsupported.
+**Verified 2026-09-16 (real-model e2e)**: with a real provider
+(`gpt-5.5` via gateway), streaming tool-call deltas carry correct identity
+(gateway fix `b887664`, closing
+lennylin-lab/knowledge-base-gateway#2); a full chat run executed
+`search_knowledge` successfully (`tool_calls=1`), returned 4 sources with
+matching citation numbers, and a same-session follow-up carried the
+previous sources forward (`carried_sources=4`). Remaining known dev-only
+defect: fake provider (`gateway-echo`) chunks streamed text/args at byte
+boundaries, corrupting multi-byte UTF-8 (issue #3) — do not treat garbled
+Chinese in fake-mode smokes as a server bug.
 
 **Why**: Live v1.2 verification (schema v4, capability matrix via
-`/v1/models`, fake-mode smoke, 429/quota probe) confirmed the upgraded
-contract; the defect was reproduced minimally and filed rather than
-worked around.
+`/v1/models`, fake-mode smoke, 429/quota probe, then real-model e2e)
+confirmed the upgraded contract; defects were reproduced minimally and
+filed upstream rather than worked around.
 
 **Related facts from the same verification**:
 - Server SSE vocabulary (`run_started` → progress events → terminal
