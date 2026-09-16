@@ -218,3 +218,35 @@ uv run pytest
       via admin API); profile to be removed after acceptance (done below).
 - [x] Real-model embeddings e2e + dim-mismatch demo remain blocked on
       gateway #5 (per-provider credentials) + upstream provisioning.
+
+## Retest round: gateway #5 landed (per-provider credentials) — 2026-09-16
+
+- [x] #5 verified: gateway master `33f0eb0` (feat `16a37cd`) rebuilt;
+      second openai-kind provider `openai-embed` → router.tumuer.me
+      registered with its own key via `OPENAI_API_KEY__OPENAI_EMBED`
+      (compose env); upstream reached and authenticated with the right
+      key — evidenced by real Qwen3-Embedding-4B responses (2560-wide)
+      triggering the catalog width check.
+- [x] `embedding_dim_mismatch` NOW DEMONSTRATED (was deferred): declared
+      1536 vs upstream 2560 → 500 `embedding_dim_mismatch` exactly as
+      documented. Root cause of the width mismatch is a new gateway gap
+      (below), not the enforcement.
+- [x] New gateway gap filed: embeddings proxy drops the standard
+      `dimensions` parameter (`EmbeddingsRequest`/wire struct lack it) —
+      gateway issue #6. With MRL upstreams this makes the proxy unusable
+      until fixed; enforcement itself works.
+- [x] New gateway bug filed: subject-level default-model backfill fails
+      (400 model is required) when any access_policies row of the subject
+      has default_model NULL — gateway issue #7 (workaround: set the chat
+      default on every policy row; done live, backfill+stream then OK).
+- [x] Deferred AC3 (unset-model happy path) now verified end-to-end:
+      probe boot with `KB_CHAT_MODEL=` → `chat_model_source=discovered`
+      (`gpt-5.5`), server chat reached the gateway. Full generation
+      blocked by an upstream vendor change: tools+stream now rejected 400
+      by longxiadev directly (gateway fake path 200) — vendor-side, not a
+      gateway/server regression; discovered-dim + backfill + discovery
+      resolution all proven.
+- [x] Discovery probe timeout tuned 10s → 30s: the vendor's first-token
+      latency (~11.5s for "hi") exceeded the old budget, failing the
+      startup probe spuriously.
+- Cleanup: probe server stopped; gateway key revoked; temp files shredded.

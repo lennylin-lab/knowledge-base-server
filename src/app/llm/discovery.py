@@ -28,10 +28,11 @@ from app.core.config import Settings
 
 logger = structlog.get_logger(__name__)
 
-# Startup-only traffic: a small budget so a down gateway cannot stall boot
-# for long (the SDK client itself gets no retries here — the probe does its
-# single explicit retry below).
-_DISCOVERY_TIMEOUT_S = 10.0
+# Startup-only traffic: bounded so a down gateway cannot stall boot for long
+# (the SDK client itself gets no retries here — the probe does its single
+# explicit retry below). The budget must absorb real vendors whose first
+# token takes >10s, hence 30s rather than a tight local-network bound.
+_DISCOVERY_TIMEOUT_S = 30.0
 _PROBE_ATTEMPTS = 2
 
 
