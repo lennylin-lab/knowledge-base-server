@@ -325,3 +325,15 @@ uv run pytest
 - Verdict: stack behavior correct; upstream vendor availability/latency is
   the outstanding instability (watch longxiadev; consider a backup model
   route / second provider).
+
+## Retest round 4: gateway #8 decision implemented (min-of-declared ceilings) — 2026-09-16
+
+- [x] Gateway `86a3bed` (fold policy ceilings to min-of-declared) rebuilt
+      and verified live: tightened ONE policy row (gateway-echo) to
+      5/min → inference burst hit 429 after exactly 5 requests with
+      `Retry-After: 60`; cross-row proof — gpt-5.5 requests (own row
+      120/min) immediately 429 at the folded 5/min ceiling.
+- [x] Restored 120/min, restart, echo 200 again; policies back to
+      120/8/1000000 on all three rows (DB-confirmed).
+- Note: `/v1/models` is not rate-limited (burst of 8 all 200) — limiter
+  applies to inference endpoints only.
