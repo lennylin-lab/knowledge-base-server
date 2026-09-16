@@ -1,0 +1,13 @@
+{"file":"docs/gateway-v1.3-integration.md","reason":"Authoritative v1.3 guide: upgrade order, catalog embeddings declaration, default-model slots, retrieval profile, §5 acceptance checklist."}
+{"file":"docs/gateway-v1.2-integration.md","reason":"Prior increment: capability declaration pattern, ports, key minting, error semantics — all reused."}
+{"file":".trellis/spec/backend/index.md","reason":"Conventions and layering; llm/ is the only provider-SDK layer."}
+{"file":"src/app/llm/embeddings.py","reason":"Embedding provider construction (from_settings), dim used in request param, response-width validation, cache key; discovery must feed the same dim parameter."}
+{"file":"src/app/llm/models.py","reason":"Single chat-model construction point get_chat_model(settings.CHAT_MODEL); pydantic-ai OpenAIChatModel requires a concrete name — basis of the startup-resolution design."}
+{"file":"src/app/core/config.py","reason":"Settings conventions, CHAT_MODEL/EMBEDDING_DIM/SEARCH_* fields; CHAT_MODEL becomes optional; no post-init validators exist."}
+{"file":"src/app/api/deps.py","reason":"_build_retriever is the single choke point for SEARCH_* thresholds; build_* factories construct services with model names — profile override and effective-model wiring sites."}
+{"file":"src/app/rag/retriever.py","reason":"Retriever kwargs defaults; apply_profile must compose with module DEFAULT_* precedence."}
+{"file":"src/app/models/document_chunk.py","reason":"pgvector column width constant EMBEDDING_DIM=1536 for the startup cross-check warning."}
+{"file":"src/app/main.py","reason":"Lifespan where startup discovery/resolution and the fail-fast unset-chat-model error hook in."}
+{"file":"tests/fakes.py","reason":"hermetic_settings pattern for .env-proof config tests; parse_sse for any stream checks."}
+{"file":".trellis/spec/backend/chat-guidelines.md","reason":"Gateway adapter conventions to keep consistent (quota Retry-After, capability gating) when touching llm/."}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"model_control_plane_resolved logging must carry identifiers/sources only — no keys or content."}

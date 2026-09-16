@@ -1,0 +1,5 @@
+{"file":"docs/gateway-v1.3-integration.md","reason":"Verify every §5 checklist item has sanitized evidence."}
+{"file":".trellis/spec/backend/index.md","reason":"Verify llm/-only SDK usage and layering after the changes."}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"Verify startup source-logging carries no secrets/content."}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Verify gates green and default suite stays offline."}
+{"file":".trellis/spec/backend/chat-guidelines.md","reason":"Verify gateway adapter conventions (quota/capability) respected; no stale claims introduced."}

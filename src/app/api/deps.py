@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Mapping
 from datetime import datetime
 from functools import lru_cache
-from typing import Annotated, Any, ClassVar
+from typing import Annotated, Any, ClassVar, cast
 from uuid import UUID
 
 import structlog
@@ -27,10 +27,13 @@ from app.core.exceptions import (
     ForbiddenError,
     TenantUnavailableError,
 )
+from app.llm.discovery import ModelFacts, discover
 from app.llm.embeddings import CachingEmbeddingProvider, EmbeddingProvider, OpenAIEmbeddingProvider
 from app.llm.models import get_chat_model
+from app.llm.profile import RETRIEVER_THRESHOLD_KEYS, apply_profile
 from app.mcp.manager import get_mcp_manager
 from app.mcp.tools import build_agent_tools
+from app.models.document_chunk import EMBEDDING_DIM as PGVECTOR_EMBEDDING_DIM
 from app.models.tenant import MembershipRole, MembershipStatus, UserStatus
 from app.rag.indexer import run_indexing
 from app.rag.retriever import Retriever
@@ -47,6 +50,125 @@ from app.services.session import ChatSessionService
 logger = structlog.get_logger(__name__)
 
 SessionDep = Annotated[AsyncSession, Depends(get_db)]
+
+
+# --- model control plane (gateway v1.3, resolved once at startup) ---
+#
+# The effective chat model / embedding dim / retrieval profile are resolved
+# in the app lifespan (`resolve_model_control_plane`) and cached for the
+# process lifetime (pydantic-ai requires a concrete model name; gateway-side
+# default or profile changes need a restart — documented). Builders read the
+# effective values so `KB_CHAT_MODEL`-set deployments behave byte-identically
+# to before, while unset deployments use the discovered default.
+
+_resolved_chat_model: str | None = None
+_resolved_embedding_dim: int | None = None
+_resolved_profile: Mapping[str, object] = {}
+
+
+def reset_model_control_plane() -> None:
+    """Clear the startup-resolved state (app restarts, tests)."""
+    global _resolved_chat_model, _resolved_embedding_dim, _resolved_profile
+    _resolved_chat_model = None
+    _resolved_embedding_dim = None
+    _resolved_profile = {}
+
+
+def configured_chat_model(settings: Settings) -> str | None:
+    """The env-configured chat model, normalized: `KB_CHAT_MODEL=` (the
+    common shell way to "unset" a var) parses as the empty string, not None
+    — whitespace-only values are treated exactly like unset everywhere the
+    env model is consulted (discovery probe path, fail-fast, env-wins
+    precedence)."""
+    if settings.CHAT_MODEL is None:
+        return None
+    return settings.CHAT_MODEL.strip() or None
+
+
+def effective_chat_model(settings: Settings) -> str:
+    """The chat model name every consumer must use: env wins (byte-identical
+    legacy behavior), then the startup-discovered gateway default, then the
+    retired hard default for direct construction before startup resolution
+    (tests, tooling). Unset + failed discovery is refused earlier, at startup
+    (`resolve_model_control_plane`)."""
+    env_model = configured_chat_model(settings)
+    if env_model is not None:
+        return env_model
+    if _resolved_chat_model is not None:
+        return _resolved_chat_model
+    return settings.DEFAULT_CHAT_MODEL
+
+
+def effective_embedding_dim(settings: Settings) -> int:
+    """Discovered `embedding_dim` wins; `KB_EMBEDDING_DIM` is the fallback."""
+    if _resolved_embedding_dim is not None:
+        return _resolved_embedding_dim
+    return settings.EMBEDDING_DIM
+
+
+async def resolve_model_control_plane(settings: Settings, *, client: object | None = None) -> None:
+    """Startup resolution (app lifespan): discover model facts from the
+    gateway, thread effective values into the module globals, cross-check the
+    embedding dim against the pgvector column width, and log every source
+    (`model_control_plane_resolved` — identifiers only, never keys/content).
+
+    `client` is a test seam (AsyncOpenAI over a MockTransport). Fails startup
+    ONLY when `KB_CHAT_MODEL` is unset and the gateway default is
+    undiscoverable — the gateway would 400 every chat request anyway.
+    """
+    global _resolved_chat_model, _resolved_embedding_dim, _resolved_profile
+    reset_model_control_plane()
+    if not settings.CHAT_API_KEY.get_secret_value():
+        # Chat is unavailable anyway (every builder 503s on the empty key):
+        # no gateway call, straight to fallbacks — keeps LLM-less
+        # deployments (and the offline test suite) free of discovery traffic.
+        logger.info(
+            "model_control_plane_resolved",
+            chat_model=settings.DEFAULT_CHAT_MODEL,
+            chat_model_source="unconfigured",
+            embedding_dim=settings.EMBEDDING_DIM,
+            embedding_dim_source="env",
+            thresholds={key: "env" for key in RETRIEVER_THRESHOLD_KEYS},
+        )
+        return
+    facts: ModelFacts | None = await discover(settings, client=cast("Any | None", client))
+    chat_model_source = "env"
+    if configured_chat_model(settings) is None:
+        if facts is None:
+            raise RuntimeError(
+                "KB_CHAT_MODEL is not set and the gateway default chat model "
+                "could not be discovered; set KB_CHAT_MODEL or verify the "
+                "gateway's default-model policy is configured"
+            )
+        _resolved_chat_model = facts.model_name
+        chat_model_source = "discovered"
+    embedding_dim_source = "env"
+    if facts is not None:
+        if facts.embedding_dim is not None:
+            _resolved_embedding_dim = facts.embedding_dim
+            embedding_dim_source = "discovered"
+        _resolved_profile = facts.retrieval_profile
+    effective_dim = effective_embedding_dim(settings)
+    if effective_dim != PGVECTOR_EMBEDDING_DIM:
+        # Cross-check only: the mismatch actually fails at write time (the
+        # gateway's embedding_dim_mismatch / the pgvector insert); this
+        # warning makes the cause visible at boot instead.
+        logger.warning(
+            "embedding_dim_mismatch",
+            effective_dim=effective_dim,
+            embedding_dim_source=embedding_dim_source,
+            pgvector_column_width=PGVECTOR_EMBEDDING_DIM,
+        )
+    thresholds = {key: "env" for key in RETRIEVER_THRESHOLD_KEYS}
+    thresholds.update({key: "profile" for key in apply_profile({}, _resolved_profile)})
+    logger.info(
+        "model_control_plane_resolved",
+        chat_model=effective_chat_model(settings),
+        chat_model_source=chat_model_source,
+        embedding_dim=effective_dim,
+        embedding_dim_source=embedding_dim_source,
+        thresholds=thresholds,
+    )
 
 
 async def _resolve_default_tenant(session: AsyncSession, settings: Settings) -> UUID:
@@ -314,13 +436,14 @@ def embedding_provider_from_settings(settings: Settings) -> EmbeddingProvider | 
     """
     if not settings.EMBEDDING_API_KEY.get_secret_value():
         return None
-    provider: EmbeddingProvider = OpenAIEmbeddingProvider.from_settings(settings)
+    dim = effective_embedding_dim(settings)
+    provider: EmbeddingProvider = OpenAIEmbeddingProvider.from_settings(settings, dimensions=dim)
     if settings.CACHE_ENABLED and settings.REDIS_URL:
         provider = CachingEmbeddingProvider(
             provider,
             get_cache(),
             model=settings.EMBEDDING_MODEL,
-            dim=settings.EMBEDDING_DIM,
+            dim=dim,
             ttl_seconds=settings.CACHE_EMBEDDING_TTL_S,
         )
     return provider
@@ -331,22 +454,42 @@ def _build_retriever(settings: Settings, provider: EmbeddingProvider | None) -> 
 
     The relevance gate thresholds flow from Settings so operators can tune
     (or disable — see the sentinels in `core/config.py`) without code changes;
-    every retrieval-backed consumer (search, chat agents) shares them.
+    every retrieval-backed consumer (search, chat agents) shares them. The
+    gateway's `retrieval_profile` (startup-discovered) overrides the matching
+    env values at this single choke point — precedence: profile > env >
+    `Retriever` module defaults (`llm/profile.py`).
     """
     session_factory: async_sessionmaker[AsyncSession] = SessionFactory
+    thresholds = apply_profile(
+        {
+            "bm25_min_score": settings.SEARCH_BM25_MIN_SCORE,
+            "bm25_min_coverage": settings.SEARCH_BM25_MIN_COVERAGE,
+            "vector_max_distance": settings.SEARCH_VECTOR_MAX_DISTANCE,
+            "vector_rescue_margin": settings.SEARCH_VECTOR_RESCUE_MARGIN,
+            "vector_rescue_max_distance": settings.SEARCH_VECTOR_RESCUE_MAX_DISTANCE,
+            "vector_rescue_trigger_max_distance": (
+                settings.SEARCH_VECTOR_RESCUE_TRIGGER_MAX_DISTANCE
+            ),
+            "rrf_min_relative": settings.SEARCH_RRF_MIN_RELATIVE,
+            "max_query_length": settings.SEARCH_MAX_QUERY_LENGTH,
+        },
+        _resolved_profile,
+    )
     return Retriever(
         session_factory=session_factory,
         es_client=get_shared_es_client(),
         embedding_provider=provider,
         es_index=settings.ES_INDEX,
-        bm25_min_score=settings.SEARCH_BM25_MIN_SCORE,
-        bm25_min_coverage=settings.SEARCH_BM25_MIN_COVERAGE,
-        vector_max_distance=settings.SEARCH_VECTOR_MAX_DISTANCE,
-        vector_rescue_margin=settings.SEARCH_VECTOR_RESCUE_MARGIN,
-        vector_rescue_max_distance=settings.SEARCH_VECTOR_RESCUE_MAX_DISTANCE,
-        vector_rescue_trigger_max_distance=settings.SEARCH_VECTOR_RESCUE_TRIGGER_MAX_DISTANCE,
-        rrf_min_relative=settings.SEARCH_RRF_MIN_RELATIVE,
-        max_query_length=settings.SEARCH_MAX_QUERY_LENGTH,
+        bm25_min_score=cast("float", thresholds["bm25_min_score"]),
+        bm25_min_coverage=cast("str", thresholds["bm25_min_coverage"]),
+        vector_max_distance=cast("float", thresholds["vector_max_distance"]),
+        vector_rescue_margin=cast("float", thresholds["vector_rescue_margin"]),
+        vector_rescue_max_distance=cast("float", thresholds["vector_rescue_max_distance"]),
+        vector_rescue_trigger_max_distance=cast(
+            "float", thresholds["vector_rescue_trigger_max_distance"]
+        ),
+        rrf_min_relative=cast("float", thresholds["rrf_min_relative"]),
+        max_query_length=cast("int", thresholds["max_query_length"]),
         cache=get_cache(),
         cache_ttl_seconds=settings.CACHE_SEARCH_TTL_S,
     )
@@ -399,7 +542,7 @@ def build_chat_service(settings: Settings) -> ChatService:
     # CHAT_API_KEY: chat with only a chat key wires a BM25-only retriever,
     # and run_started.mode must report that truthfully (writing's pattern).
     provider = embedding_provider_from_settings(settings)
-    model = get_chat_model(settings)
+    model = get_chat_model(settings, effective_chat_model(settings))
     return ChatService(
         _build_retriever(settings, provider),
         model,
@@ -454,8 +597,8 @@ def build_summarize_service(settings: Settings) -> SummarizeService:
             "Summarize is not configured: set CHAT_API_KEY to enable it",
         )
     return SummarizeService(
-        get_chat_model(settings),
-        settings.CHAT_MODEL,
+        get_chat_model(settings, effective_chat_model(settings)),
+        effective_chat_model(settings),
         session_factory=SessionFactory,
         cache=get_cache(),
         cache_ttl_seconds=settings.CACHE_SUMMARY_TTL_S,
@@ -487,8 +630,8 @@ def build_association_service(settings: Settings) -> AssociationService:
             "Associations are not configured: set CHAT_API_KEY to enable it",
         )
     return AssociationService(
-        get_chat_model(settings),
-        settings.CHAT_MODEL,
+        get_chat_model(settings, effective_chat_model(settings)),
+        effective_chat_model(settings),
         session_factory=SessionFactory,
         cache=get_cache(),
         cache_ttl_seconds=settings.CACHE_ASSOCIATION_TTL_S,
@@ -530,7 +673,7 @@ def build_writing_service(settings: Settings) -> WritingService:
         logger.warning("vector_search_disabled", reason="embedding_api_key_not_configured")
     return WritingService(
         _build_retriever(settings, provider),
-        get_chat_model(settings),
+        get_chat_model(settings, effective_chat_model(settings)),
         mode="hybrid" if provider is not None else "bm25",
     )
 
@@ -559,7 +702,11 @@ def get_agent_operation_service(
     only `POST /operations/draft` at call time (`ChatUnavailableError`).
     """
     settings = get_settings()
-    model = get_chat_model(settings) if settings.CHAT_API_KEY.get_secret_value() else None
+    model = (
+        get_chat_model(settings, effective_chat_model(settings))
+        if settings.CHAT_API_KEY.get_secret_value()
+        else None
+    )
     retriever = (
         _build_retriever(settings, embedding_provider_from_settings(settings)) if model else None
     )

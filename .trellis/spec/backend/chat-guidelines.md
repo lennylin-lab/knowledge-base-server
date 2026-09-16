@@ -497,3 +497,36 @@ filed upstream rather than worked around.
   `Retry-After` and must not be retried inside the quota window.
 - Operational details live in `docs/gateway-integration.md` and
   `docs/gateway-v1.2-integration.md`.
+
+---
+
+## Convention: Gateway model control plane (v1.3, verified 2026-09-16)
+
+**What**: The gateway is the model control plane; the server discovers
+model facts instead of hardcoding them (`src/app/llm/discovery.py`):
+- `KB_CHAT_MODEL` is **optional**. Unset/empty ⇒ one minimal startup probe
+  request without `model` resolves the subject's gateway default (response
+  `model` echo); undiscoverable ⇒ fail-fast startup error naming
+  `KB_CHAT_MODEL`. Set ⇒ byte-identical legacy behavior (A/B escape hatch).
+- `KB_EMBEDDING_DIM` is a **fallback only**; the effective width is
+  `capabilities.embedding_dim` from `GET /v1/models/{model}` (pgvector
+  column width is fixed — a mismatch fails at write time; log a startup
+  warning when discovered dim ≠ `models/document_chunk.py::EMBEDDING_DIM`).
+- `retrieval_profile` (opaque JSON on the catalog row) overrides matching
+  `SEARCH_*` env defaults at the `_build_retriever` choke point; env stays
+  the fallback so the server boots without the gateway.
+
+**Why**: One control plane for routing, capabilities, quotas, and now model
+selection + retrieval tuning; env values remain so offline/test deployments
+and gateway outages never block the server.
+
+**Rules**:
+- Discovery lives in `llm/` only; bounded timeouts (10s, no SDK retries,
+  ≤2 probe attempts); failures degrade to env, never crash — except the
+  unset-chat-model case, which fails fast by design.
+- Every resolution logs `model_control_plane_resolved` with per-item source
+  (`env`/`discovered`/`profile`) — identifiers only, never keys/content.
+- Empty/whitespace env values normalize to unset at the boundary.
+- Known gaps (2026-09-16): real-model embeddings e2e blocked on gateway
+  per-provider credentials (issue #5); gateway's `embedding_dim_mismatch`
+  enforcement not observable on the fake path.

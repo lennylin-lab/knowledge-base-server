@@ -49,6 +49,13 @@ async def test_lifespan_starts_and_stops_a_configured_manager(
 ) -> None:
     spy = LifecycleSpy()
     monkeypatch.setattr(main_module, "get_mcp_manager", lambda: spy)
+
+    # Model-control-plane resolution talks to the gateway; this test is about
+    # MCP lifecycle, so stub it (covered in test_gateway_discovery.py).
+    async def _no_resolution(_settings: object) -> None:
+        return None
+
+    monkeypatch.setattr(main_module, "resolve_model_control_plane", _no_resolution)
     app = create_app()
 
     async with app.router.lifespan_context(app):
@@ -67,6 +74,14 @@ async def test_lifespan_is_a_no_op_without_mcp_config(
     monkeypatch.setenv("KB_MCP_CONFIG_PATH", str(tmp_path / "absent-mcp.json"))
     get_settings.cache_clear()
     get_mcp_manager.cache_clear()
+
+    # Offline suite: model-control-plane resolution must not touch the
+    # gateway here (it is exercised against MockTransport in
+    # test_gateway_discovery.py).
+    async def _no_resolution(_settings: object) -> None:
+        return None
+
+    monkeypatch.setattr(main_module, "resolve_model_control_plane", _no_resolution)
     try:
         app: FastAPI = create_app()
         manager = get_mcp_manager()

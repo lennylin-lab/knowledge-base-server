@@ -41,7 +41,15 @@ class Settings(BaseSettings):
     EMBEDDING_DIM: int = 1536
     CHAT_BASE_URL: str = "https://api.openai.com/v1"
     CHAT_API_KEY: SecretStr = SecretStr("")
-    CHAT_MODEL: str = "gpt-4o-mini"
+    # Optional (gateway v1.3 model control plane): when unset, the server
+    # discovers the gateway-backfilled default chat model at startup (one
+    # minimal probe whose response echoes the model name); discovery failure
+    # without an env model fails startup fast. When set, behavior is exactly
+    # the pre-optional one. DEFAULT_CHAT_MODEL is the retired hard default,
+    # kept only so direct construction before startup resolution (tests,
+    # tooling) behaves as before — the startup resolver is authoritative.
+    DEFAULT_CHAT_MODEL: str = "gpt-4o-mini"
+    CHAT_MODEL: str | None = None
     # Multi-turn history window: total TOKENS of complete turns (newest
     # first) sent to the agent as `message_history`, counted with the chat
     # model's tokenizer (tiktoken; deterministic char/CJK heuristic fallback

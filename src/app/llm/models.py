@@ -20,8 +20,14 @@ _REQUEST_TIMEOUT = 60.0
 _MAX_RETRIES = 2
 
 
-def get_chat_model(settings: Settings) -> Model:
-    """Build the Pydantic AI chat model from Settings (OpenAI-compatible)."""
+def get_chat_model(settings: Settings, model_name: str | None = None) -> Model:
+    """Build the Pydantic AI chat model from Settings (OpenAI-compatible).
+
+    `model_name` (the startup-resolved effective name, threaded from
+    `api/deps.py`) wins; the Settings fallbacks keep direct construction
+    (tests, tooling) working — pydantic-ai requires a concrete name.
+    """
+    resolved = model_name or settings.CHAT_MODEL or settings.DEFAULT_CHAT_MODEL
     # The client is injected rather than letting the provider build its own so
     # timeouts/retries are configured in exactly one place — this module.
     client = AsyncOpenAI(
@@ -34,6 +40,6 @@ def get_chat_model(settings: Settings) -> Model:
         default_headers={"User-Agent": "knowledge-base-server"},
     )
     return OpenAIChatModel(
-        settings.CHAT_MODEL,
+        resolved,
         provider=OpenAIProvider(openai_client=client),
     )

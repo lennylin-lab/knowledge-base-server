@@ -8,7 +8,11 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.deps import close_arq_pool, close_cache
+from app.api.deps import (
+    close_arq_pool,
+    close_cache,
+    resolve_model_control_plane,
+)
 from app.api.v1.router import api_v1_router
 from app.core.config import get_settings
 from app.core.exceptions import register_exception_handlers
@@ -20,13 +24,17 @@ from app.mcp.manager import get_mcp_manager
 async def app_lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Startup/shutdown for process-lifetime components.
 
-    MCP manager: started/stopped when servers are configured (a no-op when
-    not, so an MCP-less deployment is byte-identical to before). Shared ARQ
-    pool: closed at shutdown when this process routed indexing through
+    Model control plane (gateway v1.3): the effective chat model, embedding
+    dim, and retrieval profile are resolved once here — an unset
+    `KB_CHAT_MODEL` with an undiscoverable gateway default fails startup
+    fast. MCP manager: started/stopped when servers are configured (a no-op
+    when not, so an MCP-less deployment is byte-identical to before). Shared
+    ARQ pool: closed at shutdown when this process routed indexing through
     Redis — also a no-op in BackgroundTasks mode, where the pool never gets
     built. Shared cache client: closed when caching is enabled — a no-op in
     NullCache mode.
     """
+    await resolve_model_control_plane(get_settings())
     manager = get_mcp_manager()
     if manager.configured:
         await manager.start()

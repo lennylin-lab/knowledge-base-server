@@ -55,13 +55,20 @@ class OpenAIEmbeddingProvider:
         )
 
     @classmethod
-    def from_settings(cls, settings: Settings) -> OpenAIEmbeddingProvider:
-        """Wire the provider from application Settings."""
+    def from_settings(
+        cls, settings: Settings, *, dimensions: int | None = None
+    ) -> OpenAIEmbeddingProvider:
+        """Wire the provider from application Settings.
+
+        `dimensions` overrides `EMBEDDING_DIM` — the startup-discovered
+        `embedding_dim` is threaded through here (`api/deps.py`); the env
+        value remains the fallback.
+        """
         return cls(
             base_url=settings.EMBEDDING_BASE_URL,
             api_key=settings.EMBEDDING_API_KEY.get_secret_value(),
             model=settings.EMBEDDING_MODEL,
-            dimensions=settings.EMBEDDING_DIM,
+            dimensions=settings.EMBEDDING_DIM if dimensions is None else dimensions,
         )
 
     async def embed_texts(self, texts: list[str]) -> list[list[float]]:
