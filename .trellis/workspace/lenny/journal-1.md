@@ -571,3 +571,25 @@ Converted POST /operations/draft from sync JSON to SSE (run_started -> draft -> 
 ### Status
 
 [OK] **Completed**
+
+
+## Session 26: Gateway issue #4 closed: per-model feature isolation completed
+<!-- trellis-session: v=2 fp=839c07fac5efffd6 -->
+
+**Date**: 2026-09-17
+**Task**: Gateway issue #4 closed: per-model feature isolation completed
+**Branch**: `main`
+
+### Summary
+
+Closed gateway issue #4. Exploration showed Feature 4's mechanism (capability matrix + central admit() gating pre-provider) already existed; the task was close-out. Gateway commit a9e961a: CapabilityError names failed capability+protocol in capability_not_supported messages (envelope frozen, golden/replay fixtures unchanged); new docs/capabilities.md authoritative reference (14 keys, defaults, gated surfaces, 6-step extension protocol, vision/reasoning reserved, retrieval_profile as non-gated catalog attribute); policy.Resolver.LimitsFor(subject, model) quota seam reserved for per-model overrides (behavior-identical, #8 min-fold untouched). Gates: gofmt/vet clean, go test 20 pkgs ok, -race ok, replay 12/12. Independent check verified envelope freeze, LimitsFor equivalence, doc-vs-struct accuracy, server-side contract consistency. Issue #4 closed with feature-evidence mapping (Features 1-3 shipped in v1.3 and adopted server-side). Note: max_tools violation intentionally remains validation_error (pre-existing).
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `636bc00` | chore(task): gateway feature-4 close-out complete; issue #4 closed |
+
+### Status
+
+[OK] **Completed**
