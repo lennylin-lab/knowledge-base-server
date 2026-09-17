@@ -1,0 +1,9 @@
+{"file":"../knowledge-base-gateway/internal/model/validate.go","reason":"CheckCapabilities/ValidateResponseSpec — the central capability gates to extend with capability-name propagation."}
+{"file":"../knowledge-base-gateway/internal/model/model.go","reason":"Capabilities struct (all keys incl. reserved vision/reasoning) and Declared() semantics."}
+{"file":"../knowledge-base-gateway/internal/httpapi/common.go","reason":"admit() pipeline: capability precheck position (before limiter/quota/provider) and quota-limit resolution to extract as LimitsFor."}
+{"file":"../knowledge-base-gateway/internal/httpapi/errors.go","reason":"capability_not_supported envelope shape to keep frozen while enriching the message."}
+{"file":"../knowledge-base-gateway/internal/policy/policy.go","reason":"Limits resolution (min-of-declared per #8) — LimitsFor extraction site; retrieval_profile carriage."}
+{"file":"../knowledge-base-gateway/internal/httpapi/golden_test.go","reason":"Golden error-envelope fixtures — intentional update procedure for the R1 message change."}
+{"file":"../knowledge-base-gateway/docs/developer-quickstart.md","reason":"Existing capability documentation to supersede/link to the new capabilities.md."}
+{"file":"docs/gateway-v1.3-integration.md","reason":"Server-side consumer contract for capabilities/retrieval_profile — keep consistent."}
+{"file":".trellis/spec/backend/chat-guidelines.md","reason":"Gateway adapter conventions (capability gating, model control plane) that the server relies on — must not drift."}

@@ -1,0 +1,5 @@
+{"file":"../knowledge-base-gateway/internal/model/validate.go","reason":"Verify every capability gate names the failed key and stays pre-provider."}
+{"file":"../knowledge-base-gateway/docs/capabilities.md","reason":"Verify the authoritative reference covers every key + extension protocol."}
+{"file":"../knowledge-base-gateway/internal/policy/policy.go","reason":"Verify LimitsFor is behavior-identical and documented as the per-model seam."}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Go-side gates equivalence: gofmt/vet/test/replay all green."}
+{"file":".trellis/spec/backend/chat-guidelines.md","reason":"Verify no drift in server-relied-upon gateway contracts."}
