@@ -448,8 +448,10 @@ async def test_compatibility_path_kept_when_oidc_unconfigured(
     """design.md decision: the default-tenant compatibility path stays for the
     MVP — with no issuer configured every route scope passes unauthenticated
     (this is what keeps every existing offline API test green)."""
-    monkeypatch.delenv("KB_OIDC_ISSUER", raising=False)
+    monkeypatch.setenv("KB_OIDC_ISSUER", "")
+    monkeypatch.setenv("KB_OIDC_AUDIENCE", "")
     get_settings.cache_clear()
+    get_token_verifier.cache_clear()
     try:
         factory = async_sessionmaker(db_engine, expire_on_commit=False)
 
@@ -464,3 +466,4 @@ async def test_compatibility_path_kept_when_oidc_unconfigured(
             assert response.status_code == 200, (path, method, response.text)
     finally:
         get_settings.cache_clear()
+        get_token_verifier.cache_clear()

@@ -55,6 +55,33 @@ from app.services.document import DocumentService
 from app.services.operation import AgentOperationService
 from fakes import FakeEmbeddingProvider
 
+# Developer `.env` must not leak into the default offline suite — pydantic-settings
+# reads the file even when OS env is empty. Empty-string env vars beat the file;
+# modules that need real values configure them explicitly (test_rbac, test_auth_oidc).
+_HERMETIC_ENV_DEFAULTS: dict[str, str] = {
+    "KB_OIDC_ISSUER": "",
+    "KB_OIDC_AUDIENCE": "",
+    "KB_OIDC_JWKS_URL": "",
+    # Avoid startup gateway probes when tests call create_app() without overrides.
+    "KB_CHAT_API_KEY": "",
+}
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_env_by_default(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Blank sensitive `.env` keys so the offline suite stays deterministic."""
+    from app.auth.dependencies import get_token_verifier
+    from app.core.config import get_settings
+
+    for key, value in _HERMETIC_ENV_DEFAULTS.items():
+        monkeypatch.setenv(key, value)
+    get_settings.cache_clear()
+    get_token_verifier.cache_clear()
+    yield
+    get_settings.cache_clear()
+    get_token_verifier.cache_clear()
+
+
 # Seeding callback: (provider, markdown content) -> created document id.
 type Seeder = Callable[[EmbeddingProvider, str], Awaitable[UUID]]
 

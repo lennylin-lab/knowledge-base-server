@@ -152,13 +152,14 @@ secret 已注入、catalog 能力已按第 2.1 节声明、subject policy 已授
 如果后续想采用 Responses（类型化事件、原生形状），SDK 只需：
 
 ```python
-from openai import AsyncOpenAI   # 与现有 chat 客户端同一个 base_url/key
+from openai import AsyncOpenAI  # 与现有 chat 客户端同一个 base_url/key
 
 resp = await client.responses.create(
     model=settings.CHAT_MODEL,
     input=[{"role": "user", "content": "..."}],
-    tools=[{"type": "function", "name": "search_knowledge",
-            "description": "...", "parameters": {...}}],   # 原生扁平形状
+    tools=[
+        {"type": "function", "name": "search_knowledge", "description": "...", "parameters": {...}}
+    ],  # 原生扁平形状
     stream=True,
 )
 ```

@@ -562,9 +562,18 @@ def hermetic_settings(**overrides: object) -> Settings:
     `live_llm` smoke tests construct Settings WITH the env file on
     purpose.
     """
+    from pydantic import SecretStr
+
     from app.core.config import Settings
 
-    return Settings(_env_file=None, **overrides)  # type: ignore[arg-type]
+    base: dict[str, object] = {
+        "OIDC_ISSUER": "",
+        "OIDC_AUDIENCE": "",
+        "OIDC_JWKS_URL": "",
+        "CHAT_API_KEY": SecretStr(""),
+    }
+    base.update(overrides)
+    return Settings(_env_file=None, **base)  # type: ignore[arg-type]
 
 
 class FakeCache:
