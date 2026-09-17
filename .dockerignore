@@ -1,0 +1,36 @@
+# Git & tooling
+.git
+.github
+.trellis
+.cursor
+.claude
+.codex
+.agents
+.zcode
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+dist/
+build/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Secrets & local config (never bake into images)
+.env
+.env.*
+!.env.example
+mcp.json
+
+# Tests & docs (not needed at runtime)
+tests/
+docs/
+
+# ES plugin zip is fetched in CI before the ES image build
+docker/elasticsearch/*.zip

@@ -1,0 +1,96 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  ES_VERSION: "8.17.3"
+  REGISTRY: ghcr.io
+  APP_IMAGE: ghcr.io/lennylin-lab/knowledge-base-server
+  ES_IMAGE: ghcr.io/lennylin-lab/knowledge-base-server/elasticsearch
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - run: uv sync --frozen
+
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run mypy src
+      - run: uv run pytest
+
+  release:
+    needs: quality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Fetch Elasticsearch IK plugin
+        run: |
+          curl -fL --retry 5 \
+            -o "docker/elasticsearch/elasticsearch-analysis-ik-${ES_VERSION}.zip" \
+            "https://release.infinilabs.com/analysis-ik/stable/elasticsearch-analysis-ik-${ES_VERSION}.zip"
+
+      - name: Build and push app image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          tags: |
+            ${{ env.APP_IMAGE }}:${{ github.ref_name }}
+            ${{ env.APP_IMAGE }}:latest
+
+      - name: Build and push Elasticsearch image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./docker/elasticsearch
+          push: true
+          build-args: |
+            ES_VERSION=${{ env.ES_VERSION }}
+          tags: |
+            ${{ env.ES_IMAGE }}:${{ env.ES_VERSION }}-ik
+            ${{ env.ES_IMAGE }}:latest
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          body: |
+            ## Docker images
+
+            | Component | Image |
+            |-----------|-------|
+            | API | `${{ env.APP_IMAGE }}:${{ github.ref_name }}` |
+            | Elasticsearch (IK) | `${{ env.ES_IMAGE }}:${{ env.ES_VERSION }}-ik` |
+
+            ## Deploy
+
+            On the server (`.env` with production `KB_*` values required):
+
+            ```bash
+            git pull   # or copy docker-compose.prod.yml + scripts/deploy.sh
+            ./scripts/deploy.sh ${{ github.ref_name }}
+            ```
+
+            Public repo — images are pullable without authentication.

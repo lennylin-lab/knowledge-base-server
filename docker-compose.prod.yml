@@ -1,0 +1,86 @@
+# Production stack: pull pre-built images from GHCR (see scripts/deploy.sh).
+# Copy .env.example → .env on the server and set KB_* secrets there; never
+# commit .env or bake it into images.
+#
+# Required host sysctl (Linux): vm.max_map_count >= 262144 for Elasticsearch.
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: kb
+      POSTGRES_PASSWORD: kb
+      POSTGRES_DB: kb
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kb -d kb"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  elasticsearch:
+    image: ghcr.io/lennylin-lab/knowledge-base-server/elasticsearch:8.17.3-ik
+    restart: unless-stopped
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: "-Xms512m -Xmx512m"
+    volumes:
+      - esdata:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:9200/_cluster/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  app:
+    image: ghcr.io/lennylin-lab/knowledge-base-server:${KB_APP_VERSION:-latest}
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      KB_DATABASE_URL: postgresql+asyncpg://kb:kb@postgres:5432/kb
+      KB_ELASTICSEARCH_URL: http://elasticsearch:9200
+      KB_REDIS_URL: redis://redis:6379
+    ports:
+      - "${KB_APP_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # Opt-in ARQ worker — enable with: docker compose --profile queue up -d
+  worker:
+    profiles: ["queue"]
+    image: ghcr.io/lennylin-lab/knowledge-base-server:${KB_APP_VERSION:-latest}
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      KB_DATABASE_URL: postgresql+asyncpg://kb:kb@postgres:5432/kb
+      KB_ELASTICSEARCH_URL: http://elasticsearch:9200
+      KB_REDIS_URL: redis://redis:6379
+    command: ["python", "-m", "app.cli", "worker"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  esdata:
