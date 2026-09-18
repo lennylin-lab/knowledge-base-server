@@ -134,5 +134,8 @@ def test_committed_example_file_parses() -> None:
     servers = load_mcp_config(REPO_ROOT / "mcp.json.example")
 
     assert set(servers) == {"context7", "websearch"}
-    assert servers["context7"].command == "npx"
+    # The committed example shows the container-deploy shape: stdio servers
+    # reach the app through supergateway sidecars (docs/mcp-sidecars.md), so
+    # both entries are the "url" form.
+    assert servers["context7"].url == "http://mcp-context7:9300/mcp"
     assert servers["websearch"].url == "https://mcp.example/search/mcp"
