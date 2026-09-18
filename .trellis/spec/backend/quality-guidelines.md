@@ -181,9 +181,13 @@ that reproduces the bug first.
    dimension untouched.
 8. No secrets or tokens in code, logs, or test fixtures (use env/Settings).
 9. Model names and `base_url` come from `Settings` — no literals in
-   `src/`. SDK timeout/retry defaults are the one exception: they live as
-   provider-layer constants in `llm/` (`_REQUEST_TIMEOUT`,
-   `_MAX_RETRIES` — same defaults across embeddings and chat).
+   `src/`. SDK timeout/retry budgets also come from `Settings`
+   (`CHAT_REQUEST_TIMEOUT` default 300s, `CHAT_MAX_RETRIES` default 1 —
+   sized for long non-streaming structured outputs, which retrying
+   multi-minute would only waste budget on; embeddings keeps its own
+   tighter 60s budget in `llm/embeddings.py`). They are injected at the
+   single `AsyncOpenAI` construction site in `llm/models.py` — never
+   hardcoded at call sites.
 10. Prompt changes edit files under `agents/prompts/` (reviewable diff),
     not inline f-strings buried in Python.
 
