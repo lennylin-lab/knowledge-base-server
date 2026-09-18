@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Verify retries/timeouts still live only in llm/"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Verify error taxonomy unchanged"}

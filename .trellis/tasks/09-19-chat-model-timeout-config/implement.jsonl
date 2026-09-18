@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Single construction site for timeouts/retries in llm/; toolchain gates"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Provider failure taxonomy and SSE error dialect must stay intact"}
