@@ -114,6 +114,9 @@ run; include them with `uv run pytest -m live_llm --override-ini='addopts='`.
 
 All settings come from the `KB_*` environment variables (or `.env`); see
 `.env.example` and `src/app/core/config.py`. Nothing is hardcoded in `src/`.
+External MCP tools are configured via `mcp.json` (see `mcp.json.example`);
+stdio/npx-style servers are bridged to HTTP by opt-in sidecars — see
+[`docs/mcp-sidecars.md`](docs/mcp-sidecars.md).
 
 ## Repository layout
 

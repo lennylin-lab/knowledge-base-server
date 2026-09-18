@@ -50,6 +50,21 @@ services:
       timeout: 3s
       retries: 12
 
+  # stdio→HTTP MCP sidecar (opt-in): docker compose --profile mcp up -d --build
+  # mcp-context7. Serves http://127.0.0.1:9300/mcp for the host-run API; the
+  # app-side mcp.json entry is the "url" form. See docs/mcp-sidecars.md.
+  mcp-context7:
+    profiles: ["mcp"]
+    build:
+      context: ./docker/mcp-sidecar
+      args:
+        SUPERGATEWAY_VERSION: "3.4.3"
+        MCP_PACKAGE: "@upstash/context7-mcp"
+        MCP_VERSION: "4.1.1"
+    image: kb-mcp-context7:supergateway-3.4.3
+    ports:
+      - "127.0.0.1:9300:9300"
+
 volumes:
   pgdata:
   esdata:

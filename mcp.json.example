@@ -1,8 +1,7 @@
 {
   "mcpServers": {
     "context7": {
-      "command": "npx",
-      "args": ["-y", "@upstash/context7-mcp"]
+      "url": "http://mcp-context7:9300/mcp"
     },
     "websearch": {
       "url": "https://mcp.example/search/mcp"

@@ -22,6 +22,10 @@ htmlcov/
 # MCP server config (may hold real API keys in `env`); copy from mcp.json.example
 mcp.json
 
+# Production mount point for the app's mcp.json (docker-compose.prod.yml);
+# contents are operator-local, same secret rules as mcp.json
+mcp-config/
+
 # Claude Code local settings (machine-specific) and transient temp files
 .claude/settings.local.json
 .claude/*.tmp.*

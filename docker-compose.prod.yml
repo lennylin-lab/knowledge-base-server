@@ -52,6 +52,11 @@ services:
       KB_DATABASE_URL: postgresql+asyncpg://kb:kb@postgres:5432/kb
       KB_ELASTICSEARCH_URL: http://elasticsearch:9200
       KB_REDIS_URL: redis://redis:6379
+      # Bind-mounted below. An empty (or absent, auto-created) ./mcp-config
+      # dir means "no mcp.json" — MCP stays disabled, startup stays clean.
+      KB_MCP_CONFIG_PATH: /mcp-config/mcp.json
+    volumes:
+      - ./mcp-config:/mcp-config:ro
     ports:
       - "${KB_APP_PORT:-8000}:8000"
     depends_on:
@@ -80,6 +85,22 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+
+  # stdio→HTTP MCP sidecar (opt-in, built locally from this checkout — not in
+  # the GHCR pipeline): docker compose -f docker-compose.prod.yml --profile mcp
+  # up -d --build mcp-context7. The app reaches it on the compose network at
+  # http://mcp-context7:9300/mcp (mcp.json "url" entry); no host port is
+  # published. See docs/mcp-sidecars.md for the full setup.
+  mcp-context7:
+    profiles: ["mcp"]
+    build:
+      context: ./docker/mcp-sidecar
+      args:
+        SUPERGATEWAY_VERSION: "3.4.3"
+        MCP_PACKAGE: "@upstash/context7-mcp"
+        MCP_VERSION: "4.1.1"
+    image: kb-mcp-context7:supergateway-3.4.3
+    restart: unless-stopped
 
 volumes:
   pgdata:
