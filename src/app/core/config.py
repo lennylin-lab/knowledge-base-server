@@ -111,6 +111,14 @@ class Settings(BaseSettings):
     # pre-carry service (no sources write, no first batch, no preamble);
     # stored sources are simply not carried.
     CHAT_SOURCES_CARRY_ENABLED: bool = True
+    # SDK client budget for chat-model calls (non-streaming structured output
+    # like draft/associations can run multi-minute against slow models, so the
+    # default is generous and retries stay low — retrying a timed-out
+    # multi-minute generation mostly wastes budget). Chat streaming is
+    # insensitive to total duration. Embeddings keep their own tighter SDK
+    # constants (short calls).
+    CHAT_REQUEST_TIMEOUT: float = 300.0
+    CHAT_MAX_RETRIES: int = 1
 
     # --- MCP extension ---
     # Path to a Claude-Desktop-style `{"mcpServers": {...}}` file; relative
