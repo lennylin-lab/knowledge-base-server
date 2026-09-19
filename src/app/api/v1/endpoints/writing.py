@@ -12,7 +12,7 @@ from fastapi import APIRouter
 from sse_starlette.sse import EventSourceResponse
 
 from app.api.deps import ChatScope, WritingServiceDep
-from app.api.v1.endpoints.chat import to_sse
+from app.api.v1.endpoints.chat_sse import to_sse
 from app.schemas.writing import WritingRequest
 
 router = APIRouter()

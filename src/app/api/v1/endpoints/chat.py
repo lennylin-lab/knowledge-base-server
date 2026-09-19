@@ -10,68 +10,14 @@ draining the generator, so anything that must fail with a clean envelope
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
-
 from fastapi import APIRouter
 from sse_starlette.sse import EventSourceResponse
 
 from app.api.deps import ChatScope, ChatServiceDep
-from app.api.v1.endpoints.sse import primed_sse as _shared_primed_sse
-from app.api.v1.endpoints.sse import to_sse as _shared_to_sse
-from app.api.v1.endpoints.sse import to_sse_event as _shared_to_sse_event
-from app.schemas.chat import (
-    AnswerDeltaEvent,
-    ChatRequest,
-    ChatStreamEvent,
-    DoneEvent,
-    ErrorEvent,
-    QueryRewrittenEvent,
-    RunStartedEvent,
-    SourcesEvent,
-    StatusEvent,
-    ToolCallFinishedEvent,
-    ToolCallStartedEvent,
-)
+from app.api.v1.endpoints.chat_sse import primed_sse
+from app.schemas.chat import ChatRequest
 
 router = APIRouter()
-
-_EVENT_NAMES: dict[type[ChatStreamEvent], str] = {
-    RunStartedEvent: "run_started",
-    SourcesEvent: "sources",
-    AnswerDeltaEvent: "answer_delta",
-    DoneEvent: "done",
-    ErrorEvent: "error",
-    StatusEvent: "status",
-    ToolCallStartedEvent: "tool_call_started",
-    ToolCallFinishedEvent: "tool_call_finished",
-    QueryRewrittenEvent: "query_rewritten",
-}
-
-
-def to_sse_event(event: ChatStreamEvent) -> dict[str, str]:
-    """Serialize one typed event to sse-starlette's dict shape.
-
-    The event name is the discriminator; the payload is model-serialized JSON
-    so clients parse one consistent shape per event. Public because every
-    endpoint streaming the chat event vocabulary shares it (writing today):
-    one wire format, one place. The implementation lives in the shared `sse`
-    module alongside the agent streams' serializer.
-    """
-    return _shared_to_sse_event(event, _EVENT_NAMES)
-
-
-async def to_sse(events: AsyncIterator[ChatStreamEvent]) -> AsyncIterator[dict[str, str]]:
-    """Serialize a typed event stream to sse-starlette's dict shape."""
-    async for frame in _shared_to_sse(events, _EVENT_NAMES):
-        yield frame
-
-
-async def _primed_sse(
-    first: ChatStreamEvent, rest: AsyncIterator[ChatStreamEvent]
-) -> AsyncIterator[dict[str, str]]:
-    """`to_sse` with the first event already materialized (see `chat`)."""
-    async for frame in _shared_primed_sse(first, rest, _EVENT_NAMES):
-        yield frame
 
 
 @router.post("", response_class=EventSourceResponse, response_model=None)
@@ -88,4 +34,4 @@ async def chat(
     # raise here to become a JSON envelope — inside the response it could
     # only ever be a broken stream.
     first = await events.__anext__()
-    return EventSourceResponse(_primed_sse(first, events))
+    return EventSourceResponse(primed_sse(first, events))

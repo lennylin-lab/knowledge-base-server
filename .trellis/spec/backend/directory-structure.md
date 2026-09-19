@@ -194,10 +194,12 @@ Key points:
   document create/update → `deps.py` enqueuer → `rag/indexer.run_indexing`.
 - **Prompt templates** (`agents/prompts/`) are versioned assets — changing a
   prompt is a reviewable code change, not a runtime config tweak.
-- **SSE endpoints streaming the chat event vocabulary** (writing, later
-  siblings) reuse `to_sse`/`_EVENT_NAMES` from `api/v1/endpoints/chat.py` —
-  it owns that wire format (payloads in `schemas/chat.py`). Hoist to a
-  neutral `api/` helper when a third streamer appears.
+- **SSE wire serialization** splits by vocabulary: generic frame encoding lives
+  in `api/v1/endpoints/sse.py` (`to_sse_event`/`to_sse`/`primed_sse`);
+  chat-vocabulary streams import the typed facade from
+  `api/v1/endpoints/chat_sse.py` (payloads in `schemas/chat.py`); agent
+  streams keep a local `_EVENT_NAMES` map and call the shared `sse` helpers
+  directly (see `documents.py`, `operations.py`).
 - **Three agent shapes are now reference patterns**: QA (streaming,
   retrieval-first tool), summarize (sync plain text, map-reduce),
   association (sync structured output over pre-gathered deterministic
