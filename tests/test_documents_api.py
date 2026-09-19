@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import hashlib
+
 import pytest
 
 pytestmark = pytest.mark.db
 
 FM_DOC = "---\ntitle: Contract Note\ntags: [api, smoke]\n---\n\n# Body\n"
 NO_FM_DOC = "Just some markdown, no front matter."
+FM_DOC_HASH = hashlib.sha256(FM_DOC.encode("utf-8")).hexdigest()
 
 
 async def test_create_document_returns_201_and_derived_columns(db_client):
@@ -65,6 +68,49 @@ async def test_get_document_returns_200_with_content(db_client):
     assert resp.status_code == 200
     assert resp.json()["content"] == FM_DOC
     assert resp.json()["title"] == "Contract Note"
+    assert resp.json()["content_hash"] == FM_DOC_HASH
+
+
+async def test_get_document_list_excludes_content_hash(db_client):
+    await db_client.post("/api/v1/documents", json={"content": FM_DOC})
+
+    resp = await db_client.get("/api/v1/documents")
+
+    assert resp.status_code == 200
+    assert "content_hash" not in resp.json()["items"][0]
+
+
+async def test_patch_document_with_matching_expected_hash_returns_200(db_client):
+    created = (await db_client.post("/api/v1/documents", json={"content": FM_DOC})).json()
+
+    resp = await db_client.patch(
+        f"/api/v1/documents/{created['id']}",
+        json={"content": "new body", "expected_content_hash": FM_DOC_HASH},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["index_status"] == "pending"
+
+
+async def test_patch_document_with_stale_expected_hash_returns_409_and_keeps_document(db_client):
+    created = (await db_client.post("/api/v1/documents", json={"content": FM_DOC})).json()
+    stale_hash = hashlib.sha256(b"stale").hexdigest()
+
+    resp = await db_client.patch(
+        f"/api/v1/documents/{created['id']}",
+        json={"content": "new body", "expected_content_hash": stale_hash},
+    )
+
+    assert resp.status_code == 409
+    error = resp.json()["error"]
+    assert error["code"] == "conflict"
+    assert error["details"]["expected_content_hash"] == stale_hash
+    assert error["details"]["actual_content_hash"] == FM_DOC_HASH
+
+    after = (await db_client.get(f"/api/v1/documents/{created['id']}")).json()
+    assert after["content"] == FM_DOC
+    assert after["title"] == "Contract Note"
+    assert after["index_status"] == "pending"  # untouched: still the create-time status
 
 
 async def test_get_missing_document_returns_404_envelope(db_client):

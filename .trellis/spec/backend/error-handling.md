@@ -39,6 +39,14 @@ class ConflictError(AppError):
     code = "conflict"
 
 
+# Optimistic-concurrency convention (established 2026-09-19, documents):
+# `expected_*` fields on update payloads are guards, not changes — they never
+# satisfy "at least one field" validation, are checked BEFORE any mutation
+# (no partial writes, no reindex enqueue on rejection), and a NULL/guard-
+# unknown stored value means "skip the check" rather than conflict. Precedents:
+# operations `expected_base_document_version`, documents `expected_content_hash`.
+
+
 class ValidationError(AppError):
     status_code = 422
     code = "validation_failed"

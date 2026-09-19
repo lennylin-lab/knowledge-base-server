@@ -10,7 +10,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import NotFoundError, ValidationError
+from app.core.exceptions import ConflictError, NotFoundError, ValidationError
 from app.models.document import Document, IndexStatus
 from app.models.tenant import DEFAULT_TENANT_ID
 from app.schemas.document import DocumentCreate, DocumentUpdate
@@ -525,6 +525,80 @@ async def test_null_content_hash_is_treated_as_changed(db_session):
     document = await db_session.get(Document, created.id)
     assert document is not None
     assert document.content_hash == hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+async def test_expected_hash_against_null_stored_hash_does_not_conflict(db_session):
+    service = make_service(db_session)
+    content = "pre-backfill body"
+    created = await service.create_document(
+        DocumentCreate(content=content), tenant_id=DEFAULT_TENANT_ID
+    )
+    document = await db_session.get(Document, created.id)
+    assert document is not None
+    document.content_hash = None
+    await db_session.flush()
+
+    stale_hash = hashlib.sha256(b"whatever").hexdigest()
+    await service.update_document(
+        created.id,
+        DocumentUpdate(content="new body", expected_content_hash=stale_hash),
+        tenant_id=DEFAULT_TENANT_ID,
+    )
+
+    document = await db_session.get(Document, created.id)
+    assert document is not None
+    assert document.content == "new body"
+
+
+async def test_update_with_matching_expected_hash_applies(db_session):
+    service = make_service(db_session)
+    content = "---\ntitle: Baseline\n---\nbody"
+    created = await service.create_document(
+        DocumentCreate(content=content), tenant_id=DEFAULT_TENANT_ID
+    )
+
+    updated = await service.update_document(
+        created.id,
+        DocumentUpdate(
+            content="new body",
+            expected_content_hash=hashlib.sha256(content.encode("utf-8")).hexdigest(),
+        ),
+        tenant_id=DEFAULT_TENANT_ID,
+    )
+
+    assert updated.index_status == IndexStatus.PENDING
+    document = await db_session.get(Document, created.id)
+    assert document is not None
+    assert document.content == "new body"
+
+
+async def test_update_with_stale_expected_hash_raises_conflict_and_leaves_document(db_session):
+    captured: list[tuple[UUID, UUID, datetime]] = []
+    service = DocumentService(db_session, enqueuer=capture_enqueues(captured))
+    content = "---\ntitle: Baseline\n---\nbody"
+    created = await service.create_document(
+        DocumentCreate(content=content), tenant_id=DEFAULT_TENANT_ID
+    )
+    stale_hash = hashlib.sha256(b"stale").hexdigest()
+    captured.clear()
+
+    with pytest.raises(ConflictError) as exc_info:
+        await service.update_document(
+            created.id,
+            DocumentUpdate(content="new body", expected_content_hash=stale_hash),
+            tenant_id=DEFAULT_TENANT_ID,
+        )
+
+    assert exc_info.value.details == {
+        "expected_content_hash": stale_hash,
+        "actual_content_hash": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+    }
+    document = await db_session.get(Document, created.id)
+    assert document is not None
+    assert document.content == content
+    assert document.title == "Baseline"
+    assert document.index_status is IndexStatus.PENDING
+    assert captured == []
 
 
 async def test_skipped_update_does_not_bump_updated_at(db_session):

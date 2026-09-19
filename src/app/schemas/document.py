@@ -23,6 +23,10 @@ class DocumentUpdate(BaseModel):
 
     content: str | None = Field(default=None, min_length=1)
     title: str | None = None
+    # Optimistic-concurrency guard: when provided, the write is rejected with
+    # 409 unless it matches the stored content_hash. Absent = last-write-wins.
+    # It is a guard, not a change: it never satisfies the one-field rule.
+    expected_content_hash: str | None = None
 
     @model_validator(mode="after")
     def _require_one_field(self) -> Self:
@@ -48,6 +52,9 @@ class DocumentReadDetail(DocumentRead):
     """Single-document view: everything in `DocumentRead` plus content."""
 
     content: str
+    # NULL = pre-backfill row whose hash was never computed ("unknown");
+    # clients should skip concurrent-write validation in that case.
+    content_hash: str | None
 
 
 class DocumentPage(BaseModel):

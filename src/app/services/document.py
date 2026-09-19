@@ -13,7 +13,7 @@ import yaml
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.cache import SEARCH_EPOCH_KEY, Cache
-from app.core.exceptions import NotFoundError, ValidationError
+from app.core.exceptions import ConflictError, NotFoundError, ValidationError
 from app.models.document import Document, IndexStatus
 from app.repositories.document import DocumentRepository
 from app.schemas.document import (
@@ -202,6 +202,23 @@ class DocumentService:
         covers them) AND `index_status` is DONE.
         """
         document = await self._get_or_raise(doc_id, tenant_id=tenant_id)
+        # Optimistic-concurrency guard, evaluated before any mutation: a stale
+        # expected hash rejects the write with 409 and leaves the document
+        # (and its index status) untouched. A NULL stored hash — pre-backfill
+        # row — is "unknown", so the guard does not fire (acceptance: never
+        # 409 against unknown).
+        if (
+            payload.expected_content_hash is not None
+            and document.content_hash is not None
+            and document.content_hash != payload.expected_content_hash
+        ):
+            raise ConflictError(
+                f"Document {doc_id} was modified since it was read",
+                details={
+                    "expected_content_hash": payload.expected_content_hash,
+                    "actual_content_hash": document.content_hash,
+                },
+            )
         reindex = True
 
         if payload.content is not None:
