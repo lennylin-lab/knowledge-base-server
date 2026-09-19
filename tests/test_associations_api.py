@@ -91,13 +91,33 @@ async def test_associations_streams_result_with_candidate_metadata_only(
     assert resp.status_code == 200
     assert resp.headers["content-type"].startswith("text/event-stream")
     events = parse_sse(resp.text)
-    # Atomic structured output: no partial association events, no progress.
-    assert [name for name, _ in events] == ["run_started", "associations", "done"]
+    # One association_item per streamed pick (the hallucinated id is dropped
+    # before emission and never appears on the wire), then the full result.
+    assert [name for name, _ in events] == [
+        "run_started",
+        "association_item",
+        "associations",
+        "done",
+    ]
     run_started = events[0][1]
     assert run_started["kind"] == "associations"
     assert run_started["document_id"] == kotlin["id"]
     assert run_started["run_id"]
-    body = events[1][1]
+    streamed_item = events[1][1]
+    assert set(streamed_item) == {
+        "run_id",
+        "position",
+        "document_id",
+        "title",
+        "tags",
+        "reason",
+        "signal",
+    }
+    assert streamed_item["position"] == 1
+    assert streamed_item["document_id"] == python["id"]
+    assert streamed_item["reason"] == "Neighboring language notes."
+    assert streamed_item["run_id"] == run_started["run_id"]
+    body = events[2][1]
     assert set(body) == {"document_id", "associations", "model", "latency_ms"}
     assert body["document_id"] == kotlin["id"]
     assert body["model"] == MODEL_NAME
@@ -112,7 +132,7 @@ async def test_associations_streams_result_with_candidate_metadata_only(
     assert item["tags"] == ["python"]
     assert item["reason"] == "Neighboring language notes."
     assert "cosine distance" in item["signal"]
-    done = events[2][1]
+    done = events[3][1]
     assert done["run_id"] == run_started["run_id"]
     assert done["outcome"] == "success"
     assert len(prompts) == 1  # exactly one model call

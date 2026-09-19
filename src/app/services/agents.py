@@ -3,10 +3,14 @@
 Summarize and association compute one result per run, never persisted, and
 stream it as typed SSE events (design: agent stream) — summarize runs
 chunk-aware passes — long documents map-reduce style with the production
-chunker (one model pass per chunk, sequentially, then one combine pass) with
-a progress event per pass; association gathers its deterministic candidates
+chunker (one model pass per chunk, sequentially, then one combine pass) with a
+progress event per pass, and the user-visible final pass streamed as
+`summary_delta` fragments; association gathers its deterministic candidates
 (pgvector neighbors + tag overlap) BEFORE any model call, so the LLM only
-curates what the database surfaced, and its structured output stays atomic.
+curates what the database surfaced, and its structured output is streamed as
+`association_item` events — one per joined pick, with a trailing hold-back so
+a still-truncating partial-JSON element is never emitted (everything joins
+back onto deterministic metadata; hallucinated ids are never streamed).
 Plain-coroutine wrappers drain the streams for sync callers. Writing streams
 suggestions over chat's SSE event vocabulary, with `ChatService.ask`'s stream
 discipline: run_id binding, sources flushed per tool call, and nothing may
@@ -16,7 +20,8 @@ escape `suggest` once the first event is yielded.
 from __future__ import annotations
 
 import time
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
+from dataclasses import dataclass
 from uuid import UUID, uuid4
 
 import openai
@@ -30,7 +35,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.agents.association import (
     AssociationCandidate,
     AssociationDeps,
-    AssociationsOutput,
+    AssociationPick,
     build_association_agent,
     render_association_prompt,
 )
@@ -58,7 +63,9 @@ from app.schemas.agent_stream import (
     AgentDoneEvent,
     AgentRunStartedEvent,
     AgentStreamEvent,
+    AssociationItemEvent,
     AssociationsResultEvent,
+    SummaryDeltaEvent,
     SummaryProgressEvent,
     SummaryResultEvent,
 )
@@ -77,6 +84,16 @@ from app.schemas.search import SearchHit
 from app.services.stream_bridge import RunEventBridge
 
 logger = structlog.get_logger(__name__)
+
+
+@dataclass(slots=True)
+class _StreamedPass:
+    """Sink for one streamed model pass: filled by `_stream_final_pass` as it
+    is consumed, read by the caller once the generator is exhausted."""
+
+    text: str = ""
+    input_tokens: int = 0
+    output_tokens: int = 0
 
 
 class SummarizeService:
@@ -196,11 +213,17 @@ class SummarizeService:
                 yield SummaryProgressEvent(
                     phase="map_pass", pass_index=1, passes_total=passes_total
                 )
-                summary, tokens_in, tokens_out = await self._run_pass(
+                streamed = _StreamedPass()
+                async for delta in self._stream_final_pass(
                     deps,
                     render_document_prompt(deps, chunks[0], max_tokens=self._summary_max_tokens),
                     max_tokens=self._summary_max_tokens,
-                )
+                    run_id=run_id,
+                    outcome=streamed,
+                ):
+                    yield delta
+                summary = streamed.text
+                tokens_in, tokens_out = streamed.input_tokens, streamed.output_tokens
                 # Fixed grammar: the reduce phase is announced even when the
                 # whole document was one pass — no separate model call behind it.
                 yield SummaryProgressEvent(
@@ -229,13 +252,19 @@ class SummarizeService:
                 yield SummaryProgressEvent(
                     phase="reduce_pass", pass_index=passes_total, passes_total=passes_total
                 )
-                summary, tokens_in, tokens_out = await self._run_pass(
+                streamed = _StreamedPass()
+                async for delta in self._stream_final_pass(
                     deps,
                     render_reduce_prompt(
                         deps, section_summaries, max_tokens=self._summary_max_tokens
                     ),
                     max_tokens=self._summary_max_tokens,
-                )
+                    run_id=run_id,
+                    outcome=streamed,
+                ):
+                    yield delta
+                summary = streamed.text
+                tokens_in, tokens_out = streamed.input_tokens, streamed.output_tokens
                 runs = len(chunks) + 1
             input_tokens += tokens_in
             output_tokens += tokens_out
@@ -334,6 +363,36 @@ class SummarizeService:
         )
         usage = result.usage
         return result.output, usage.input_tokens or 0, usage.output_tokens or 0
+
+    async def _stream_final_pass(
+        self,
+        deps: SummarizeDeps,
+        prompt: str,
+        *,
+        max_tokens: int,
+        run_id: str,
+        outcome: _StreamedPass,
+    ) -> AsyncIterator[SummaryDeltaEvent]:
+        """The user-visible pass, streamed: yields one `summary_delta` per
+        non-empty provider fragment and fills `outcome` (text + token usage)
+        by the time the generator is exhausted. The final `summary` result
+        event carries exactly the concatenation of the deltas.
+        """
+        async with self._agent.run_stream(
+            prompt,
+            deps=deps,
+            model_settings=ModelSettings(max_tokens=max_tokens),
+        ) as result:
+            pieces: list[str] = []
+            async for delta in result.stream_text(delta=True, debounce_by=None):
+                if not delta:
+                    continue
+                pieces.append(delta)
+                yield SummaryDeltaEvent(run_id=run_id, text=delta)
+            usage = result.usage
+            outcome.text = "".join(pieces)
+            outcome.input_tokens = usage.input_tokens or 0
+            outcome.output_tokens = usage.output_tokens or 0
 
 
 def _as_app_error(exc: Exception) -> AppError:
@@ -486,8 +545,49 @@ class AssociationService:
         deps = AssociationDeps(title=document.title, tags=list(document.tags))
         prompt = render_association_prompt(deps, excerpt, candidates)
         log.info("agent_run_started", agent="association", candidate_count=len(candidates))
+        by_id = {candidate.document_id: candidate for candidate in candidates}
+        seen: set[UUID] = set()
+        items: list[AssociationItem] = []
+        dropped = 0
+        usage_input_tokens = 0
+        usage_output_tokens = 0
+
+        def _emit_item(item: AssociationItem) -> AssociationItemEvent:
+            return AssociationItemEvent(
+                run_id=run_id,
+                position=len(items),
+                document_id=item.document_id,
+                title=item.title,
+                tags=list(item.tags),
+                reason=item.reason,
+                signal=item.signal,
+            )
+
         try:
-            result = await self._agent.run(prompt, deps=deps)
+            async with self._agent.run_stream(prompt, deps=deps) as result:
+                # Hold-back rule: pydantic's partial validation can expose a
+                # trailing list element that is still receiving tokens, so an
+                # item is only joined/emitted once a strictly later index has
+                # appeared in a snapshot — it is complete and final by then.
+                async for snapshot in result.stream_output(debounce_by=None):
+                    while len(items) + dropped < len(snapshot.associations) - 1:
+                        item = _join_pick(snapshot.associations[len(items) + dropped], by_id, seen)
+                        if item is None:
+                            dropped += 1
+                            continue
+                        items.append(item)
+                        yield _emit_item(item)
+                output = await result.get_output()
+                for pick in output.associations[len(items) + dropped :]:
+                    item = _join_pick(pick, by_id, seen)
+                    if item is None:
+                        dropped += 1
+                        continue
+                    items.append(item)
+                    yield _emit_item(item)
+                usage = result.usage
+                usage_input_tokens = usage.input_tokens or 0
+                usage_output_tokens = usage.output_tokens or 0
         except Exception as exc:
             failure = _as_app_error(exc)
             # Run-level audit event closing the agent_run_started trail (see
@@ -502,8 +602,6 @@ class AssociationService:
             )
             raise failure from exc
 
-        items, dropped = _join_selections(result.output, candidates)
-        usage = result.usage
         latency_ms = round((time.perf_counter() - started) * 1000, 2)
         log.info(
             "agent_run_finished",
@@ -511,8 +609,8 @@ class AssociationService:
             model=self._model_name,
             outcome="success",
             latency_ms=latency_ms,
-            input_tokens=usage.input_tokens or 0,
-            output_tokens=usage.output_tokens or 0,
+            input_tokens=usage_input_tokens,
+            output_tokens=usage_output_tokens,
             candidate_count=len(candidates),
             selected_count=len(items),
             dropped_count=dropped,
@@ -627,36 +725,31 @@ def _merge_candidates(
     return list(candidates.values())
 
 
-def _join_selections(
-    output: AssociationsOutput, candidates: Sequence[AssociationCandidate]
-) -> tuple[list[AssociationItem], int]:
-    """Join the LLM's picks back onto candidate metadata.
+def _join_pick(
+    pick: AssociationPick,
+    by_id: Mapping[UUID, AssociationCandidate],
+    seen: set[UUID],
+) -> AssociationItem | None:
+    """Join one LLM pick onto its candidate metadata.
 
-    Every returned item carries the deterministic title/tags/signal gathered
+    Every emitted item carries the deterministic title/tags/signal gathered
     before the run — the model contributes only the selection and the reason.
     Picks whose id was not a candidate, or repeats an already-joined one, are
-    dropped; the count (never the content) is returned for logging.
+    dropped (`None`); the streamer relies on this so a hallucinated pick is
+    never emitted incrementally either, and the drop count (never the
+    content) feeds the run log.
     """
-    by_id = {candidate.document_id: candidate for candidate in candidates}
-    items: list[AssociationItem] = []
-    seen: set[UUID] = set()
-    dropped = 0
-    for pick in output.associations:
-        candidate = by_id.get(pick.document_id)
-        if candidate is None or pick.document_id in seen:
-            dropped += 1
-            continue
-        seen.add(pick.document_id)
-        items.append(
-            AssociationItem(
-                document_id=candidate.document_id,
-                title=candidate.title,
-                tags=list(candidate.tags),
-                reason=pick.reason,
-                signal=candidate.signal,
-            )
-        )
-    return items, dropped
+    candidate = by_id.get(pick.document_id)
+    if candidate is None or pick.document_id in seen:
+        return None
+    seen.add(pick.document_id)
+    return AssociationItem(
+        document_id=candidate.document_id,
+        title=candidate.title,
+        tags=list(candidate.tags),
+        reason=pick.reason,
+        signal=candidate.signal,
+    )
 
 
 def _drain(pending: list[list[SearchHit]]) -> list[list[SearchHit]]:

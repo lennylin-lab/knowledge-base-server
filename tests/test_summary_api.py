@@ -17,13 +17,18 @@ from httpx import ASGITransport, AsyncClient
 from pydantic import SecretStr
 from pydantic_ai.exceptions import ModelHTTPError
 from pydantic_ai.messages import ModelResponse
-from pydantic_ai.models.function import FunctionModel
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.api.deps import build_summarize_service, get_summarize_service
 from app.models.tenant import DEFAULT_TENANT_ID
 from app.services.agents import SummarizeService
-from fakes import FakeCache, hermetic_settings, parse_sse, scripted_summarize_model
+from fakes import (
+    FakeCache,
+    failing_summarize_model,
+    hermetic_settings,
+    parse_sse,
+    scripted_summarize_model,
+)
 
 # Stands in for Settings.CHAT_MODEL at wiring time; deps.py passes that
 # setting into the service, and the response must echo it back.
@@ -72,27 +77,35 @@ async def test_summary_streams_scripted_result_and_terminal_done(
     assert resp.status_code == 200
     assert resp.headers["content-type"].startswith("text/event-stream")
     events = parse_sse(resp.text)
-    # Fixed grammar: run_started → map_pass → reduce_pass → summary → done.
-    assert [name for name, _ in events] == [
-        "run_started",
-        "summary_progress",
-        "summary_progress",
-        "summary",
-        "done",
-    ]
+    names = [name for name, _ in events]
+    # Fixed grammar: run_started → map_pass → summary_delta* → reduce_pass →
+    # summary → done; the deltas concatenate to the final summary verbatim.
+    assert names[0] == "run_started"
+    assert names[1] == "summary_progress"
+    delta_count = names.index("summary_progress", 2) - 2
+    assert delta_count > 0
+    assert names[2 : 2 + delta_count] == ["summary_delta"] * delta_count
+    assert names[2 + delta_count :] == ["summary_progress", "summary", "done"]
     run_started = events[0][1]
     assert run_started["kind"] == "summary"
     assert run_started["document_id"] == created["id"]
     assert run_started["run_id"]
     assert events[1][1] == {"phase": "map_pass", "pass_index": 1, "passes_total": 2}
-    assert events[2][1] == {"phase": "reduce_pass", "pass_index": 2, "passes_total": 2}
-    result = events[3][1]
+    assert all(
+        data["run_id"] == run_started["run_id"] for name, data in events if name == "summary_delta"
+    )
+    assert (
+        "".join(data["text"] for name, data in events if name == "summary_delta")
+        == "Contract summary."
+    )
+    assert events[-3][1] == {"phase": "reduce_pass", "pass_index": 2, "passes_total": 2}
+    result = events[-2][1]
     assert set(result) == {"document_id", "summary", "model", "latency_ms"}
     assert result["document_id"] == created["id"]
     assert result["summary"] == "Contract summary."
     assert result["model"] == MODEL_NAME
     assert result["latency_ms"] >= 0
-    done = events[4][1]
+    done = events[-1][1]
     assert done["run_id"] == run_started["run_id"]
     assert done["outcome"] == "success"
     assert len(prompts) == 1  # short doc: exactly one model pass
@@ -114,15 +127,14 @@ async def test_summary_of_long_document_streams_map_passes_then_reduce(
 
     assert resp.status_code == 200
     events = parse_sse(resp.text)
-    assert [name for name, _ in events] == [
-        "run_started",
-        "summary_progress",
-        "summary_progress",
-        "summary_progress",
-        "summary_progress",
-        "summary",
-        "done",
-    ]
+    names = [name for name, _ in events]
+    # Map passes announce before their (non-streamed) run; only the reduce
+    # pass streams summary_delta fragments, before the final summary event.
+    assert names[0] == "run_started"
+    assert names[1:4] == ["summary_progress"] * 3
+    assert names[4] == "summary_progress"
+    assert names[5:-2] == ["summary_delta"] * (len(names) - 7)
+    assert names[-2:] == ["summary", "done"]
     progress = [data for name, data in events if name == "summary_progress"]
     assert [(p["phase"], p["pass_index"], p["passes_total"]) for p in progress] == [
         ("map_pass", 1, 4),
@@ -131,6 +143,9 @@ async def test_summary_of_long_document_streams_map_passes_then_reduce(
         ("reduce_pass", 4, 4),
     ]
     assert events[-2][1]["summary"] == "Final reduce."
+    assert (
+        "".join(data["text"] for name, data in events if name == "summary_delta") == "Final reduce."
+    )
     assert len(prompts) == 4  # 3 chunk passes + 1 combine through the endpoint
 
 
@@ -196,14 +211,16 @@ async def test_summary_stream_provider_failure_emits_single_terminal_error(
     created = (await db_client.post("/api/v1/documents", json={"content": FM_DOC})).json()
     prompts: list[str] = []
 
+    _failure = ModelHTTPError(
+        status_code=503, model_name="failing", body={"message": "upstream exploded"}
+    )
+
     async def failing(messages, info) -> ModelResponse:
         prompts.append("")
-        raise ModelHTTPError(
-            status_code=503, model_name="failing", body={"message": "upstream exploded"}
-        )
+        raise _failure
 
     app.dependency_overrides[get_summarize_service] = lambda: SummarizeService(
-        FunctionModel(failing, model_name="failing"),
+        failing_summarize_model(_failure),
         MODEL_NAME,
         session_factory=session_factory,
     )

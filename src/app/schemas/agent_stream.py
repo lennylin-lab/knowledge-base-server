@@ -53,6 +53,38 @@ class SummaryProgressEvent(BaseModel):
     passes_total: int
 
 
+class SummaryDeltaEvent(BaseModel):
+    """One verbatim fragment of the streamed final summary pass.
+
+    Emitted while the user-visible pass (the single pass, or the reduce pass
+    of a multi-chunk run) is generating, in provider order — a client
+    concatenating all `text` fragments gets exactly the `summary` field of the
+    final `summary` result event. Never emitted on cache hits (no model ran).
+    """
+
+    run_id: str
+    text: str
+
+
+class AssociationItemEvent(BaseModel):
+    """One complete curated association, streamed as soon as it is confirmed.
+
+    Carries the same deterministic metadata join as the final `associations`
+    result event (title/tags/signal gathered pre-LLM, plus the LLM reason), so
+    each item is final the moment it is emitted; `position` is 1-based and
+    matches the item's order in the final result. Hallucinated or duplicate
+    model picks are dropped BEFORE emission and never streamed.
+    """
+
+    run_id: str
+    position: int
+    document_id: UUID
+    title: str
+    tags: list[str]
+    reason: str
+    signal: str
+
+
 class SummaryResultEvent(SummaryResult):
     """The completed summary — the full `SummaryResult` payload, flat."""
 
@@ -104,7 +136,9 @@ class AgentDoneEvent(BaseModel):
 AgentStreamEvent = (
     AgentRunStartedEvent
     | SummaryProgressEvent
+    | SummaryDeltaEvent
     | SummaryResultEvent
+    | AssociationItemEvent
     | AssociationsResultEvent
     | DraftDeltaEvent
     | OperationDraftEvent

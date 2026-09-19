@@ -16,7 +16,6 @@ from pydantic_ai.messages import (
     ModelRequest,
     ModelResponse,
     TextPart,
-    ToolCallPart,
     ToolReturnPart,
     UserPromptPart,
 )
@@ -389,6 +388,7 @@ def scripted_summarize_model(
     outputs: Sequence[str],
     *,
     prompts: list[str] | None = None,
+    delta_count: int = 3,
 ) -> FunctionModel:
     """FunctionModel scripting tool-free summarize passes (plain text out).
 
@@ -396,11 +396,13 @@ def scripted_summarize_model(
     run makes more requests than scripted, so unexpected extra passes surface
     through `prompts`-length assertions instead of an opaque framework error.
     `prompts`, when given, collects each request's user prompt in order — the
-    observable for direct-vs-map-reduce phase checks.
+    observable for direct-vs-map-reduce phase checks. `delta_count` slices the
+    streamed text into that many verbatim fragments.
 
-    Built on `function` (not `stream_function`): the summarize path runs
-    `Agent.run`, which FunctionModel only supports via a non-streaming
-    `function`.
+    Built with BOTH functions: the service's map passes run `Agent.run`
+    (served by `function`), the user-visible final pass runs `run_stream`
+    (served by `stream_function`, fragmenting the same scripted text) — the
+    delta concatenation must equal the non-streaming result text.
     """
     scripted = list(outputs)
     seen = prompts if prompts is not None else []
@@ -410,7 +412,34 @@ def scripted_summarize_model(
         index = min(len(seen) - 1, len(scripted) - 1)
         return ModelResponse(parts=[TextPart(content=scripted[index])])
 
-    return FunctionModel(function, model_name="scripted-summarize")
+    async def stream_function(messages: list[ModelMessage], info: object) -> Any:
+        seen.append(_first_user_prompt(messages))
+        index = min(len(seen) - 1, len(scripted) - 1)
+        text = scripted[index]
+        cut = max(1, len(text) // delta_count)
+        pieces = [text[i : i + cut] for i in range(0, len(text), cut)] or [""]
+        for piece in pieces:
+            yield piece
+
+    return FunctionModel(function, stream_function=stream_function, model_name="scripted-summarize")
+
+
+def failing_summarize_model(fail: Exception) -> FunctionModel:
+    """FunctionModel whose every request (streamed or not) raises `fail`.
+
+    The summarize service's final pass now streams, so provider-failure tests
+    need the failure on BOTH paths: `Agent.run` (map passes) via `function`
+    and `run_stream` (the user-visible pass) via `stream_function`.
+    """
+
+    async def function(messages: list[ModelMessage], info: object) -> ModelResponse:
+        raise fail
+
+    async def stream_function(messages: list[ModelMessage], info: object) -> Any:
+        raise fail
+        yield  # pragma: no cover - makes the coroutine an async generator
+
+    return FunctionModel(function, stream_function=stream_function, model_name="failing")
 
 
 def scripted_rewrite_model(
@@ -495,27 +524,44 @@ def scripted_association_model(
     its length doubles as the model-call count. `fail` raises instead, for
     provider-failure mapping.
 
-    The output tool's name is read from `AgentInfo` (not hardcoded) so the
-    fake survives framework renaming of the tool.
+    Served as a *streamed* response (`stream_function`): the service runs the
+    association via `run_stream` + `stream_output`, so the tool-call argument
+    JSON streams as one fragment PER PICK plus a closing `]}` — the shape a
+    real provider produces, and the observable that lets tests pin the
+    incremental `association_item` emission and its hold-back rule. The
+    output tool's name is read from `AgentInfo` (not hardcoded) so the fake
+    survives framework renaming of the tool.
     """
-    payload = {"associations": [dict(pick) for pick in picks]}
 
-    async def function(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+    def fragments() -> list[str]:
+        if not picks:
+            return ["[]", "]"]
+        pieces: list[str] = ["""{"associations": ["""]
+        for index, pick in enumerate(picks):
+            piece = json.dumps(pick)
+            if index < len(picks) - 1:
+                piece += ","
+            pieces.append(piece)
+        pieces.append("]}")
+        return pieces
+
+    async def stream_function(messages: list[ModelMessage], info: AgentInfo) -> Any:
         if fail is not None:
             raise fail
         if prompts is not None:
             prompts.append(_first_user_prompt(messages))
         assert info.output_tools, "association agent must use structured output"
-        return ModelResponse(
-            parts=[
-                ToolCallPart(
-                    tool_name=info.output_tools[0].name,
-                    args=json.dumps(payload),
-                )
-            ]
-        )
+        yield {
+            0: DeltaToolCall(
+                name=info.output_tools[0].name,
+                json_args=None,
+                tool_call_id="call_association",
+            )
+        }
+        for fragment in fragments():
+            yield {0: DeltaToolCall(json_args=fragment)}
 
-    return FunctionModel(function, model_name="scripted-association")
+    return FunctionModel(stream_function=stream_function, model_name="scripted-association")
 
 
 def scripted_draft_model(

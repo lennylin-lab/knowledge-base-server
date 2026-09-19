@@ -26,6 +26,7 @@ from app.repositories.document_chunk import DocumentChunkRepository
 from app.schemas.agent_stream import (
     AgentDoneEvent,
     AgentRunStartedEvent,
+    AssociationItemEvent,
     AssociationsResultEvent,
     ErrorEvent,
 )
@@ -390,18 +391,28 @@ async def drain(events):
     return [event async for event in events]
 
 
-async def test_stream_success_emits_atomic_result_and_done(db_session, session_factory):
+async def test_stream_success_emits_items_then_result_and_done(db_session, session_factory):
     source = await make_document(db_session, ALPHA_SOURCE)
     neighbor = await make_document(db_session, ALPHA_NEIGHBOR)
+    sequel = await make_document(
+        db_session,
+        "---\ntitle: Alpha Sequel\ntags: [alpha]\n---\n\nMore on the zorblat alpha process.",
+    )
     service = make_service(
-        session_factory, scripted_association_model([pick(neighbor.id, "Streamed reason.")])
+        session_factory,
+        scripted_association_model(
+            [pick(neighbor.id, "Streamed reason."), pick(sequel.id, "Second reason.")]
+        ),
     )
 
     events = await drain(service.associate_document_stream(source.id, tenant_id=DEFAULT_TENANT_ID))
 
-    # Atomic structured output: no partial association events, no progress.
+    # One incremental item per pick (deterministic metadata joined), then the
+    # full result event, then the terminal done.
     assert [type(event) for event in events] == [
         AgentRunStartedEvent,
+        AssociationItemEvent,
+        AssociationItemEvent,
         AssociationsResultEvent,
         AgentDoneEvent,
     ]
@@ -409,12 +420,21 @@ async def test_stream_success_emits_atomic_result_and_done(db_session, session_f
     assert run_started.kind == "associations"
     assert run_started.document_id == source.id
     assert run_started.run_id
-    result = events[1]
-    assert [item.document_id for item in result.associations] == [neighbor.id]
-    assert result.associations[0].reason == "Streamed reason."
+    first, second = events[1], events[2]
+    assert (first.position, first.document_id, first.reason) == (
+        1,
+        neighbor.id,
+        "Streamed reason.",
+    )
+    assert first.title == "Alpha Companion"
+    assert second.position == 2
+    assert second.document_id == sequel.id
+    # Items and the final result carry the same joined payload.
+    result = events[3]
+    assert [item.document_id for item in result.associations] == [neighbor.id, sequel.id]
     assert result.model == MODEL_NAME
     assert result.latency_ms >= 0
-    done = events[2]
+    done = events[4]
     assert done.run_id == run_started.run_id
     assert done.outcome == "success"
     assert done.latency_ms == result.latency_ms

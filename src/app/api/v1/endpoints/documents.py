@@ -27,7 +27,9 @@ from app.schemas.agent_stream import (
     AgentDoneEvent,
     AgentRunStartedEvent,
     AgentStreamEvent,
+    AssociationItemEvent,
     AssociationsResultEvent,
+    SummaryDeltaEvent,
     SummaryProgressEvent,
     SummaryResultEvent,
 )
@@ -45,7 +47,9 @@ router = APIRouter()
 _EVENT_NAMES: dict[type[AgentStreamEvent], str] = {
     AgentRunStartedEvent: "run_started",
     SummaryProgressEvent: "summary_progress",
+    SummaryDeltaEvent: "summary_delta",
     SummaryResultEvent: "summary",
+    AssociationItemEvent: "association_item",
     AssociationsResultEvent: "associations",
     ErrorEvent: "error",
     AgentDoneEvent: "done",

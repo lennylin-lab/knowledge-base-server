@@ -220,8 +220,8 @@ the same discipline with their own event vocabulary
 
 | Stream | Event order |
 |--------|-------------|
-| summary | `run_started` (run_id, kind, document_id) → `summary_progress`* (phase `map_pass`/`reduce_pass`, 1-based `pass_index`, `passes_total` = map passes + 1; fixed grammar — also on single-pass summaries) → `summary` (full `SummaryResult` flat) → `done` |
-| associations | `run_started` → `associations` (full `AssociationsResult` flat; structured output stays atomic — no partial events) → `done` |
+| summary | `run_started` (run_id, kind, document_id) → `summary_progress`* (phase `map_pass`/`reduce_pass`, 1-based `pass_index`, `passes_total` = map passes + 1; fixed grammar — also on single-pass summaries) → `summary_delta`* (only around the user-visible final pass — the single pass or the reduce pass; map passes never stream; concatenation of all `text` fragments equals the final summary verbatim; never on cache hits) → `summary` (full `SummaryResult` flat) → `done` |
+| associations | `run_started` → `association_item`* (one per joined pick, incrementally streamed from the partial-JSON structured output; each carries deterministic candidate metadata + the LLM reason and is final when emitted — a trailing still-truncating element is held back until a later index or stream end proves it complete; hallucinated/duplicate ids are dropped BEFORE emission) → `associations` (full `AssociationsResult` flat, identical to the streamed items) → `done` |
 | draft | `run_started` → `draft_delta`* (raw output-tool JSON fragments forwarded verbatim, exactly once, in order — the client concatenates; no server-side partial-JSON parsing) → `draft` (`OperationDraftEvent`: operation_id, state, full `DraftContent` flat; the validated atomic result) → `done` |
 | all, failure after 200 | already-emitted events stand → exactly one `error` (chat's `ErrorEvent`, reused so there is one error dialect) → close |
 

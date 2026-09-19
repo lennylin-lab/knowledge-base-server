@@ -14,7 +14,6 @@ import httpx
 import openai
 import pytest
 from pydantic_ai.exceptions import ModelHTTPError
-from pydantic_ai.messages import ModelMessage, ModelResponse
 from pydantic_ai.models.function import FunctionModel
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from structlog.testing import capture_logs
@@ -25,13 +24,14 @@ from app.schemas.agent_stream import (
     AgentDoneEvent,
     AgentRunStartedEvent,
     ErrorEvent,
+    SummaryDeltaEvent,
     SummaryProgressEvent,
     SummaryResultEvent,
 )
 from app.schemas.document import DocumentCreate
 from app.services.agents import SummarizeService
 from app.services.document import DocumentService
-from fakes import FakeCache, scripted_summarize_model
+from fakes import FakeCache, failing_summarize_model, scripted_summarize_model
 
 pytestmark = pytest.mark.db
 
@@ -160,17 +160,14 @@ async def test_provider_failure_wraps_into_llm_provider_error_and_logs_failure(
 ):
     created = await make_document(db_session, SHORT_DOC)
 
-    async def failing(messages: list[ModelMessage], info: object) -> ModelResponse:
-        raise openai.APIStatusError(
-            "upstream exploded with secret detail",
-            response=httpx.Response(
-                500, request=httpx.Request("POST", "http://provider.test/v1/chat")
-            ),
-            body=None,
-        )
+    _failure = openai.APIStatusError(
+        "upstream exploded with secret detail",
+        response=httpx.Response(500, request=httpx.Request("POST", "http://provider.test/v1/chat")),
+        body=None,
+    )
 
     service = SummarizeService(
-        FunctionModel(failing, model_name="failing"),
+        failing_summarize_model(_failure),
         MODEL_NAME,
         session_factory=session_factory,
     )
@@ -190,17 +187,14 @@ async def test_provider_failure_wraps_into_llm_provider_error_and_logs_failure(
 async def test_rate_limit_failure_maps_to_llm_rate_limited(db_session, session_factory):
     created = await make_document(db_session, SHORT_DOC)
 
-    async def failing(messages: list[ModelMessage], info: object) -> ModelResponse:
-        raise openai.RateLimitError(
-            "rate limited after secret detail",
-            response=httpx.Response(
-                429, request=httpx.Request("POST", "http://provider.test/v1/chat")
-            ),
-            body=None,
-        )
+    _failure = openai.RateLimitError(
+        "rate limited after secret detail",
+        response=httpx.Response(429, request=httpx.Request("POST", "http://provider.test/v1/chat")),
+        body=None,
+    )
 
     service = SummarizeService(
-        FunctionModel(failing, model_name="failing"),
+        failing_summarize_model(_failure),
         MODEL_NAME,
         session_factory=session_factory,
     )
@@ -222,15 +216,14 @@ async def test_model_http_error_maps_to_llm_provider_error(db_session, session_f
     generic 500) — regression for the FunctionModel-only blind spot."""
     created = await make_document(db_session, SHORT_DOC)
 
-    async def failing(messages: list[ModelMessage], info: object) -> ModelResponse:
-        raise ModelHTTPError(
-            status_code=503,
-            model_name="failing",
-            body={"message": "upstream exploded"},
-        )
+    _failure = ModelHTTPError(
+        status_code=503,
+        model_name="failing",
+        body={"message": "upstream exploded"},
+    )
 
     service = SummarizeService(
-        FunctionModel(failing, model_name="failing"),
+        failing_summarize_model(_failure),
         MODEL_NAME,
         session_factory=session_factory,
     )
@@ -249,11 +242,10 @@ async def test_model_http_error_maps_to_llm_provider_error(db_session, session_f
 async def test_model_http_429_maps_to_llm_rate_limited(db_session, session_factory):
     created = await make_document(db_session, SHORT_DOC)
 
-    async def failing(messages: list[ModelMessage], info: object) -> ModelResponse:
-        raise ModelHTTPError(status_code=429, model_name="failing", body=None)
+    _failure = ModelHTTPError(status_code=429, model_name="failing", body=None)
 
     service = SummarizeService(
-        FunctionModel(failing, model_name="failing"),
+        failing_summarize_model(_failure),
         MODEL_NAME,
         session_factory=session_factory,
     )
@@ -301,10 +293,15 @@ async def test_stream_success_single_pass_emits_fixed_grammar(db_session, sessio
 
     events = await drain(service.summarize_document_stream(created.id, tenant_id=DEFAULT_TENANT_ID))
 
-    # Fixed grammar even for a single pass: one map + one reduce progress.
-    assert [type(event) for event in events] == [
-        AgentRunStartedEvent,
-        SummaryProgressEvent,
+    # Fixed grammar even for a single pass: one map + one reduce progress,
+    # with the streamed deltas of the (single) user-visible pass between them.
+    deltas = [event for event in events if isinstance(event, SummaryDeltaEvent)]
+    assert "".join(delta.text for delta in deltas) == "Streamed summary."
+    types = [type(event) for event in events]
+    assert types[0] is AgentRunStartedEvent
+    assert types[1] is SummaryProgressEvent
+    assert types[2 : 2 + len(deltas)] == [SummaryDeltaEvent] * len(deltas)
+    assert types[2 + len(deltas) :] == [
         SummaryProgressEvent,
         SummaryResultEvent,
         AgentDoneEvent,
@@ -313,14 +310,19 @@ async def test_stream_success_single_pass_emits_fixed_grammar(db_session, sessio
     assert run_started.kind == "summary"
     assert run_started.document_id == created.id
     assert run_started.run_id
+    assert all(delta.run_id == run_started.run_id for delta in deltas)
     assert events[1].model_dump() == {"phase": "map_pass", "pass_index": 1, "passes_total": 2}
-    assert events[2].model_dump() == {"phase": "reduce_pass", "pass_index": 2, "passes_total": 2}
-    result = events[3]
+    assert events[-3].model_dump() == {
+        "phase": "reduce_pass",
+        "pass_index": 2,
+        "passes_total": 2,
+    }
+    result = events[-2]
     assert result.summary == "Streamed summary."
     assert result.document_id == created.id
     assert result.model == MODEL_NAME
     assert result.latency_ms >= 0
-    done = events[4]
+    done = events[-1]
     assert done.run_id == run_started.run_id
     assert done.outcome == "success"
     assert done.latency_ms == result.latency_ms
@@ -371,13 +373,12 @@ async def test_stream_cache_hit_skips_progress_events_and_model_call(db_session,
 async def test_stream_provider_failure_emits_single_terminal_error(db_session, session_factory):
     created = await make_document(db_session, SHORT_DOC)
 
-    async def failing(messages: list[ModelMessage], info: object) -> ModelResponse:
-        raise ModelHTTPError(
-            status_code=503, model_name="failing", body={"message": "upstream exploded"}
-        )
+    _failure = ModelHTTPError(
+        status_code=503, model_name="failing", body={"message": "upstream exploded"}
+    )
 
     service = SummarizeService(
-        FunctionModel(failing, model_name="failing"),
+        failing_summarize_model(_failure),
         MODEL_NAME,
         session_factory=session_factory,
     )
