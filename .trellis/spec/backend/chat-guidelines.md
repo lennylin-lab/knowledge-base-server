@@ -530,3 +530,23 @@ and gateway outages never block the server.
 - Known gaps (2026-09-16): real-model embeddings e2e blocked on gateway
   per-provider credentials (issue #5); gateway's `embedding_dim_mismatch`
   enforcement not observable on the fake path.
+
+## Scenario: Citation replay contract on message reads
+
+Every assistant `ChatMessage` persists its run's retrieval hits in
+`sources` (JSONB, `SearchHit.model_dump(mode="json")` list). The read side
+exposes them through `MessageRead.sources` as slim `SourceRef` entries
+(`document_id`, `document_title`, `document_tags`, `chunk_index`).
+
+- **List position is the citation number**: `sources[0]` is `[1]` in the
+  answer text. Never add an explicit index field; ordering must match
+  retrieval order exactly or every historical citation points at the wrong
+  document.
+- **Project, never dump**: the stored dicts carry `content`, `score`,
+  `es_rank`, `vector_distance`, `es_score` — session-read responses must
+  not include them (payload bloat + retriever internals leak). Projection
+  lives in a `mode="before"` validator on `MessageRead.sources`; malformed
+  stored entries are skipped, never a 500.
+- Clients map `[n]` in the answer markdown to `sources[n-1].document_id`
+  to render citation links on history replay — same mapping the streamed
+  `sources` SSE events provide during the live run.
