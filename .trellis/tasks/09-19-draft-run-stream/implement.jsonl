@@ -1,0 +1,3 @@
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Toolchain gates; provider I/O always async; single model construction site"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Draft SSE event order, persistence-timing rule, priming pattern must stay intact"}
+{"file": ".trellis/spec/backend/chat-guidelines.md", "reason": "Stream discipline reference (chat already streams; same dialect)"}
