@@ -103,6 +103,14 @@ class Settings(BaseSettings):
     # cost) is reserved from CHAT_HISTORY_TOKEN_BUDGET when a summary is
     # injected, so turn growth can never evict the summary itself.
     CHAT_SUMMARY_MAX_TOKENS: int = 400
+    # Document summarize agent: hard output bound (prompt + API max_tokens).
+    # The reduce / single-pass call uses this directly; map passes get a
+    # proportional slice so long documents still compress at the end.
+    DOCUMENT_SUMMARY_MAX_TOKENS: int = 250
+    # Summarize-only chunking target (larger than the indexer default): keeps
+    # typical notes in one pass while the indexer still uses ~800-char chunks.
+    DOCUMENT_SUMMARY_CHUNK_TARGET: int = 2400
+    DOCUMENT_SUMMARY_CHUNK_MAX_SIZE: int = 4800
     # Carry the previous run's sources into follow-up turns: each run's
     # retrieval sources are persisted on the assistant message, and the next
     # turn re-emits them as its first `sources` batch (fresh numbering

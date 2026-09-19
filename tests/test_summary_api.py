@@ -34,7 +34,7 @@ FM_DOC = "---\ntitle: Contract Note\ntags: [api]\n---\n\n# Body\n"
 
 def long_content(sections: int = 3) -> str:
     """Same construction as test_summarize_service: >1 chunk guaranteed."""
-    body = "The quibnard decision changed everything for the zorblat team. " * 18
+    body = "The quibnard decision changed everything for the zorblat team. " * 45
     return "\n\n".join(f"# Section {i}\n\n{body}" for i in range(1, sections + 1))
 
 

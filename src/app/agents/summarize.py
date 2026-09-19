@@ -32,7 +32,11 @@ class SummarizeDeps:
 
 
 def render_document_prompt(
-    deps: SummarizeDeps, body: str, *, section: tuple[int, int] | None = None
+    deps: SummarizeDeps,
+    body: str,
+    *,
+    section: tuple[int, int] | None = None,
+    max_tokens: int,
 ) -> str:
     """Render one summarize request: document header plus the content itself.
 
@@ -43,11 +47,13 @@ def render_document_prompt(
     if section is not None:
         index, total = section
         lines.append(f"Section {index} of {total} of this document follows.")
-    lines.append("Summarize the content below.")
+        lines.append(f"Summarize this section within {max_tokens} tokens.")
+    else:
+        lines.append(f"Summarize the content below within {max_tokens} tokens.")
     return "\n".join(lines) + "\n\n" + body
 
 
-def render_reduce_prompt(deps: SummarizeDeps, summaries: Sequence[str]) -> str:
+def render_reduce_prompt(deps: SummarizeDeps, summaries: Sequence[str], *, max_tokens: int) -> str:
     """Render the combine request over numbered section summaries."""
     numbered = "\n\n".join(f"{index}. {summary}" for index, summary in enumerate(summaries, 1))
     return (
@@ -55,9 +61,10 @@ def render_reduce_prompt(deps: SummarizeDeps, summaries: Sequence[str]) -> str:
         f"Tags: {', '.join(deps.tags) or 'none'}\n\n"
         "This document was too long to summarize at once, so it was summarized "
         "section by section. The numbered section summaries follow. Combine them "
-        "into one coherent summary of the whole document: resolve overlaps and "
-        "repeated mentions, keep every distinct entity, decision, and outcome, "
-        "and drop section-to-section transitions.\n\n"
+        "into one coherent summary of the whole document within "
+        f"{max_tokens} tokens: resolve overlaps and repeated mentions, keep "
+        "every distinct entity, decision, and outcome, drop section-to-section "
+        "transitions, and compress harder if the section summaries were verbose.\n\n"
         f"{numbered}"
     )
 

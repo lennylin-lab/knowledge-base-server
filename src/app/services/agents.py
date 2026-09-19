@@ -23,6 +23,7 @@ import openai
 import structlog
 from pydantic_ai.exceptions import ModelAPIError, ModelHTTPError
 from pydantic_ai.models import Model
+from pydantic_ai.settings import ModelSettings
 from pydantic_ai.tools import Tool
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -89,9 +90,15 @@ class SummarizeService:
         session_factory: async_sessionmaker[AsyncSession],
         cache: Cache | None = None,
         cache_ttl_seconds: int = 0,
+        summary_max_tokens: int = 250,
+        summary_chunk_target: int = 2400,
+        summary_chunk_max_size: int = 4800,
     ) -> None:
         self._model_name = model_name
         self._session_factory = session_factory
+        self._summary_max_tokens = summary_max_tokens
+        self._summary_chunk_target = summary_chunk_target
+        self._summary_chunk_max_size = summary_chunk_max_size
         # Optional best-effort result cache (None = today's behavior): the
         # computed summary is keyed on the document's content_hash, so an
         # edit self-invalidates — no active deletion needed. A NULL hash
@@ -170,7 +177,11 @@ class SummarizeService:
         # degenerate path summarizes the RAW stored content in one pass. Raw is
         # deliberate: the stripped body would be empty, and the title/tags
         # inside the YAML only duplicate the header the prompt already renders.
-        chunks = chunk_markdown(document.content) or [document.content]
+        chunks = chunk_markdown(
+            document.content,
+            target=self._summary_chunk_target,
+            max_size=self._summary_chunk_max_size,
+        ) or [document.content]
 
         log.info("agent_run_started", agent="summarize", content_length=len(document.content))
 
@@ -179,13 +190,16 @@ class SummarizeService:
         # Fixed progress grammar: one event per map pass plus the reduce pass,
         # so the reduce pass is always pass_index == passes_total.
         passes_total = len(chunks) + 1
+        map_max_tokens = max(100, self._summary_max_tokens * 2 // passes_total)
         try:
             if len(chunks) == 1:
                 yield SummaryProgressEvent(
                     phase="map_pass", pass_index=1, passes_total=passes_total
                 )
                 summary, tokens_in, tokens_out = await self._run_pass(
-                    deps, render_document_prompt(deps, chunks[0])
+                    deps,
+                    render_document_prompt(deps, chunks[0], max_tokens=self._summary_max_tokens),
+                    max_tokens=self._summary_max_tokens,
                 )
                 # Fixed grammar: the reduce phase is announced even when the
                 # whole document was one pass — no separate model call behind it.
@@ -201,7 +215,13 @@ class SummarizeService:
                     )
                     text, tokens_in, tokens_out = await self._run_pass(
                         deps,
-                        render_document_prompt(deps, chunk, section=(index, len(chunks))),
+                        render_document_prompt(
+                            deps,
+                            chunk,
+                            section=(index, len(chunks)),
+                            max_tokens=map_max_tokens,
+                        ),
+                        max_tokens=map_max_tokens,
                     )
                     section_summaries.append(text)
                     input_tokens += tokens_in
@@ -210,7 +230,11 @@ class SummarizeService:
                     phase="reduce_pass", pass_index=passes_total, passes_total=passes_total
                 )
                 summary, tokens_in, tokens_out = await self._run_pass(
-                    deps, render_reduce_prompt(deps, section_summaries)
+                    deps,
+                    render_reduce_prompt(
+                        deps, section_summaries, max_tokens=self._summary_max_tokens
+                    ),
+                    max_tokens=self._summary_max_tokens,
                 )
                 runs = len(chunks) + 1
             input_tokens += tokens_in
@@ -257,7 +281,13 @@ class SummarizeService:
         `None` content_hash (pre-backfill) or no cache = always a miss."""
         if self._cache is None or document.content_hash is None:
             return None
-        key = cache_key("summary", document.id, document.content_hash, self._model_name)
+        key = cache_key(
+            "summary",
+            document.id,
+            document.content_hash,
+            self._model_name,
+            self._summary_max_tokens,
+        )
         raw = await self._cache.get(key)
         if raw is None:
             return None
@@ -273,7 +303,13 @@ class SummarizeService:
     async def _cache_put(self, document: Document, result: SummaryResult) -> None:
         if self._cache is None or document.content_hash is None:
             return
-        key = cache_key("summary", document.id, document.content_hash, self._model_name)
+        key = cache_key(
+            "summary",
+            document.id,
+            document.content_hash,
+            self._model_name,
+            self._summary_max_tokens,
+        )
         await self._cache.set(
             key, result.model_dump_json().encode("utf-8"), ttl_seconds=self._cache_ttl_seconds
         )
@@ -287,9 +323,15 @@ class SummarizeService:
             raise NotFoundError(f"Document {doc_id} not found")
         return document
 
-    async def _run_pass(self, deps: SummarizeDeps, prompt: str) -> tuple[str, int, int]:
+    async def _run_pass(
+        self, deps: SummarizeDeps, prompt: str, *, max_tokens: int
+    ) -> tuple[str, int, int]:
         """One non-streaming model pass: (summary text, input tokens, output tokens)."""
-        result = await self._agent.run(prompt, deps=deps)
+        result = await self._agent.run(
+            prompt,
+            deps=deps,
+            model_settings=ModelSettings(max_tokens=max_tokens),
+        )
         usage = result.usage
         return result.output, usage.input_tokens or 0, usage.output_tokens or 0
 

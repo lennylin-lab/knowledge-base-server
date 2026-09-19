@@ -100,6 +100,35 @@ async def test_second_summarize_unchanged_document_skips_the_agent(db_session, s
     assert cache.set_calls == 1  # only the computed result was stored
 
 
+async def test_different_summary_max_tokens_misses_cache(db_session, session_factory):
+    created = await make_document(db_session, SHORT_DOC)
+    prompts: list[str] = []
+    cache = FakeCache()
+    model = scripted_summarize_model(["First summary.", "Second summary."], prompts=prompts)
+    first_service = SummarizeService(
+        model,
+        MODEL_NAME,
+        session_factory=session_factory,
+        cache=cache,
+        summary_max_tokens=250,
+    )
+    second_service = SummarizeService(
+        model,
+        MODEL_NAME,
+        session_factory=session_factory,
+        cache=cache,
+        summary_max_tokens=400,
+    )
+
+    first = await first_service.summarize_document(created.id, tenant_id=DEFAULT_TENANT_ID)  # type: ignore[attr-defined]
+    second = await second_service.summarize_document(created.id, tenant_id=DEFAULT_TENANT_ID)  # type: ignore[attr-defined]
+
+    assert first.summary == "First summary."
+    assert second.summary == "Second summary."
+    assert len(prompts) == 2
+    assert cache.set_calls == 2
+
+
 async def test_edited_content_changes_hash_so_cache_misses(db_session, session_factory):
     created = await make_document(db_session, SHORT_DOC)
     prompts: list[str] = []

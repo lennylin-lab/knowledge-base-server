@@ -605,6 +605,9 @@ def build_summarize_service(settings: Settings) -> SummarizeService:
         session_factory=SessionFactory,
         cache=get_cache(),
         cache_ttl_seconds=settings.CACHE_SUMMARY_TTL_S,
+        summary_max_tokens=settings.DOCUMENT_SUMMARY_MAX_TOKENS,
+        summary_chunk_target=settings.DOCUMENT_SUMMARY_CHUNK_TARGET,
+        summary_chunk_max_size=settings.DOCUMENT_SUMMARY_CHUNK_MAX_SIZE,
     )
 
 

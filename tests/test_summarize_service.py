@@ -40,9 +40,9 @@ SHORT_DOC = "---\ntitle: Short Note\ntags: [alpha]\n---\n\nOne short paragraph a
 
 
 def long_content(sections: int = 3) -> str:
-    """Sections each exceed the chunker's ~800-char target (and pairwise sums
-    exceed its 1600 cap), so every section lands in its own chunk."""
-    body = "The quibnard decision changed everything for the zorblat team. " * 18
+    """Sections each exceed the summarize chunk target (~2400 chars) so every
+    section lands in its own chunk with production summarize settings."""
+    body = "The quibnard decision changed everything for the zorblat team. " * 45
     return "\n\n".join(f"# Section {i}\n\n{body}" for i in range(1, sections + 1))
 
 
@@ -77,6 +77,7 @@ async def test_short_document_summarizes_in_one_pass(db_session, session_factory
     assert "alpha" in prompts[0]  # tags ride along as prompt context
     assert "zorblat" in prompts[0]
     assert "Section" not in prompts[0]  # no map-pass marker on the direct path
+    assert "within 250 tokens" in prompts[0]
 
 
 async def test_long_document_map_reduces_over_chunk_summaries(db_session, session_factory):
@@ -105,6 +106,9 @@ async def test_long_document_map_reduces_over_chunk_summaries(db_session, sessio
     assert "s-two" in prompts[3]
     assert "s-three" in prompts[3]
     assert result.latency_ms >= 0
+    # Map passes get a proportional slice; reduce gets the final cap.
+    assert "within 125 tokens" in prompts[0]
+    assert "within 250 tokens" in prompts[3]
 
 
 async def test_missing_document_raises_not_found_before_any_model_call(session_factory):
