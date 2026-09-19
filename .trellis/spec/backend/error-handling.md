@@ -214,7 +214,7 @@ the same discipline with their own event vocabulary
 |--------|-------------|
 | summary | `run_started` (run_id, kind, document_id) → `summary_progress`* (phase `map_pass`/`reduce_pass`, 1-based `pass_index`, `passes_total` = map passes + 1; fixed grammar — also on single-pass summaries) → `summary` (full `SummaryResult` flat) → `done` |
 | associations | `run_started` → `associations` (full `AssociationsResult` flat; structured output stays atomic — no partial events) → `done` |
-| draft | `run_started` → `draft` (`OperationDraftEvent`: operation_id, state, full `DraftContent` flat; structured output atomic — no partial events) → `done` |
+| draft | `run_started` → `draft_delta`* (raw output-tool JSON fragments forwarded verbatim, exactly once, in order — the client concatenates; no server-side partial-JSON parsing) → `draft` (`OperationDraftEvent`: operation_id, state, full `DraftContent` flat; the validated atomic result) → `done` |
 | all, failure after 200 | already-emitted events stand → exactly one `error` (chat's `ErrorEvent`, reused so there is one error dialect) → close |
 
 The draft stream (`POST /operations/draft`, `services/operation.py`) adds one
