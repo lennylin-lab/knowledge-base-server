@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Verify stream discipline and persistence timing under the new delta contract"}
+{"file": ".trellis/spec/backend/chat-guidelines.md", "reason": "Verify delta stream matches chat conventions"}
