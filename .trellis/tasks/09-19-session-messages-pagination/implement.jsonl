@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend spec entry point with pre-dev checklist"}
+{"file": ".trellis/spec/backend/chat-guidelines.md", "reason": "Chat session/message layer conventions this endpoint belongs to"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Cursor decode error handling convention"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "Reuse existing keyset pagination pattern from session listing"}
