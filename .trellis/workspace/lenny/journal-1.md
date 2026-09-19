@@ -639,3 +639,25 @@ Draft SSE stream now forwards the model's structured-output fragments verbatim a
 ### Status
 
 [OK] **Completed**
+
+
+## Session 29: Session messages keyset pagination + citation-link design
+<!-- trellis-session: v=2 fp=c46b648010c7693e -->
+
+**Date**: 2026-09-19
+**Task**: Session messages keyset pagination + citation-link design
+**Branch**: `main`
+
+### Summary
+
+Discussed citation linking design (keep [n] from the model, frontend maps n->documentId via sources events; root cause of lost citations on session reopen is MessageRead not exposing persisted ChatMessage.sources — follow-up task). Implemented and shipped keyset pagination for GET /sessions/{session_id}: optional limit/cursor query params, first page returns newest N ascending with next_cursor walking older, no-params response unchanged; reused cursor codecs and limit+1 lookahead from session listing; MessagePage schema added; full pytest/lint/mypy green. Also filed flutter feature issue lennylin-lab/knowledge-base-flutter#6.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `1cf9097` | feat(session): keyset-paginate session detail messages via optional limit/cursor |
+
+### Status
+
+[OK] **Completed**
