@@ -133,6 +133,41 @@ class ChatMessageRepository:
         )
         return (await self._session.execute(stmt)).scalars().all()
 
+    async def list_page_for_session(
+        self,
+        session_id: UUID,
+        *,
+        tenant_id: UUID,
+        cursor: tuple[datetime, UUID] | None = None,
+        limit: int,
+    ) -> Sequence[ChatMessage]:
+        """Keyset-paginated read of one live session's messages, newest-first.
+
+        Mirrors `ChatSessionRepository.list_page`: `(created_at, id)` row-value
+        keyset predicate, `limit + 1` lookahead so the caller can tell whether
+        an older page exists without a count query. The join keeps tenant
+        isolation and soft-delete filtering identical to `list_for_session`.
+        """
+        stmt = (
+            select(ChatMessage)
+            .join(ChatSession, ChatSession.id == ChatMessage.session_id)
+            .where(
+                ChatSession.id == session_id,
+                ChatSession.tenant_id == tenant_id,
+                ChatSession.deleted_at.is_(None),
+            )
+        )
+        if cursor is not None:
+            # Row-value comparison: strictly older than the cursor key
+            # (same pattern as the session listing, DESC ordering).
+            # Plain scalars in tuple_ are runtime-supported
+            # (auto-literalized); the stubs only type expressions.
+            stmt = stmt.where(
+                tuple_(ChatMessage.created_at, ChatMessage.id) < tuple_(*cursor)  # type: ignore[arg-type]
+            )
+        stmt = stmt.order_by(ChatMessage.created_at.desc(), ChatMessage.id.desc()).limit(limit + 1)
+        return (await self._session.execute(stmt)).scalars().all()
+
     async def list_recent_for_session(
         self, session_id: UUID, *, tenant_id: UUID, limit: int
     ) -> Sequence[ChatMessage]:

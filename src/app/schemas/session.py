@@ -39,6 +39,19 @@ class SessionDetail(SessionRead):
     messages: list[MessageRead]
 
 
+class MessagePage(BaseModel):
+    """One page of a keyset-paginated session-detail message history.
+
+    Returned by `GET /sessions/{id}` when `limit` (or `cursor`) is given;
+    without those params the full `SessionDetail` is returned unchanged.
+    Items are chronological; `next_cursor` points at older messages and is
+    null when none remain.
+    """
+
+    items: list[MessageRead]
+    next_cursor: str | None
+
+
 class SessionPage(BaseModel):
     """One page of a keyset-paginated session list."""
 

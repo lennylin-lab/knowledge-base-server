@@ -9,19 +9,21 @@ defaults would tie inside one transaction.
 
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.chat import ChatMessage, ChatSession, MessageRole
-from app.models.tenant import DEFAULT_TENANT_ID
+from app.models.tenant import DEFAULT_TENANT_ID, Tenant
 from app.repositories.chat import ChatMessageRepository, ChatSessionRepository
 
 pytestmark = pytest.mark.db
 
 _BASE = datetime(2026, 9, 2, 12, 0, 0, tzinfo=UTC)
 MISSING_ID = "00000000-0000-0000-0000-000000000000"
+TENANT_B_ID = uuid.UUID("55555555-5555-5555-8555-555555555555")
 
 
 async def _seed_session(
@@ -125,6 +127,99 @@ async def test_get_session_returns_messages_chronologically(db_client, db_sessio
     assert [message["content"] for message in body["messages"]] == ["first", "second"]
     assert [message["role"] for message in body["messages"]] == ["user", "assistant"]
     assert set(body["messages"][0]) == {"id", "role", "content", "run_id", "created_at"}
+
+
+async def test_get_session_paginated_first_page_returns_newest_ascending(db_client, db_session):
+    seeded = await _seed_session(
+        db_session,
+        messages=[(MessageRole.USER, f"m{i}") for i in range(5)],
+    )
+
+    resp = await db_client.get(f"/api/v1/chat/sessions/{seeded.id}", params={"limit": 2})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["next_cursor"] is not None
+    assert [m["content"] for m in body["items"]] == ["m3", "m4"]
+    assert set(body) == {"items", "next_cursor"}
+
+
+async def test_get_session_pagination_walk_reconstructs_full_history(db_client, db_session):
+    seeded = await _seed_session(
+        db_session,
+        messages=[(MessageRole.USER, f"m{i}") for i in range(7)],
+    )
+    expected = [f"m{i}" for i in range(7)]
+
+    pages: list[list[str]] = []
+    cursor: str | None = None
+    for _ in range(10):  # bounded walk; a non-terminating cursor would overrun
+        params: dict[str, object] = {"limit": 3}
+        if cursor is not None:
+            params["cursor"] = cursor
+        body = (await db_client.get(f"/api/v1/chat/sessions/{seeded.id}", params=params)).json()
+        pages.append([m["content"] for m in body["items"]])
+        cursor = body["next_cursor"]
+        if cursor is None:
+            break
+
+    collected = [c for page in reversed(pages) for c in page]  # oldest page last
+    assert collected == expected  # full history, chronological, no gaps
+    assert len(collected) == len(set(collected))  # no dupes
+    assert cursor is None  # terminated on the oldest page
+
+
+async def test_get_session_page_when_limit_equals_total_has_null_cursor(db_client, db_session):
+    seeded = await _seed_session(db_session, messages=[(MessageRole.USER, "only")])
+
+    resp = await db_client.get(f"/api/v1/chat/sessions/{seeded.id}", params={"limit": 5})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert [m["content"] for m in body["items"]] == ["only"]
+    assert body["next_cursor"] is None
+
+
+@pytest.mark.parametrize("limit", [0, 101, -1])
+async def test_get_session_rejects_out_of_range_limit(db_client, db_session, limit):
+    seeded = await _seed_session(db_session)
+
+    resp = await db_client.get(f"/api/v1/chat/sessions/{seeded.id}", params={"limit": limit})
+
+    assert resp.status_code == 422
+    assert resp.json()["error"]["code"] == "validation_failed"
+
+
+async def test_get_session_rejects_invalid_cursor_with_422(db_client, db_session):
+    seeded = await _seed_session(db_session)
+
+    resp = await db_client.get(
+        f"/api/v1/chat/sessions/{seeded.id}", params={"limit": 2, "cursor": "garbage!"}
+    )
+
+    assert resp.status_code == 422
+    assert resp.json()["error"]["code"] == "validation_failed"
+
+
+async def test_get_session_paginated_isolated_cross_tenant(db_client, db_session):
+    db_session.add(Tenant(id=TENANT_B_ID, slug="tenant-b", name="Tenant B"))
+    await db_session.flush()
+    foreign = await ChatSessionRepository(db_session).create(
+        ChatSession(tenant_id=TENANT_B_ID, title="foreign", updated_at=_BASE)
+    )
+    await ChatMessageRepository(db_session).add(
+        ChatMessage(session_id=foreign.id, role=MessageRole.USER, content="secret")
+    )
+    await db_session.commit()
+
+    resp = await db_client.get(f"/api/v1/chat/sessions/{foreign.id}", params={"limit": 10})
+    cursor_resp = await db_client.get(
+        f"/api/v1/chat/sessions/{foreign.id}", params={"limit": 10, "cursor": "x"}
+    )
+
+    assert resp.status_code == 404
+    assert resp.json()["error"]["code"] == "not_found"
+    assert cursor_resp.status_code == 404
 
 
 async def test_get_missing_session_returns_404_envelope(db_client):

@@ -15,13 +15,23 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.exceptions import NotFoundError
 from app.models.chat import ChatSession
 from app.repositories.chat import ChatMessageRepository, ChatSessionRepository
-from app.schemas.session import MessageRead, SessionDetail, SessionPage, SessionRead
+from app.schemas.session import (
+    MessagePage,
+    MessageRead,
+    SessionDetail,
+    SessionPage,
+    SessionRead,
+)
 from app.utils.cursor import decode_cursor, encode_cursor
 
 logger = structlog.get_logger(__name__)
 
 # Session titles derive from the first question: single line, truncated.
 TITLE_MAX_LENGTH = 80
+
+# Default page size when a client passes `cursor` without an explicit
+# `limit` on the session-detail message history.
+DEFAULT_MESSAGE_PAGE_LIMIT = 20
 
 
 def derive_title(question: str, *, max_length: int = TITLE_MAX_LENGTH) -> str:
@@ -80,6 +90,39 @@ class ChatSessionService:
             updated_at=chat_session.updated_at,
             messages=list(messages),
         )
+
+    async def get_session_page(
+        self,
+        session_id: UUID,
+        *,
+        tenant_id: UUID,
+        cursor: str | None = None,
+        limit: int | None = None,
+    ) -> MessagePage:
+        """One keyset-paginated page of a session's message history.
+
+        The page is the NEWEST window: page one holds the latest `limit`
+        messages, and each `cursor` steps strictly older — so a chat client
+        scrolling up walks backwards in time while items within a page stay
+        chronological (ascending) for direct append-rendering. `next_cursor`
+        is non-null iff older messages remain. Missing/foreign sessions are
+        the same non-leaky 404 as the full read.
+        """
+        await self._get_or_raise(session_id, tenant_id=tenant_id)
+        decoded = decode_cursor(cursor) if cursor is not None else None
+        page_size = limit or DEFAULT_MESSAGE_PAGE_LIMIT
+        rows = await self._messages.list_page_for_session(
+            session_id, tenant_id=tenant_id, cursor=decoded, limit=page_size
+        )
+
+        next_cursor: str | None = None
+        if len(rows) > page_size:
+            rows = rows[:page_size]
+            oldest = rows[-1]
+            next_cursor = encode_cursor(oldest.created_at, oldest.id)
+
+        items = [MessageRead.model_validate(message) for message in reversed(rows)]
+        return MessagePage(items=items, next_cursor=next_cursor)
 
     async def delete_session(self, session_id: UUID, *, tenant_id: UUID) -> None:
         """Soft-delete a session; it disappears from every read path."""
