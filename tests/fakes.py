@@ -532,25 +532,29 @@ def scripted_draft_model(
     validates it into `DraftOutput` exactly as a real provider would. `prompts`
     collects the run's user prompt; `fail` raises instead, for provider-
     failure mapping.
+
+    Served as a *streamed* response (`stream_function`): the service runs the
+    draft via `Agent.run_stream`, which requires a streaming model, so the
+    output tool call arrives as a delta exactly like a real provider's
+    streamed tool call.
     """
     payload = {"content": content, "title": title}
 
-    async def function(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+    async def stream_function(messages: list[ModelMessage], info: AgentInfo) -> Any:
         if fail is not None:
             raise fail
         if prompts is not None:
             prompts.append(_first_user_prompt(messages))
         assert info.output_tools, "draft agent must use structured output"
-        return ModelResponse(
-            parts=[
-                ToolCallPart(
-                    tool_name=info.output_tools[0].name,
-                    args=json.dumps(payload),
-                )
-            ]
-        )
+        yield {
+            0: DeltaToolCall(
+                name=info.output_tools[0].name,
+                json_args=json.dumps(payload),
+                tool_call_id="call_draft",
+            )
+        }
 
-    return FunctionModel(function, model_name="scripted-draft")
+    return FunctionModel(stream_function=stream_function, model_name="scripted-draft")
 
 
 def hermetic_settings(**overrides: object) -> Settings:

@@ -393,9 +393,15 @@ class AgentOperationService:
             retriever=self._retriever, limit=limit, collector=collector, tenant_id=tenant_id
         )
         try:
-            result = await self._agent.run(
+            # Streaming keeps bytes flowing through the gateway, whose
+            # non-streaming requests face a hard whole-request deadline no
+            # full draft generation can beat. The validated `DraftOutput`
+            # still arrives atomically: nothing is emitted to the client
+            # until aggregation below is done.
+            async with self._agent.run_stream(
                 render_writing_prompt(document.content, instruction), deps=deps
-            )
+            ) as result:
+                output = await result.get_output()
         except Exception as exc:
             failure = _as_app_error(exc)
             # Terminal state commits BEFORE the terminal event (the wrapper
@@ -412,7 +418,7 @@ class AgentOperationService:
             )
             raise failure from exc
 
-        operation.draft = _draft_payload(result.output)
+        operation.draft = _draft_payload(output)
         operation.state = OperationState.COMPLETED
         operation = await self._ops.update(operation)
         await self._session.commit()
@@ -421,8 +427,8 @@ class AgentOperationService:
         yield OperationDraftEvent(
             operation_id=operation.id,
             state="completed",
-            content=result.output.content,
-            title=result.output.title,
+            content=output.content,
+            title=output.title,
         )
         yield AgentDoneEvent(run_id=run_id, outcome="success", latency_ms=latency_ms)
 
