@@ -616,3 +616,26 @@ Adopted the server-side sidecar pattern for stdio MCP servers: new docker/mcp-si
 ### Status
 
 [OK] **Completed**
+
+
+## Session 28: Draft token-by-token streaming via draft_delta events
+<!-- trellis-session: v=2 fp=251cee9117a30351 -->
+
+**Date**: 2026-09-19
+**Task**: Draft token-by-token streaming via draft_delta events
+**Branch**: `main`
+
+### Summary
+
+Draft SSE stream now forwards the model's structured-output fragments verbatim as draft_delta events (run_started -> draft_delta* -> draft -> done | single error). agent.iter() + output-tool guard (final_result), exactly-once forwarding with part-start dedup; persistence timing and failure semantics unchanged; 690 tests green. Frontend contract update posted on knowledge-base-flutter#4. Diagnosed earlier failures: gateway enforces 60s whole-request deadline on streams too (audit row 60002ms error=network); effective deadline = min(hardcoded global RequestTimeout, route timeout_ms) — gateway-side fix is a separate pending task. Also reverted the unused 300s chat-timeout fix (3aa31e4) and filed flutter issue #4 for the original SSE migration.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `c0aa3ff` | feat(operations): stream draft output incrementally via draft_delta events |
+| `33d4950` | docs(spec): draft stream now includes draft_delta fragment events |
+
+### Status
+
+[OK] **Completed**

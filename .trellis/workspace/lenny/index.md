@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 27
+- **Total Sessions**: 28
 - **Last Active**: 2026-09-19
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~618 | Active |
+| `journal-1.md` | ~641 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 28 | 2026-09-19 | Draft token-by-token streaming via draft_delta events | `c0aa3ff`, `33d4950` | `main` |
 | 27 | 2026-09-19 | MCP stdio sidecar bridge (supergateway) for containerized deploys | `e26fe9a`, `469ac9f` | `main` |
 | 26 | 2026-09-17 | Gateway issue #4 closed: per-model feature isolation completed | `636bc00` | `main` |
 | 25 | 2026-09-17 | Draft endpoint SSE streaming | `9be2b39`, `ea841d0` | `main` |
