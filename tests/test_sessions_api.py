@@ -31,19 +31,27 @@ async def _seed_session(
     *,
     title: str = "Session",
     updated_at: datetime | None = None,
-    messages: list[tuple[MessageRole, str]] = (),
+    messages: list[tuple[MessageRole, str]]
+    | list[tuple[MessageRole, str, list[dict[str, object]] | None]] = (),
 ) -> ChatSession:
-    """Insert one session (optionally with messages) and commit."""
+    """Insert one session (optionally with messages) and commit.
+
+    Each message may carry an optional third element: the raw `sources`
+    payload (list of stored `SearchHit` dicts) to persist on the row.
+    """
     chat_session = await ChatSessionRepository(db_session).create(
         ChatSession(tenant_id=DEFAULT_TENANT_ID, title=title, updated_at=updated_at)
     )
     message_repo = ChatMessageRepository(db_session)
-    for index, (role, content) in enumerate(messages):
+    for index, message in enumerate(messages):
+        role, content = message[0], message[1]
+        sources = message[2] if len(message) > 2 else None
         await message_repo.add(
             ChatMessage(
                 session_id=chat_session.id,
                 role=role,
                 content=content,
+                sources=sources,
                 created_at=_BASE + timedelta(seconds=index),
             )
         )
@@ -126,7 +134,14 @@ async def test_get_session_returns_messages_chronologically(db_client, db_sessio
     assert body["title"] == "Contract"
     assert [message["content"] for message in body["messages"]] == ["first", "second"]
     assert [message["role"] for message in body["messages"]] == ["user", "assistant"]
-    assert set(body["messages"][0]) == {"id", "role", "content", "run_id", "created_at"}
+    assert set(body["messages"][0]) == {
+        "id",
+        "role",
+        "content",
+        "run_id",
+        "created_at",
+        "sources",
+    }
 
 
 async def test_get_session_paginated_first_page_returns_newest_ascending(db_client, db_session):
@@ -249,3 +264,123 @@ async def test_delete_missing_session_returns_404(db_client):
 
     assert resp.status_code == 404
     assert resp.json()["error"]["code"] == "not_found"
+
+
+def _stored_hit(n: int) -> dict[str, object]:
+    """One stored `SearchHit.model_dump(mode="json")` shape, internals included."""
+    return {
+        "document_id": str(uuid.UUID(f"00000000-0000-0000-0000-{n:012d}")),
+        "document_title": f"Doc {n}",
+        "document_tags": [f"tag-{n}"],
+        "chunk_index": n,
+        "content": f"full chunk body {n} — must never be echoed back",
+        "score": 0.5 + n,
+        "es_rank": n,
+        "vector_rank": None,
+        "es_score": 1.5,
+        "vector_distance": 0.25,
+    }
+
+
+async def test_get_session_exposes_assistant_sources_in_citation_order(db_client, db_session):
+    seeded = await _seed_session(
+        db_session,
+        messages=[
+            (MessageRole.USER, "question"),
+            (
+                MessageRole.ASSISTANT,
+                "answer",
+                [_stored_hit(1), _stored_hit(2), _stored_hit(3)],
+            ),
+        ],
+    )
+
+    resp = await db_client.get(f"/api/v1/chat/sessions/{seeded.id}")
+
+    assert resp.status_code == 200
+    sources = resp.json()["messages"][1]["sources"]
+    assert sources == [
+        {
+            "document_id": str(uuid.UUID(f"00000000-0000-0000-0000-{n:012d}")),
+            "document_title": f"Doc {n}",
+            "document_tags": [f"tag-{n}"],
+            "chunk_index": n,
+        }
+        for n in (1, 2, 3)
+    ]
+
+
+async def test_get_session_paginated_exposes_assistant_sources_in_citation_order(
+    db_client, db_session
+):
+    seeded = await _seed_session(
+        db_session,
+        messages=[
+            (MessageRole.USER, "question"),
+            (MessageRole.ASSISTANT, "answer", [_stored_hit(1), _stored_hit(2)]),
+        ],
+    )
+
+    resp = await db_client.get(f"/api/v1/chat/sessions/{seeded.id}", params={"limit": 2})
+
+    assert resp.status_code == 200
+    sources = resp.json()["items"][1]["sources"]
+    assert [s["document_title"] for s in sources] == ["Doc 1", "Doc 2"]
+    assert set(sources[0]) == {"document_id", "document_title", "document_tags", "chunk_index"}
+
+
+async def test_get_session_tolerates_malformed_stored_sources(db_client, db_session):
+    seeded = await _seed_session(
+        db_session,
+        messages=[
+            (
+                MessageRole.ASSISTANT,
+                "answer",
+                [
+                    {"document_id": "not-a-uuid"},  # malformed entry
+                    _stored_hit(2),  # well-formed survives
+                ],
+            ),
+        ],
+    )
+
+    resp = await db_client.get(f"/api/v1/chat/sessions/{seeded.id}")
+
+    assert resp.status_code == 200
+    sources = resp.json()["messages"][0]["sources"]
+    assert [s["document_title"] for s in sources] == ["Doc 2"]
+
+
+async def test_get_session_sources_null_without_retrieval_and_for_user_messages(
+    db_client, db_session
+):
+    seeded = await _seed_session(
+        db_session,
+        messages=[
+            (MessageRole.USER, "question"),  # user messages never carry sources
+            (MessageRole.ASSISTANT, "no-retrieval answer"),  # NULL column
+        ],
+    )
+
+    resp = await db_client.get(f"/api/v1/chat/sessions/{seeded.id}")
+
+    assert resp.status_code == 200
+    messages = resp.json()["messages"]
+    assert messages[0]["sources"] is None
+    assert messages[1]["sources"] is None
+
+
+async def test_get_session_sources_omit_retrieval_internals(db_client, db_session):
+    seeded = await _seed_session(
+        db_session,
+        messages=[(MessageRole.ASSISTANT, "answer", [_stored_hit(1)])],
+    )
+
+    full = await db_client.get(f"/api/v1/chat/sessions/{seeded.id}")
+    page = await db_client.get(f"/api/v1/chat/sessions/{seeded.id}", params={"limit": 5})
+
+    raw_full = repr(full.json())
+    raw_page = repr(page.json())
+    for forbidden in ("full chunk body", "score", "es_rank", "vector_distance", "es_score"):
+        assert forbidden not in raw_full
+        assert forbidden not in raw_page
