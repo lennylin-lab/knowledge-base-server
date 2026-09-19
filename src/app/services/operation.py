@@ -17,6 +17,13 @@ from uuid import UUID, uuid4
 
 import structlog
 from pydantic_ai import Agent
+from pydantic_ai.messages import (
+    AgentStreamEvent,
+    PartDeltaEvent,
+    PartStartEvent,
+    ToolCallPart,
+    ToolCallPartDelta,
+)
 from pydantic_ai.models import Model
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -42,8 +49,11 @@ from app.repositories.operation import AgentOperationRepository, DocumentRevisio
 from app.schemas.agent_stream import (
     AgentDoneEvent,
     AgentRunStartedEvent,
-    AgentStreamEvent,
+    DraftDeltaEvent,
     OperationDraftEvent,
+)
+from app.schemas.agent_stream import (
+    AgentStreamEvent as WireEvent,
 )
 from app.schemas.chat import ErrorEvent
 from app.schemas.operation import (
@@ -62,6 +72,12 @@ from app.services.document import ReindexEnqueuer, _content_hash, _parse_front_m
 logger = structlog.get_logger(__name__)
 
 _APPLICABLE_STATES = (OperationState.COMPLETED, OperationState.INTERRUPTED)
+
+# pydantic-ai names an agent's single output tool `final_result` when it is
+# registered without an explicit name — `build_draft_agent` registers
+# `output_type=DraftOutput` exactly that way. Only fragments of THIS tool's
+# arguments stream to the client; retrieval-tool calls stay private.
+_OUTPUT_TOOL_NAME = "final_result"
 
 
 class AgentOperationService:
@@ -328,11 +344,15 @@ class AgentOperationService:
 
     async def draft_document_stream(
         self, document_id: UUID, instruction: str | None, *, tenant_id: UUID, limit: int = 8
-    ) -> AsyncIterator[AgentStreamEvent]:
+    ) -> AsyncIterator[WireEvent]:
         """Stream one structured draft run as typed events (design: agent stream).
 
-        Contract order: `run_started` → `draft` (operation_id, state, flat
-        draft content) → `done`. Persistence timing is preserved from the
+        Contract order: `run_started` → `draft_delta`* (raw output-tool JSON
+        fragments streamed verbatim while generation is in flight) → `draft`
+        (operation_id, state, flat draft content) → `done`. Deltas are
+        informational: the server never parses partial JSON, and a client
+        discards them when the stream ends in the terminal `error`.
+        Persistence timing is preserved from the
         synchronous endpoint: the `running` row commits BEFORE the model call
         (a lost process leaves an inspectable, resumable record), and the
         terminal state (`completed`/`failed` + error details) commits BEFORE
@@ -360,7 +380,7 @@ class AgentOperationService:
 
     async def _draft_events(
         self, document_id: UUID, instruction: str | None, *, tenant_id: UUID, limit: int
-    ) -> AsyncIterator[AgentStreamEvent]:
+    ) -> AsyncIterator[WireEvent]:
         """Internal event generator; raises `AppError` on any failure."""
         started = time.perf_counter()
         # The configuration gate and the document load come before anything
@@ -395,13 +415,29 @@ class AgentOperationService:
         try:
             # Streaming keeps bytes flowing through the gateway, whose
             # non-streaming requests face a hard whole-request deadline no
-            # full draft generation can beat. The validated `DraftOutput`
-            # still arrives atomically: nothing is emitted to the client
-            # until aggregation below is done.
-            async with self._agent.run_stream(
+            # full draft generation can beat. `agent.iter()` exposes the raw
+            # stream events: every output-tool argument fragment is forwarded
+            # to the client as a `draft_delta` event, verbatim and in order,
+            # while the run is still in flight. The validated `DraftOutput`
+            # itself only lands in the operation after the run completes.
+            part_names: dict[int, str] = {}
+            forwarded: set[int] = set()
+            async with self._agent.iter(
                 render_writing_prompt(document.content, instruction), deps=deps
-            ) as result:
-                output = await result.get_output()
+            ) as run:
+                async for node in run:
+                    if not self._agent.is_model_request_node(node):
+                        continue  # tool/output handling needs no wire event
+                    async with node.stream(run.ctx) as stream:
+                        async for event in stream:
+                            wire_delta = _output_tool_delta(
+                                run_id, event, part_names, forwarded
+                            )
+                            if wire_delta is not None:
+                                yield wire_delta
+                run_result = run.result
+                assert run_result is not None  # iteration always ends at the result
+                output = run_result.output
         except Exception as exc:
             failure = _as_app_error(exc)
             # Terminal state commits BEFORE the terminal event (the wrapper
@@ -455,3 +491,49 @@ class AgentOperationService:
 def _draft_payload(output: DraftOutput) -> dict[str, object]:
     """Structured agent output -> the operation's JSONB draft shape."""
     return {"content": output.content, "title": output.title}
+
+
+def _output_tool_delta(
+    run_id: str,
+    event: AgentStreamEvent,
+    part_names: dict[int, str],
+    forwarded: set[int],
+) -> DraftDeltaEvent | None:
+    """Translate one raw stream event into a `draft_delta`, or None.
+
+    Only the structured-output tool's argument fragments are surfaced, in
+    order and verbatim (retrieval-tool calls are skipped). `part_names`
+    accumulates streamed tool names per part index (names can arrive in
+    fragments too); `forwarded` keeps each fragment exactly-once even if the
+    framework upgrades a buffered delta into a full part whose args would
+    otherwise repeat already-forwarded fragments.
+    """
+    if isinstance(event, PartStartEvent):
+        part = event.part
+        if not isinstance(part, ToolCallPart):
+            return None
+        part_names[event.index] = part.tool_name
+        # A part can start before any argument bytes arrive (`args is None`);
+        # its `{}` serialization is not a real fragment and must not stream.
+        args_json = part.args_as_json_str() if part.args is not None else ""
+        if (
+            part.tool_name == _OUTPUT_TOOL_NAME
+            and args_json
+            and event.index not in forwarded
+        ):
+            forwarded.add(event.index)
+            return DraftDeltaEvent(run_id=run_id, delta=args_json)
+        return None
+    if isinstance(event, PartDeltaEvent) and isinstance(event.delta, ToolCallPartDelta):
+        delta = event.delta
+        name = part_names.get(event.index, "") + (delta.tool_name_delta or "")
+        if name:
+            part_names[event.index] = name
+        if (
+            name == _OUTPUT_TOOL_NAME
+            and isinstance(delta.args_delta, str)
+            and delta.args_delta
+        ):
+            forwarded.add(event.index)
+            return DraftDeltaEvent(run_id=run_id, delta=delta.args_delta)
+    return None

@@ -29,6 +29,7 @@ from app.schemas.agent_stream import (
     AgentDoneEvent,
     AgentRunStartedEvent,
     AgentStreamEvent,
+    DraftDeltaEvent,
     OperationDraftEvent,
 )
 from app.schemas.chat import ErrorEvent
@@ -44,6 +45,7 @@ router = APIRouter()
 
 _EVENT_NAMES: dict[type[AgentStreamEvent], str] = {
     AgentRunStartedEvent: "run_started",
+    DraftDeltaEvent: "draft_delta",
     OperationDraftEvent: "draft",
     ErrorEvent: "error",
     AgentDoneEvent: "done",

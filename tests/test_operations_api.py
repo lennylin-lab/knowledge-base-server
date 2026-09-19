@@ -10,6 +10,7 @@ over the test database, so no request reaches a real provider.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from datetime import datetime
 from uuid import UUID, uuid4
@@ -278,8 +279,9 @@ async def test_operations_never_touch_chat_history(db_client, db_session):
 async def test_draft_streams_event_order_and_persists_completed(
     db_client, db_session, install_scripted_draft
 ):
-    """Canonical order run_started -> draft -> done; the operation lands
-    `completed` with the structured draft, and chat history stays untouched."""
+    """Canonical order run_started -> draft_delta* -> draft -> done; the
+    operation lands `completed` with the structured draft, and chat history
+    stays untouched."""
     document = await _seed_document(db_client)
     prompts = install_scripted_draft()
 
@@ -288,17 +290,28 @@ async def test_draft_streams_event_order_and_persists_completed(
     assert resp.status_code == 200
     assert resp.headers["content-type"].startswith("text/event-stream")
     events = parse_sse(resp.text)
-    assert [name for name, _ in events] == ["run_started", "draft", "done"]
+    names = [name for name, _ in events]
+    assert names[:2] == ["run_started", "draft_delta"]
+    assert names[-2:] == ["draft", "done"]
+    assert names[2:-2] == ["draft_delta"] * (len(names) - 4)
+    assert len(names) >= 5  # at least the fake's three argument fragments
     run_started = events[0][1]
     assert run_started["kind"] == "draft"
     assert run_started["document_id"] == document["id"]
     assert run_started["run_id"]
-    body = events[1][1]
+    deltas = [body for name, body in events if name == "draft_delta"]
+    assert all(d["run_id"] == run_started["run_id"] for d in deltas)
+    # Concatenation invariant: the raw fragments reassemble the tool-call
+    # argument JSON the fake streamed, exactly, with no loss or duplication.
+    assert "".join(d["delta"] for d in deltas) == json.dumps(
+        {"content": DRAFT_CONTENT, "title": DRAFT_TITLE}
+    )
+    body = events[-2][1]
     assert set(body) == {"operation_id", "state", "content", "title"}
     assert body["state"] == "completed"
     assert body["content"] == DRAFT_CONTENT
     assert body["title"] == DRAFT_TITLE
-    done = events[2][1]
+    done = events[-1][1]
     assert done["run_id"] == run_started["run_id"]
     assert done["outcome"] == "success"
     assert done["latency_ms"] >= 0
@@ -359,6 +372,61 @@ async def test_draft_provider_failure_emits_single_error_leaves_failed_resumable
     ).scalar_one()
     assert row.state is OperationState.FAILED
     assert row.error == {"error_class": "APIStatusError"}
+
+    resumed = await db_client.post(f"/api/v1/operations/{row.id}/resume", json={})
+    assert resumed.status_code == 200
+    assert resumed.json()["state"] == "completed"
+    app.dependency_overrides.clear()
+
+
+async def test_draft_failure_after_deltas_emits_single_error_leaves_failed_resumable(
+    app, db_client, db_session, session_factory
+):
+    """Mid-stream failure AFTER deltas were sent: run_started and the already-
+    forwarded `draft_delta` fragments stand, exactly one terminal `error` (no
+    done), and the operation is durably `failed` and resumable — the client
+    discards the partial deltas."""
+    document = await _seed_document(db_client)
+    prompts: list[str] = []
+    failure = APIStatusError(
+        "upstream exploded",
+        response=httpx.Response(
+            500, request=httpx.Request("POST", "http://provider.test/v1/chat")
+        ),
+        body=None,
+    )
+
+    def _override(session: SessionDep) -> AgentOperationService:
+        return AgentOperationService(
+            session,
+            model=scripted_draft_model(
+                "never",
+                # name chunk + first args fragment streamed, then the provider dies
+                fail_after_fragments=failure,
+                fragments_before_fail=3,
+                prompts=prompts,
+            ),
+            retriever=StubRetriever(
+                outcome=SearchOutcome(mode="bm25", items=[], es_hits=0, vector_hits=0)
+            ),
+        )
+
+    app.dependency_overrides[get_agent_operation_service] = _override
+
+    resp = await db_client.post(f"/api/v1/operations/draft?document_id={document['id']}")
+
+    assert resp.status_code == 200
+    events = parse_sse(resp.text)
+    names = [name for name, _ in events]
+    assert names == ["run_started", "draft_delta", "error"]
+    assert events[1][1]["delta"]  # the first fragment got through verbatim
+    assert events[-1][1]["code"] == "llm_provider_error"
+
+    row = (
+        await db_session.execute(select(AgentOperation).order_by(AgentOperation.created_at))
+    ).scalar_one()
+    assert row.state is OperationState.FAILED
+    assert row.draft is None  # nothing partial was ever persisted
 
     resumed = await db_client.post(f"/api/v1/operations/{row.id}/resume", json={})
     assert resumed.status_code == 200

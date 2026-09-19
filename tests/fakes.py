@@ -524,19 +524,24 @@ def scripted_draft_model(
     *,
     prompts: list[str] | None = None,
     fail: Exception | None = None,
+    fail_after_fragments: Exception | None = None,
+    fragments_before_fail: int = 1,
 ) -> FunctionModel:
     """FunctionModel scripting one structured-output draft run (writing agent).
 
     Same trick as `scripted_association_model`: the model calls the agent's
     single output tool with `{"content": ..., "title": ...}` so pydantic-ai
     validates it into `DraftOutput` exactly as a real provider would. `prompts`
-    collects the run's user prompt; `fail` raises instead, for provider-
-    failure mapping.
+    collects the run's user prompt; `fail` raises instead (provider down at
+    start); `fail_after_fragments` raises after `fragments_before_fail`
+    fragments were already streamed (provider died mid-stream — deltas stay
+    sent).
 
     Served as a *streamed* response (`stream_function`): the service runs the
-    draft via `Agent.run_stream`, which requires a streaming model, so the
-    output tool call arrives as a delta exactly like a real provider's
-    streamed tool call.
+    draft via `Agent.iter`, which requires a streaming model. The tool-call
+    arguments arrive in THREE fragments (name + first slice, then the rest),
+    matching a real provider's streamed tool call and pinning the service's
+    `draft_delta` order and concatenation contract.
     """
     payload = {"content": content, "title": title}
 
@@ -546,13 +551,26 @@ def scripted_draft_model(
         if prompts is not None:
             prompts.append(_first_user_prompt(messages))
         assert info.output_tools, "draft agent must use structured output"
-        yield {
-            0: DeltaToolCall(
-                name=info.output_tools[0].name,
-                json_args=json.dumps(payload),
-                tool_call_id="call_draft",
-            )
-        }
+        args = json.dumps(payload)
+        cut = max(1, len(args) // 3)
+        fragments = [args[:cut], args[cut : 2 * cut], args[2 * cut :]]
+        # A leading name/id-only chunk completes the tool-call part; the
+        # argument JSON then streams as three plain args fragments — sending
+        # partial args alongside the name would end the call early.
+        # `fragments_before_fail` counts the name chunk too.
+        for index, fragment in enumerate([None, *fragments]):
+            if fail_after_fragments is not None and index == fragments_before_fail - 1:
+                raise fail_after_fragments
+            if fragment is None:
+                yield {
+                    0: DeltaToolCall(
+                        name=info.output_tools[0].name,
+                        json_args=None,
+                        tool_call_id="call_draft",
+                    )
+                }
+            else:
+                yield {0: DeltaToolCall(json_args=fragment)}
 
     return FunctionModel(stream_function=stream_function, model_name="scripted-draft")
 

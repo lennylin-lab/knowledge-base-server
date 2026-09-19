@@ -62,6 +62,21 @@ class AssociationsResultEvent(AssociationsResult):
     payload (deterministic candidate metadata plus LLM reasons), flat."""
 
 
+class DraftDeltaEvent(BaseModel):
+    """One raw fragment of the draft output tool's streamed JSON arguments.
+
+    Emitted while generation is in flight, in provider order, verbatim — the
+    server never parses partial JSON (a client concatenates the `delta`
+    strings; their sum equals the final tool-call argument JSON exactly).
+    Informational only: a client discards partials when the stream ends in
+    the terminal `error`, and the complete result still arrives atomically
+    as the `draft` event.
+    """
+
+    run_id: str
+    delta: str
+
+
 class OperationDraftEvent(BaseModel):
     """The completed draft operation — additive draft-stream result event.
 
@@ -91,6 +106,7 @@ AgentStreamEvent = (
     | SummaryProgressEvent
     | SummaryResultEvent
     | AssociationsResultEvent
+    | DraftDeltaEvent
     | OperationDraftEvent
     | AgentDoneEvent
     | ErrorEvent
