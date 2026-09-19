@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 26
-- **Last Active**: 2026-09-17
+- **Total Sessions**: 27
+- **Last Active**: 2026-09-19
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~595 | Active |
+| `journal-1.md` | ~618 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 27 | 2026-09-19 | MCP stdio sidecar bridge (supergateway) for containerized deploys | `e26fe9a`, `469ac9f` | `main` |
 | 26 | 2026-09-17 | Gateway issue #4 closed: per-model feature isolation completed | `636bc00` | `main` |
 | 25 | 2026-09-17 | Draft endpoint SSE streaming | `9be2b39`, `ea841d0` | `main` |
 | 24 | 2026-09-16 | Gateway v1.3 model control plane adopted; deferred items closed via #5/#6/#7/#8 retests | `ef63ba1`, `cdf4ec3`, `cfc642c`, `ce1e75f`, `ab520a0` | `main` |

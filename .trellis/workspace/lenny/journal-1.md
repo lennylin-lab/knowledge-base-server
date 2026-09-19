@@ -593,3 +593,26 @@ Closed gateway issue #4. Exploration showed Feature 4's mechanism (capability ma
 ### Status
 
 [OK] **Completed**
+
+
+## Session 27: MCP stdio sidecar bridge (supergateway) for containerized deploys
+<!-- trellis-session: v=2 fp=bf608654e2c9116d -->
+
+**Date**: 2026-09-19
+**Task**: MCP stdio sidecar bridge (supergateway) for containerized deploys
+**Branch**: `main`
+
+### Summary
+
+Adopted the server-side sidecar pattern for stdio MCP servers: new docker/mcp-sidecar image (supergateway 3.4.3 + context7-mcp 4.1.1, build-time pinned, zero runtime npm downloads), opt-in mcp profile in dev+prod compose, prod app reads mcp.json from a directory-mounted ./mcp-config (graceful disable when absent), mcp.json.example switched to url form, docs/mcp-sidecars.md guide. Verified end-to-end with the real McpManager client against the running sidecar; quality gates green.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `e26fe9a` | feat(mcp): bridge stdio MCP servers via supergateway sidecars |
+| `469ac9f` | test(mcp): example config asserts the sidecar url form |
+
+### Status
+
+[OK] **Completed**
