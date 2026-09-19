@@ -221,9 +221,12 @@ The draft stream (`POST /operations/draft`, `services/operation.py`) adds one
 persistence-timing rule on top of the shared discipline: the operation's
 terminal state (`completed`/`failed`) is committed BEFORE the terminal event
 is yielded, so a client that stops reading never sees success for unpersisted
-work. Mid-stream failure leaves the operation durably `failed` with error
-details and resumable via `/resume`; the stream ends at the draft — it never
-auto-applies.
+work. The model call itself runs via `agent.run_stream` (structured output
+aggregated server-side — the wire stays atomic) because the gateway in front
+of the provider enforces a whole-request 60s deadline on non-streaming
+completions; streaming keeps bytes flowing past it. Mid-stream failure leaves
+the operation durably `failed` with error details and resumable via
+`/resume`; the stream ends at the draft — it never auto-applies.
 
 Cache hits keep the same `run_started` → result → `done` shape with no
 progress events and no model call. The pre-stream rule is unchanged: the
