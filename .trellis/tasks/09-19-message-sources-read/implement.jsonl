@@ -1,0 +1,3 @@
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend spec entry point with pre-dev checklist"}
+{"file": ".trellis/spec/backend/chat-guidelines.md", "reason": "Chat session/message layer conventions"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "Reuse SearchHit field definitions for SourceRef projection"}
