@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 29
+- **Total Sessions**: 30
 - **Last Active**: 2026-09-19
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~663 | Active |
+| `journal-1.md` | ~686 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 30 | 2026-09-19 | Expose ChatMessage.sources for citation replay | `da28939`, `df260ac` | `main` |
 | 29 | 2026-09-19 | Session messages keyset pagination + citation-link design | `1cf9097` | `main` |
 | 28 | 2026-09-19 | Draft token-by-token streaming via draft_delta events | `c0aa3ff`, `33d4950` | `main` |
 | 27 | 2026-09-19 | MCP stdio sidecar bridge (supergateway) for containerized deploys | `e26fe9a`, `469ac9f` | `main` |

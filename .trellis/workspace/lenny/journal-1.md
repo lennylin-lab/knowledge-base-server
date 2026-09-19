@@ -661,3 +661,26 @@ Discussed citation linking design (keep [n] from the model, frontend maps n->doc
 ### Status
 
 [OK] **Completed**
+
+
+## Session 30: Expose ChatMessage.sources for citation replay
+<!-- trellis-session: v=2 fp=a32e634fb5187640 -->
+
+**Date**: 2026-09-19
+**Task**: Expose ChatMessage.sources for citation replay
+**Branch**: `main`
+
+### Summary
+
+Implemented citation replay: MessageRead now carries sources as slim SourceRef (document_id/document_title/document_tags/chunk_index) projected from the persisted SearchHit dumps via a mode=before validator on both full and paginated session read paths; list order is the [n] citation number; content/score/es_rank/vector_distance/es_score never exposed; malformed stored entries skipped, never 500. Codified the citation replay contract in .trellis/spec/backend/chat-guidelines.md. Full suite 710 passed, lint/mypy green. Remaining follow-up: Flutter client wiring (issue lennylin-lab/knowledge-base-flutter#6).
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `da28939` | feat(session): expose slim SourceRef list on MessageRead for citation replay |
+| `df260ac` | docs(spec): citation replay contract for message sources |
+
+### Status
+
+[OK] **Completed**
