@@ -10,17 +10,19 @@ noise guard is term coverage (an ES `minimum_should_match` on the prose
 field, threaded from Settings through the query builder; the absolute
 `_score` floor is a disabled-by-default operator escape hatch — see
 `DEFAULT_BM25_MIN_SCORE` below), and the vector leg drops hits beyond a
-cosine-distance ceiling. The fused ranking applies a relative floor
-against the top hit — empty results beat noise on small corpora. When the
-vector ceiling empties its leg, a rescue tier admits that leg's clustered
-head (short keyword queries sit systematically farther from long chunks, so
-the absolute ceiling alone would silence semantic recall exactly when it is
-needed) — but only as a backstop for lexical failure: the gated BM25 leg
-must have no surviving hits (when BM25 already answered, the semantic
-backstop would only inject the same-domain cluster), and the leg must be
-plausibly on-domain: a leg whose closest hit is already beyond the on-domain
-trigger stays empty (empty beats noise), and the rescue cap remains the
-absolute backstop.
+cosine-distance ceiling. After RRF fusion, when the vector leg ran and kept
+survivors, BM25-only hits from other documents are dropped (cross-topic
+lexical leaks); sibling chunks from vector-confirmed documents stay. The
+fused ranking then applies a relative floor against the top hit — empty
+results beat noise on small corpora. When the vector ceiling empties its
+leg, a rescue tier admits that leg's clustered head (short keyword queries
+sit systematically farther from long chunks, so the absolute ceiling alone
+would silence semantic recall exactly when it is needed) — but only as a
+backstop for lexical failure: the gated BM25 leg must have no surviving
+hits (when BM25 already answered, the semantic backstop would only inject
+the same-domain cluster), and the leg must be plausibly on-domain: a leg
+whose closest hit is already beyond the on-domain trigger stays empty (empty
+beats noise), and the rescue cap remains the absolute backstop.
 """
 
 from __future__ import annotations
@@ -231,6 +233,35 @@ def truncate_query(query: str, *, max_length: int) -> str:
     if 0 < max_length < len(query):
         return query[:max_length]
     return query
+
+
+def filter_bm25_only_cross_topic_leaks(
+    hits: Sequence[FusedHit],
+    *,
+    vector_leg_ran: bool,
+    vector_confirmed_doc_ids: set[UUID],
+) -> list[FusedHit]:
+    """Drop BM25-only hits from documents the vector leg did not confirm.
+
+    When the vector leg ran and its gate kept at least one row, fused hits
+    that rank ONLY on the BM25 leg (`vector_rank is None`) and belong to
+    other documents are cross-topic lexical leaks — generic query terms
+    ("并发", "后端") matching unrelated chunks. Sibling chunks from a
+    vector-confirmed document stay: the same topic often surfaces one chunk
+    semantically and others lexically (short keyword queries sit farther from
+    long chunks, so the vector ceiling may admit only the doc root).
+
+    When the vector leg did not run (BM25-only mode) or produced zero
+    survivors after gating (vocabulary-mismatch / rare-term queries), the
+    filter is a no-op — BM25-only hits are the intended answer.
+    """
+    if not vector_leg_ran or not vector_confirmed_doc_ids:
+        return list(hits)
+    return [
+        hit
+        for hit in hits
+        if hit.vector_rank is not None or hit.key.document_id in vector_confirmed_doc_ids
+    ]
 
 
 def apply_relative_score_floor(hits: Sequence[FusedHit], *, min_relative: float) -> list[FusedHit]:
@@ -493,7 +524,12 @@ class Retriever:
         es_keys = [ChunkKey(hit.document_id, hit.chunk_index) for hit in kept_es_hits]
         vector_keys = [ChunkKey(row.document_id, row.chunk_index) for row in kept_vector_rows]
         fused = fuse_rrf(es_keys, vector_keys)
-        floored = apply_relative_score_floor(fused, min_relative=self._rrf_min_relative)
+        confirmed = filter_bm25_only_cross_topic_leaks(
+            fused,
+            vector_leg_ran=vector_leg.ran,
+            vector_confirmed_doc_ids={row.document_id for row in kept_vector_rows},
+        )
+        floored = apply_relative_score_floor(confirmed, min_relative=self._rrf_min_relative)
         top = floored[:limit]
         es_scores = {ChunkKey(hit.document_id, hit.chunk_index): hit.score for hit in kept_es_hits}
 

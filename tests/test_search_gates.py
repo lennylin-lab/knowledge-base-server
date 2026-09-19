@@ -21,6 +21,7 @@ from app.rag.retriever import (
     ChunkKey,
     FusedHit,
     apply_relative_score_floor,
+    filter_bm25_only_cross_topic_leaks,
     filter_es_hits,
     filter_vector_rows,
     filter_vector_rows_with_rescue,
@@ -58,6 +59,63 @@ def _row(distance: float | None) -> ChunkRow:
 
 def _es_hit(score: float) -> EsChunkHit:
     return EsChunkHit(document_id=UUID(int=0), chunk_index=0, score=score)
+
+
+# --- filter_bm25_only_cross_topic_leaks (post-fusion cross-leg gate) ---
+
+
+def _hit(doc_seed: int, *, es_rank: int | None, vector_rank: int | None) -> FusedHit:
+    return FusedHit(
+        key=ChunkKey(UUID(int=doc_seed), 0),
+        score=1.0 / (doc_seed + 1),
+        es_rank=es_rank,
+        vector_rank=vector_rank,
+    )
+
+
+def test_cross_topic_filter_no_op_when_vector_leg_did_not_run():
+    hits = [_hit(1, es_rank=1, vector_rank=None), _hit(2, es_rank=2, vector_rank=None)]
+
+    assert (
+        filter_bm25_only_cross_topic_leaks(
+            hits, vector_leg_ran=False, vector_confirmed_doc_ids={UUID(int=99)}
+        )
+        == hits
+    )
+
+
+def test_cross_topic_filter_no_op_when_vector_leg_empty():
+    hits = [_hit(1, es_rank=1, vector_rank=None)]
+
+    assert (
+        filter_bm25_only_cross_topic_leaks(hits, vector_leg_ran=True, vector_confirmed_doc_ids=set())
+        == hits
+    )
+
+
+def test_cross_topic_filter_drops_bm25_only_from_unconfirmed_documents():
+    confirmed_doc = UUID(int=1)
+    hits = [
+        _hit(1, es_rank=1, vector_rank=1),
+        _hit(1, es_rank=2, vector_rank=None),  # sibling chunk, same doc
+        _hit(2, es_rank=3, vector_rank=None),  # cross-topic BM25 leak
+    ]
+
+    kept = filter_bm25_only_cross_topic_leaks(
+        hits, vector_leg_ran=True, vector_confirmed_doc_ids={confirmed_doc}
+    )
+
+    assert [hit.key for hit in kept] == [hits[0].key, hits[1].key]
+
+
+def test_cross_topic_filter_keeps_cross_leg_hits_from_any_document():
+    hits = [_hit(2, es_rank=5, vector_rank=2)]
+
+    kept = filter_bm25_only_cross_topic_leaks(
+        hits, vector_leg_ran=True, vector_confirmed_doc_ids={UUID(int=1)}
+    )
+
+    assert kept == hits
 
 
 # --- apply_relative_score_floor (post-fusion relative gate) ---
