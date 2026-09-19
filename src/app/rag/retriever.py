@@ -10,9 +10,11 @@ noise guard is term coverage (an ES `minimum_should_match` on the prose
 field, threaded from Settings through the query builder; the absolute
 `_score` floor is a disabled-by-default operator escape hatch — see
 `DEFAULT_BM25_MIN_SCORE` below), and the vector leg drops hits beyond a
-cosine-distance ceiling. After RRF fusion, when the vector leg ran and kept
-survivors, BM25-only hits from other documents are dropped (cross-topic
-lexical leaks); sibling chunks from vector-confirmed documents stay. The
+cosine-distance ceiling. After RRF fusion, when the vector leg ran and produced a confirmation set
+(primary survivors, or — when the ceiling empties the tier but the leg is
+still on-domain — document ids within the rescue window), BM25-only hits
+from other documents are dropped (cross-topic lexical leaks); sibling chunks
+from vector-confirmed documents stay. The
 fused ranking then applies a relative floor against the top hit — empty
 results beat noise on small corpora. When the vector ceiling empties its
 leg, a rescue tier admits that leg's clustered head (short keyword queries
@@ -235,6 +237,42 @@ def truncate_query(query: str, *, max_length: int) -> str:
     return query
 
 
+def vector_confirmed_document_ids(
+    rows: Sequence[ChunkRow],
+    kept_rows: Sequence[ChunkRow],
+    *,
+    vector_leg_ran: bool,
+    max_distance: float,
+    rescue_margin: float,
+    rescue_max_distance: float,
+    rescue_trigger_max_distance: float,
+) -> set[UUID]:
+    """Documents whose vector evidence confirms the query topic for BM25 filtering.
+
+    Primary-tier survivors (post-gate `kept_rows`) are the strict signal. When
+    the ceiling empties that tier but the leg is still plausibly on-domain
+    (`leg_min <= rescue_trigger_max_distance`), the rescue window over the raw
+    candidate rows supplies a softer confirmation set — close enough that BM25
+    hits from other documents (Flutter matching a lone "搜索") are cross-topic
+    leaks, without reopening the full rescue tier while BM25 already has hits.
+    Off-domain legs or a leg that did not run yield an empty set (filter disabled).
+    """
+    if kept_rows:
+        return {row.document_id for row in kept_rows}
+    if not vector_leg_ran or not rows or max_distance >= 2.0:
+        return set()
+    measured = [row.distance for row in rows if row.distance is not None]
+    if not measured:
+        return set()
+    leg_min = min(measured)
+    if leg_min > rescue_trigger_max_distance:
+        return set()
+    if rescue_margin <= 0 or rescue_max_distance <= 0:
+        return set()
+    window = min(leg_min + rescue_margin, rescue_max_distance)
+    return {row.document_id for row in rows if row.distance is not None and row.distance <= window}
+
+
 def filter_bm25_only_cross_topic_leaks(
     hits: Sequence[FusedHit],
     *,
@@ -243,17 +281,18 @@ def filter_bm25_only_cross_topic_leaks(
 ) -> list[FusedHit]:
     """Drop BM25-only hits from documents the vector leg did not confirm.
 
-    When the vector leg ran and its gate kept at least one row, fused hits
-    that rank ONLY on the BM25 leg (`vector_rank is None`) and belong to
-    other documents are cross-topic lexical leaks — generic query terms
-    ("并发", "后端") matching unrelated chunks. Sibling chunks from a
-    vector-confirmed document stay: the same topic often surfaces one chunk
-    semantically and others lexically (short keyword queries sit farther from
-    long chunks, so the vector ceiling may admit only the doc root).
+    When the vector leg ran and `vector_confirmed_document_ids` is non-empty,
+    fused hits that rank ONLY on the BM25 leg (`vector_rank is None`) and
+    belong to other documents are cross-topic lexical leaks — generic query
+    terms ("并发", "后端", "搜索") matching unrelated chunks. Sibling chunks
+    from a vector-confirmed document stay: the same topic often surfaces one
+    chunk semantically and others lexically (short keyword queries sit farther
+    from long chunks, so the vector ceiling may admit only the doc root).
 
-    When the vector leg did not run (BM25-only mode) or produced zero
-    survivors after gating (vocabulary-mismatch / rare-term queries), the
-    filter is a no-op — BM25-only hits are the intended answer.
+    When the vector leg did not run (BM25-only mode), is off-domain, or
+    produced no confirmation set (vocabulary-mismatch / rare-term queries with
+    the whole leg beyond the on-domain trigger), the filter is a no-op —
+    BM25-only hits are the intended answer.
     """
     if not vector_leg_ran or not vector_confirmed_doc_ids:
         return list(hits)
@@ -527,7 +566,15 @@ class Retriever:
         confirmed = filter_bm25_only_cross_topic_leaks(
             fused,
             vector_leg_ran=vector_leg.ran,
-            vector_confirmed_doc_ids={row.document_id for row in kept_vector_rows},
+            vector_confirmed_doc_ids=vector_confirmed_document_ids(
+                vector_leg.rows,
+                kept_vector_rows,
+                vector_leg_ran=vector_leg.ran,
+                max_distance=self._vector_max_distance,
+                rescue_margin=self._vector_rescue_margin,
+                rescue_max_distance=self._vector_rescue_max_distance,
+                rescue_trigger_max_distance=self._vector_rescue_trigger_max_distance,
+            ),
         )
         floored = apply_relative_score_floor(confirmed, min_relative=self._rrf_min_relative)
         top = floored[:limit]

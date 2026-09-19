@@ -23,6 +23,7 @@ from app.rag.retriever import (
     apply_relative_score_floor,
     filter_bm25_only_cross_topic_leaks,
     filter_es_hits,
+    vector_confirmed_document_ids,
     filter_vector_rows,
     filter_vector_rows_with_rescue,
     truncate_query,
@@ -59,6 +60,101 @@ def _row(distance: float | None) -> ChunkRow:
 
 def _es_hit(score: float) -> EsChunkHit:
     return EsChunkHit(document_id=UUID(int=0), chunk_index=0, score=score)
+
+
+# --- vector_confirmed_document_ids (cross-leg confirmation set) ---
+
+
+def test_vector_confirmed_docs_primary_survivors_take_precedence():
+    doc_a, doc_b = UUID(int=1), UUID(int=2)
+    kept = [_row(0.1)]
+    kept[0] = ChunkRow(
+        document_id=doc_a,
+        chunk_index=0,
+        content="",
+        document_title="A",
+        document_tags=[],
+        distance=0.1,
+    )
+    raw = [
+        ChunkRow(
+            document_id=doc_b,
+            chunk_index=0,
+            content="",
+            document_title="B",
+            document_tags=[],
+            distance=0.2,
+        ),
+        kept[0],
+    ]
+
+    assert vector_confirmed_document_ids(
+        raw,
+        kept,
+        vector_leg_ran=True,
+        max_distance=DEFAULT_VECTOR_MAX_DISTANCE,
+        rescue_margin=DEFAULT_VECTOR_RESCUE_MARGIN,
+        rescue_max_distance=DEFAULT_VECTOR_RESCUE_MAX_DISTANCE,
+        rescue_trigger_max_distance=DEFAULT_VECTOR_RESCUE_TRIGGER_MAX_DISTANCE,
+    ) == {doc_a}
+
+
+def test_vector_confirmed_docs_soft_window_when_primary_empty_and_on_domain():
+    doc_a, doc_b, doc_c = UUID(int=1), UUID(int=2), UUID(int=3)
+    raw = [
+        ChunkRow(
+            document_id=doc_a,
+            chunk_index=0,
+            content="",
+            document_title="A",
+            document_tags=[],
+            distance=0.455,
+        ),
+        ChunkRow(
+            document_id=doc_b,
+            chunk_index=0,
+            content="",
+            document_title="B",
+            document_tags=[],
+            distance=0.569,
+        ),
+        ChunkRow(
+            document_id=doc_c,
+            chunk_index=0,
+            content="",
+            document_title="C",
+            document_tags=[],
+            distance=0.674,
+        ),
+    ]
+
+    # Window = min(0.455 + 0.15, 0.85) = 0.605: A and B, not the off-window C.
+    assert vector_confirmed_document_ids(
+        raw,
+        [],
+        vector_leg_ran=True,
+        max_distance=DEFAULT_VECTOR_MAX_DISTANCE,
+        rescue_margin=DEFAULT_VECTOR_RESCUE_MARGIN,
+        rescue_max_distance=DEFAULT_VECTOR_RESCUE_MAX_DISTANCE,
+        rescue_trigger_max_distance=DEFAULT_VECTOR_RESCUE_TRIGGER_MAX_DISTANCE,
+    ) == {doc_a, doc_b}
+
+
+def test_vector_confirmed_docs_empty_when_off_domain():
+    raw = [_row(0.70)]
+
+    assert (
+        vector_confirmed_document_ids(
+            raw,
+            [],
+            vector_leg_ran=True,
+            max_distance=DEFAULT_VECTOR_MAX_DISTANCE,
+            rescue_margin=DEFAULT_VECTOR_RESCUE_MARGIN,
+            rescue_max_distance=DEFAULT_VECTOR_RESCUE_MAX_DISTANCE,
+            rescue_trigger_max_distance=DEFAULT_VECTOR_RESCUE_TRIGGER_MAX_DISTANCE,
+        )
+        == set()
+    )
 
 
 # --- filter_bm25_only_cross_topic_leaks (post-fusion cross-leg gate) ---
