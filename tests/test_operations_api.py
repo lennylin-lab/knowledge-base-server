@@ -49,17 +49,22 @@ def install_scripted_draft(
     actually reached the model, in order (its length is the model-call count).
     """
     prompts: list[str] = []
+    model_kwargs: dict[str, object] = {}
 
     def _override(session: SessionDep) -> AgentOperationService:
         return AgentOperationService(
             session,
-            model=scripted_draft_model(DRAFT_CONTENT, DRAFT_TITLE, prompts=prompts),
+            model=scripted_draft_model(
+                DRAFT_CONTENT, DRAFT_TITLE, prompts=prompts, **model_kwargs
+            ),
             retriever=StubRetriever(
                 outcome=SearchOutcome(mode="bm25", items=[], es_hits=0, vector_hits=0)
             ),
         )
 
-    def _install() -> list[str]:
+    def _install(**scripted: object) -> list[str]:
+        nonlocal model_kwargs
+        model_kwargs = scripted
         app.dependency_overrides[get_agent_operation_service] = _override
         return prompts
 
@@ -326,6 +331,33 @@ async def test_draft_streams_event_order_and_persists_completed(
 
     count = (await db_session.execute(select(func.count()).select_from(ChatMessage))).scalar_one()
     assert count == 0  # the chat-history firewall holds for streamed drafts too
+
+
+async def test_draft_stream_skips_empty_opening_args_serialization(
+    db_client, db_session, install_scripted_draft
+):
+    """A provider opening chunk carrying EMPTY arguments (observed live with
+    gpt-5.5 through the gateway) materializes a part whose `{}` serialization
+    is not a real fragment: it must never stream — the `draft_delta`
+    concatenation stays exactly the final argument JSON."""
+    document = await _seed_document(db_client)
+    prompts = install_scripted_draft(open_args_json="")
+
+    resp = await db_client.post(f"/api/v1/operations/draft?document_id={document['id']}")
+
+    assert resp.status_code == 200
+    events = parse_sse(resp.text)
+    names = [name for name, _ in events]
+    assert names[0] == "run_started"
+    assert names[-2:] == ["draft", "done"]
+    deltas = [body for name, body in events if name == "draft_delta"]
+    assert deltas, "the real argument fragments must still stream"
+    # No phantom `{}` prepended; the concatenation is the args JSON exactly.
+    assert "".join(d["delta"] for d in deltas) == json.dumps(
+        {"content": DRAFT_CONTENT, "title": DRAFT_TITLE}
+    )
+    assert events[-2][1]["content"] == DRAFT_CONTENT
+    assert len(prompts) == 1
 
 
 async def test_draft_provider_failure_emits_single_error_leaves_failed_resumable(

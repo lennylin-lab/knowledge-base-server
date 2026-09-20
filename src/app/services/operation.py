@@ -513,9 +513,14 @@ def _output_tool_delta(
         if not isinstance(part, ToolCallPart):
             return None
         part_names[event.index] = part.tool_name
-        # A part can start before any argument bytes arrive (`args is None`);
-        # its `{}` serialization is not a real fragment and must not stream.
-        args_json = part.args_as_json_str() if part.args is not None else ""
+        # A part can start without real argument bytes: `args is None`
+        # (name/id-only opening chunk) or EMPTY — providers deliver an empty
+        # arguments string on the opening chunk and the framework materializes
+        # `args == {}`, whose `{}` serialization would prepend a phantom
+        # fragment and break the concatenation contract (the fragments' sum
+        # must equal the final argument JSON exactly — observed live with
+        # gpt-5.5 through the gateway). Neither streams.
+        args_json = part.args_as_json_str() if part.args else ""
         if (
             part.tool_name == _OUTPUT_TOOL_NAME
             and args_json

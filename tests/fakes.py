@@ -572,6 +572,7 @@ def scripted_draft_model(
     fail: Exception | None = None,
     fail_after_fragments: Exception | None = None,
     fragments_before_fail: int = 1,
+    open_args_json: str | None = None,
 ) -> FunctionModel:
     """FunctionModel scripting one structured-output draft run (writing agent).
 
@@ -581,7 +582,9 @@ def scripted_draft_model(
     collects the run's user prompt; `fail` raises instead (provider down at
     start); `fail_after_fragments` raises after `fragments_before_fail`
     fragments were already streamed (provider died mid-stream — deltas stay
-    sent).
+    sent). `open_args_json` scripts the opening chunk's argument payload
+    (`None` = absent, `""` = the empty string real providers deliver, whose
+    `{}` serialization must never stream as a `draft_delta`).
 
     Served as a *streamed* response (`stream_function`): the service runs the
     draft via `Agent.iter`, which requires a streaming model. The tool-call
@@ -611,7 +614,7 @@ def scripted_draft_model(
                 yield {
                     0: DeltaToolCall(
                         name=info.output_tools[0].name,
-                        json_args=None,
+                        json_args=open_args_json,
                         tool_call_id="call_draft",
                     )
                 }
