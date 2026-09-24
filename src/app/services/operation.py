@@ -430,9 +430,7 @@ class AgentOperationService:
                         continue  # tool/output handling needs no wire event
                     async with node.stream(run.ctx) as stream:
                         async for event in stream:
-                            wire_delta = _output_tool_delta(
-                                run_id, event, part_names, forwarded
-                            )
+                            wire_delta = _output_tool_delta(run_id, event, part_names, forwarded)
                             if wire_delta is not None:
                                 yield wire_delta
                 run_result = run.result
@@ -521,11 +519,7 @@ def _output_tool_delta(
         # must equal the final argument JSON exactly — observed live with
         # gpt-5.5 through the gateway). Neither streams.
         args_json = part.args_as_json_str() if part.args else ""
-        if (
-            part.tool_name == _OUTPUT_TOOL_NAME
-            and args_json
-            and event.index not in forwarded
-        ):
+        if part.tool_name == _OUTPUT_TOOL_NAME and args_json and event.index not in forwarded:
             forwarded.add(event.index)
             return DraftDeltaEvent(run_id=run_id, delta=args_json)
         return None
@@ -534,11 +528,7 @@ def _output_tool_delta(
         name = part_names.get(event.index, "") + (delta.tool_name_delta or "")
         if name:
             part_names[event.index] = name
-        if (
-            name == _OUTPUT_TOOL_NAME
-            and isinstance(delta.args_delta, str)
-            and delta.args_delta
-        ):
+        if name == _OUTPUT_TOOL_NAME and isinstance(delta.args_delta, str) and delta.args_delta:
             forwarded.add(event.index)
             return DraftDeltaEvent(run_id=run_id, delta=delta.args_delta)
     return None

@@ -54,9 +54,7 @@ def install_scripted_draft(
     def _override(session: SessionDep) -> AgentOperationService:
         return AgentOperationService(
             session,
-            model=scripted_draft_model(
-                DRAFT_CONTENT, DRAFT_TITLE, prompts=prompts, **model_kwargs
-            ),
+            model=scripted_draft_model(DRAFT_CONTENT, DRAFT_TITLE, prompts=prompts, **model_kwargs),
             retriever=StubRetriever(
                 outcome=SearchOutcome(mode="bm25", items=[], es_hits=0, vector_hits=0)
             ),
@@ -422,9 +420,7 @@ async def test_draft_failure_after_deltas_emits_single_error_leaves_failed_resum
     prompts: list[str] = []
     failure = APIStatusError(
         "upstream exploded",
-        response=httpx.Response(
-            500, request=httpx.Request("POST", "http://provider.test/v1/chat")
-        ),
+        response=httpx.Response(500, request=httpx.Request("POST", "http://provider.test/v1/chat")),
         body=None,
     )
 
