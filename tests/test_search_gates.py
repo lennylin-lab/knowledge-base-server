@@ -23,10 +23,10 @@ from app.rag.retriever import (
     apply_relative_score_floor,
     filter_bm25_only_cross_topic_leaks,
     filter_es_hits,
-    vector_confirmed_document_ids,
     filter_vector_rows,
     filter_vector_rows_with_rescue,
     truncate_query,
+    vector_confirmed_document_ids,
 )
 from app.repositories.document_chunk import ChunkRow
 from app.search.es import EsChunkHit
@@ -184,7 +184,9 @@ def test_cross_topic_filter_no_op_when_vector_leg_empty():
     hits = [_hit(1, es_rank=1, vector_rank=None)]
 
     assert (
-        filter_bm25_only_cross_topic_leaks(hits, vector_leg_ran=True, vector_confirmed_doc_ids=set())
+        filter_bm25_only_cross_topic_leaks(
+            hits, vector_leg_ran=True, vector_confirmed_doc_ids=set()
+        )
         == hits
     )
 
