@@ -684,3 +684,31 @@ Implemented citation replay: MessageRead now carries sources as slim SourceRef (
 ### Status
 
 [OK] **Completed**
+
+
+## Session 33: Description joins retrieval, agents, and association recall (issue #4)
+<!-- trellis-session: v=2 fp=690393d69ef24da1 -->
+
+**Date**: 2026-09-25
+**Task**: Description joins retrieval, agents, and association recall (issue #4)
+**Branch**: `feat/description-rag-association`
+
+### Summary
+
+Implemented GitHub issue #4 on feat/description-rag-association: 500-char front-matter description cap (422 via ValidationError); description in ES mapping (IK pair) and the BM25 identity group (title^2 + heading_path^1.5 + description^1.5, boost 1.5 calibrated by three live-ES probes); embedding_input gains a description prefix line and the indexing pipeline stores a document-level description_embedding (nullable Vector(1536) + HNSW, migration 0013, replace semantics) in one embed batch; document_description plumbed through ChunkRow/RetrievedChunk/SearchHit/sources/SourceRef with back-compatible defaults; QA/Writing Summary line, Summarize Description line, association source+candidate description lines plus prompt md updates; association third recall leg find_by_description_similarity (pure PG, no-op when source embedding NULL) merged deterministically with a 'similar description (cosine distance X.XXXX)' signal. Full offline+db+es suites green (746 default); trellis-check PASS (migration now pins Vector(1536) literally); spec contracts captured in search-guidelines.md; README runbook documents the reindex migration. Known pre-existing unrelated failure: test_arq_live (missing tenant_id arg at HEAD).
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `c9d61e5` | feat(documents): cap front matter description at 500 chars with 422 |
+| `a25cc9f` | feat(search): index description in ES mapping and the BM25 identity group |
+| `da3134f` | feat(rag): embed description in chunk inputs and store document-level vectors |
+| `9136296` | feat(search): surface document_description through read models and sources |
+| `d971e1a` | feat(agents): expose description to qa, writing, summarize, and association |
+| `d069400` | docs(readme): add description reindex migration to the runbook |
+| `b8a9e03` | docs(spec): capture description retrieval and association contracts |
+
+### Status
+
+[OK] **Completed**
