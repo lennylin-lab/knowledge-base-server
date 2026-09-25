@@ -172,8 +172,8 @@ was the priority (D2 measured 0 hits for identifier queries before this).
 ancestor breadcrumb from `rag/chunker.py::Chunk`, IK-analyzed like `title`),
 boosted mildly in `bm25_chunk_query`. It is retrieval signal only: PG stores
 the plain chunk text and search returns that text unmodified as `content`;
-the vector leg embeds `title + heading_path + text` (`rag/indexer.py
-::embedding_input`) but nothing user-visible changes shape.
+the vector leg embeds `title + description + heading_path + text` (`rag/
+indexer.py::embedding_input`) but nothing user-visible changes shape.
 
 > **Warning**: analyzer changes never apply to existing indexes (Elasticsearch
 > validates mappings, it does not re-analyze in place) — and chunking changes
@@ -284,7 +284,12 @@ the vector leg embeds `title + heading_path + text` (`rag/indexer.py
 **Calibration record**: design.md § Calibration of task
 `09-08-es-bm25-scoring` holds the before/after probe matrix (9 queries ×
 coverage values) — re-run the probe before changing coverage or boosts.
-The vector rescue on-domain trigger
+The description identity-group boost (`_DESCRIPTION_BOOST = 1.5`) was
+calibrated 2026-09-25 (task `09-25-description-rag-association`, three live
+probes: description-only recall, no-over-boost on title duplication — ladder
+rejects ≥ 2.5 and additive grouping —, empty-description parity; record in
+that task's design.md and the description scenario above). The vector rescue
+on-domain trigger
 (`KB_SEARCH_VECTOR_RESCUE_TRIGGER_MAX_DISTANCE`, default 0.62, added
 2026-09-10) is calibrated in design.md § Calibration of task
 `09-10-irrelevant-query-noise-gates` (real 15-doc corpus: in-domain
@@ -515,6 +520,138 @@ async with self._agent.run_stream(
     retrieval_question, deps=deps,
     message_history=turn.history if turn and turn.history else None,
 ):
+```
+
+---
+
+## Scenario: Front-matter description is a document-level retrieval, agent, and association signal
+
+### 1. Scope / Trigger
+
+- Trigger: cross-layer contract change — ES mapping + BM25 identity group +
+  embedding inputs + a new PG column (`documents.description_embedding`,
+  migration `0013`) + the parse-layer length cap, added 2026-09-25 (task
+  `09-25-description-rag-association`). Any change to the description's
+  indexing shape, boost, embedding inputs, or the association third leg must
+  re-verify this scenario.
+
+### 2. Signatures
+
+- `services/document.py::DESCRIPTION_MAX_CHARS = 500` — the only cap
+  declaration; enforced in `_parse_front_matter` on the STRIPPED value.
+- `search/es.py::replace_document_chunks(..., description: str, ...)` —
+  required parameter, written into every chunk doc's `_source`.
+- `rag/indexer.py::embedding_input(title, chunk, *, description="")` —
+  golden shape `{title}\n{description}\n{heading_path}\n\n{text}`; the
+  description line collapses when empty (no blank-line artifact).
+- `DocumentRepository.find_by_description_similarity(embedding, *,
+  tenant_id, exclude_id, limit) -> Sequence[DescriptionNeighborRow]` —
+  live docs, `description_embedding IS NOT NULL`, deterministic
+  `(distance, id)` order.
+
+### 3. Contracts
+
+- **Identity group**: `bm25_chunk_query`'s `best_fields` identity group is
+  `title^2 + heading_path^1.5 + description^1.5` (`_DESCRIPTION_BOOST`,
+  calibrated — see below). Description is IK-tokenized like
+  title/heading_path, so the group-level `minimum_should_match` coverage
+  stays well-defined; `best_fields` max-semantics means a description that
+  repeats the title text cannot double-count it. Boost stayed BELOW title
+  (1.5 < 2) by measurement: at 1.5 a duplicated-identity doc scores ~2.0x
+  its body+code evidence while a genuine body+code match scores ~2.5x; the
+  ladder rejects >= 2.5 (and any additive grouping) — re-run the
+  `test_es_relevance.py` probes before changing it.
+- **Document-level, never chunk body**: description rides as a per-chunk
+  repeated document field (ES) and an embedding-input prefix (vector). It is
+  NEVER written into stored `chunk_text` / `documents.content`, and never
+  concatenated into search-returned content.
+- **Chunk + document embedding in ONE batch** (`process_document_raising`):
+  `embed_texts([description]? + [embedding_input(...)])` — `vectors[0]`
+  lands on `documents.description_embedding` (nullable `Vector(1536)`, HNSW
+  cosine index `ix_documents_description_embedding_hnsw`), the rest on the
+  chunk rows, in the SAME staging transaction. Replace semantics on every
+  re-index: an edited-away description clears the column to NULL.
+- **Description embedding input is the blurb ALONE** (no title prefix): both
+  association sides (source and candidates) embed symmetrically, and a title
+  prefix would double-weight the common case of a blurb restating its title.
+- **Association third leg**: pure PG (no ES dependency). Source embedding
+  NULL -> the leg is a no-op and two-leg behavior is byte-identical;
+  `_merge_candidates(vector, description, tag)` unions deterministically
+  (vector-ranked -> description-ranked -> tag-only), signals `"; "`-joined,
+  description signal format `similar description (cosine distance X.XXXX)`
+  (mirror of `_vector_signal`).
+- **Read-model default**: `document_description: str = ""` on `ChunkRow` /
+  `RetrievedChunk` / `SearchHit` / session `SourceRef` — old cached outcomes
+  and old stored session sources validate unchanged (tolerant `.get` in
+  `SearchOutcome.from_json`, defaulting field in `SourceRef`).
+
+### 4. Validation & Error Matrix
+
+- Stripped `description` > 500 chars on create/update -> `ValidationError`
+  (`details.field="description"`, `max_chars`) -> 422. The cap counts the
+  STRIPPED value (a padded scalar whose stripped form is exactly 500 is
+  accepted). Save-time only: legacy over-cap rows stay until their next save.
+- Non-string front-matter `description` -> `ValidationError` (pre-existing),
+  absent/empty/whitespace -> `""` (pre-existing).
+- `update_document` reindex guard needs NO description branch: description is
+  a pure function of content, covered by the content-hash guard (like tags).
+- Reindex after this change: drop index + `alembic upgrade head` (0013) +
+  reset `index_status` to `pending` + `python -m app.cli reindex` — the sweep
+  re-embeds chunks (new input) AND descriptions (new column) in one pass.
+  README runbook holds the entry.
+
+### 5. Good/Base/Bad Cases
+
+- Good: a query term present ONLY in a document's description recalls its
+  chunks (identity group carries it) — probe-pinned in
+  `tests/test_es_relevance.py`.
+- Base: empty-description documents — byte-identical BM25 scores (+/-1e-6
+  probe), collapsed embedding golden strings, no-op association leg.
+- Bad: adding `description` as an additive should-group (double-counts title
+  restatements); embedding the description with a title prefix (asymmetric,
+  double-weighted); importing `EMBEDDING_DIM` into migration 0013 (a
+  migration is a historical schema record — pin `Vector(1536)` literally,
+  precedent: 0003); writing description into `chunk_text`.
+
+### 6. Tests Required
+
+- `tests/test_documents_service.py` + `test_documents_api.py`: >500 -> 422
+  (create + update, field details), ==500 boundary, stripped-count pin,
+  rejected write leaves stored data untouched.
+- `tests/test_indexer.py`: literal golden strings for `embedding_input`
+  (with/without description — literal, NOT derived through the production
+  function, to avoid circular pins); single-batch pin (blurb first, absent
+  when empty); document-row write/clear (replace semantics); ES `_source`
+  carries description.
+- `tests/test_es_queries.py`: body pin carries `description^1.5`; boost
+  constant pinned below title; no-analyzer-key walk stays green.
+- `tests/test_es_relevance.py` (live): description-only-term recall,
+  no-over-boost on title duplication, empty-description parity.
+- `tests/test_association_service.py`: three-leg merge determinism (pure),
+  description-leg isolation (chunk-less same-blurb docs, exact signal),
+  self-exclusion / soft-delete invisibility, empty-source two-leg
+  byte-parity, prompt capture of source + candidate descriptions.
+- `tests/test_search_cache.py`: round-trip includes `document_description`
+  + old-payload (missing key) tolerance.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```python
+# Additive group: a description restating the title SUMS with it —
+# duplication inflates identity evidence over genuine body matches.
+{"match": {"description": {"query": q, "boost": _DESCRIPTION_BOOST}}},
+# a separate should-group alongside the identity group
+```
+
+#### Correct
+
+```python
+# Identity group stays best_fields (max within): a title restatement in the
+# description cannot exceed the title's own score.
+_IDENTITY_FIELDS = [f"title^{_TITLE_BOOST}", f"heading_path^{_HEADING_BOOST}",
+                    f"description^{_DESCRIPTION_BOOST}"]
 ```
 
 ---
