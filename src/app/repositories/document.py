@@ -19,6 +19,17 @@ class TagOverlapRow(NamedTuple):
     title: str
     tags: list[str]
     shared_tags: list[str]
+    description: str = ""
+
+
+class DescriptionNeighborRow(NamedTuple):
+    """One live document whose description embedding is near a source's."""
+
+    document_id: UUID
+    title: str
+    tags: list[str]
+    description: str
+    distance: float
 
 
 class DocumentRepository:
@@ -129,12 +140,13 @@ class DocumentRepository:
         without a query. `shared_tags` (the exact intersection with the
         source tags, sorted for a deterministic signal string) is computed
         from the returned row — a projection of data already fetched, not a
-        policy.
+        policy. `description` rides the projection so the service's merged
+        candidates always carry it without a follow-up read.
         """
         if not tags:
             return ()
         stmt = (
-            select(Document.id, Document.title, Document.tags)
+            select(Document.id, Document.title, Document.tags, Document.description)
             .where(
                 Document.tenant_id == tenant_id,
                 Document.deleted_at.is_(None),
@@ -151,6 +163,53 @@ class DocumentRepository:
                 title=row.title,
                 tags=list(row.tags),
                 shared_tags=sorted(source_tags.intersection(row.tags)),
+                description=row.description,
+            )
+            for row in (await self._session.execute(stmt)).all()
+        ]
+
+    async def find_by_description_similarity(
+        self,
+        embedding: Sequence[float],
+        *,
+        tenant_id: UUID,
+        exclude_id: UUID,
+        limit: int,
+    ) -> Sequence[DescriptionNeighborRow]:
+        """Association description leg: live documents with a non-null
+        description embedding nearest (cosine) to the source's.
+
+        The source embedding is already stored on the source row — no embed
+        call happens here. NULL embeddings (no blurb, or not re-indexed yet)
+        cannot match, which IS the no-op semantics. HNSW serves the cosine
+        order; `(distance, id)` keeps the ranking deterministic under
+        equal distances, same convention as the vector leg.
+        """
+        distance = Document.description_embedding.cosine_distance(list(embedding))
+        stmt = (
+            select(
+                Document.id,
+                Document.title,
+                Document.tags,
+                Document.description,
+                distance.label("distance"),
+            )
+            .where(
+                Document.tenant_id == tenant_id,
+                Document.deleted_at.is_(None),
+                Document.id != exclude_id,
+                Document.description_embedding.is_not(None),
+            )
+            .order_by(distance, Document.id)
+            .limit(limit)
+        )
+        return [
+            DescriptionNeighborRow(
+                document_id=row.id,
+                title=row.title,
+                tags=list(row.tags),
+                description=row.description,
+                distance=row.distance,
             )
             for row in (await self._session.execute(stmt)).all()
         ]

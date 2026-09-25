@@ -29,10 +29,15 @@ _ASSOCIATION_INSTRUCTIONS = load_prompt("association.md")
 
 @dataclass(slots=True)
 class AssociationDeps:
-    """Source-document context for one run; the agent itself is reusable."""
+    """Source-document context for one run; the agent itself is reusable.
+
+    `description` is the source's front-matter blurb ("" when it has none) —
+    it rides the prompt header so a blurb-to-blurb comparison stays possible.
+    """
 
     title: str
     tags: list[str]
+    description: str = ""
 
 
 @dataclass(slots=True)
@@ -47,6 +52,7 @@ class AssociationCandidate:
     title: str
     tags: list[str]
     signal: str
+    description: str = ""
 
 
 class AssociationPick(BaseModel):
@@ -71,22 +77,33 @@ def render_association_prompt(
     Each candidate carries its exact `document_id` — the handle the prompt
     tells the model to copy back verbatim — plus the deterministic signal
     that surfaced it, so the selection stays grounded in the pre-LLM data.
+    Non-empty descriptions render on the source header and every candidate
+    line; empty ones collapse (no blank-line drift).
     """
     lines = [
         f"# Document: {deps.title}",
         f"Tags: {', '.join(deps.tags) or 'none'}",
-        "",
-        "Excerpt of the document's content follows.",
-        excerpt,
-        "",
-        "# Candidate documents",
     ]
+    if deps.description:
+        lines.append(f"Description: {deps.description}")
+    lines.extend(
+        [
+            "",
+            "Excerpt of the document's content follows.",
+            excerpt,
+            "",
+            "# Candidate documents",
+        ]
+    )
     for number, candidate in enumerate(candidates, start=1):
-        lines.append(
+        line = (
             f"[{number}] id={candidate.document_id} — {candidate.title} "
             f"(tags: {', '.join(candidate.tags) or 'none'}; "
             f"signal: {candidate.signal})"
         )
+        if candidate.description:
+            line += f"; description: {candidate.description}"
+        lines.append(line)
     lines.append("")
     lines.append(
         "Select the genuinely related candidates from the list above and return their exact ids."

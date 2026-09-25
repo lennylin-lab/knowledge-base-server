@@ -22,7 +22,8 @@ from structlog.testing import capture_logs
 
 from app.core.exceptions import AppError, LLMProviderError, NotFoundError
 from app.models.tenant import DEFAULT_TENANT_ID
-from app.repositories.document_chunk import DocumentChunkRepository
+from app.repositories.document import DescriptionNeighborRow, TagOverlapRow
+from app.repositories.document_chunk import DocumentChunkRepository, NeighborDocumentRow
 from app.schemas.agent_stream import (
     AgentDoneEvent,
     AgentRunStartedEvent,
@@ -31,7 +32,7 @@ from app.schemas.agent_stream import (
     ErrorEvent,
 )
 from app.schemas.document import DocumentCreate
-from app.services.agents import AssociationService
+from app.services.agents import AssociationService, _description_signal, _merge_candidates
 from app.services.document import DocumentService
 from corpus import KOTLIN_CONTENT, PYTHON_CONTENT, neighbor_scripted_provider, seed_corpus
 from fakes import FakeCache, basis_vector, scripted_association_model
@@ -139,6 +140,149 @@ async def test_tag_leg_surfaces_shared_tag_document(session_factory, seed_indexe
     # The Kotlin doc shares exactly the `kotlin` tag with the JVM doc.
     assert "shared tags: kotlin" in result.associations[0].signal
     assert f"id={jvm_id}" in prompts[0]
+
+
+# --- description leg (third recall signal, pure PG over blurb embeddings) ---
+# Both docs below are front-matter-only (no chunks: the vector leg finds
+# nothing) sharing the SAME blurb text — the fake provider embeds identical
+# texts identically, so the candidate sits at cosine distance 0 on the
+# description leg while its disjoint tags keep the tag leg silent.
+
+
+BLURB = "A blurb about the zorblat rocket program."
+BLURB_SOURCE = f"---\ntitle: Blurb Source\ntags: [blurb]\ndescription: {BLURB}\n---\n"
+BLURB_NEIGHBOR = f"---\ntitle: Blurb Neighbor\ntags: [other]\ndescription: {BLURB}\n---\n"
+# No description at all: a NULL embedding is invisible to the description
+# leg, disjoint tags keep the tag leg silent (the design's no-op semantics).
+BLURB_UNRELATED = "---\ntitle: Zeta Notes\ntags: [zeta]\n---\n"
+
+
+def blurb_provider() -> object:
+    """Description text maps onto E0; everything else stays orthogonal E1."""
+    provider = neighbor_scripted_provider()
+    provider.vectors[BLURB] = basis_vector(0)
+    return provider
+
+
+@pytest.mark.es
+async def test_description_leg_surfaces_neighbor_with_readable_signal(
+    session_factory, seed_indexed
+):
+    provider = blurb_provider()
+    source_id = await seed_indexed(provider, BLURB_SOURCE)
+    neighbor_id = await seed_indexed(provider, BLURB_NEIGHBOR)
+    await seed_indexed(provider, BLURB_UNRELATED)
+    prompts: list[str] = []
+    service = make_service(
+        session_factory, scripted_association_model([pick(neighbor_id)], prompts=prompts)
+    )
+
+    result = await service.associate_document(source_id, tenant_id=DEFAULT_TENANT_ID)
+
+    # No chunks, disjoint tags: exactly the description leg surfaced it.
+    assert [item.document_id for item in result.associations] == [neighbor_id]
+    assert result.associations[0].signal == "similar description (cosine distance 0.0000)"
+    assert _description_signal(0.12345) == "similar description (cosine distance 0.1235)"
+    # Prompt grounding: the source header AND the candidate line carry the
+    # blurb, the source itself is never a candidate, and no other leg's
+    # signal was invented.
+    assert len(prompts) == 1
+    assert f"Description: {BLURB}" in prompts[0]
+    assert f"id={neighbor_id}" in prompts[0]
+    assert f"; description: {BLURB}" in prompts[0]
+    assert "cosine distance 0.0000" in prompts[0]
+    assert "shared tags" not in prompts[0]
+    assert f"id={source_id}" not in prompts[0]
+
+
+@pytest.mark.es
+async def test_description_leg_excludes_self_and_soft_deleted(session_factory, seed_indexed):
+    provider = blurb_provider()
+    source_id = await seed_indexed(provider, BLURB_SOURCE)
+    neighbor_id = await seed_indexed(provider, BLURB_NEIGHBOR)
+    await seed_indexed(provider, BLURB_UNRELATED)
+    await soft_delete(session_factory, neighbor_id)
+    prompts: list[str] = []
+    service = make_service(
+        session_factory, scripted_association_model([pick(uuid4())], prompts=prompts)
+    )
+
+    result = await service.associate_document(source_id, tenant_id=DEFAULT_TENANT_ID)
+
+    # The source never surfaces via its own embedding, and the soft-deleted
+    # neighbor is invisible: no candidates remain, so no LLM call happens.
+    assert result.associations == []
+    assert prompts == []
+
+
+async def test_empty_source_description_keeps_two_leg_signals_byte_identical(
+    db_session, session_factory
+):
+    """An unindexed (NULL-embedding) source degrades to the classic two legs
+    with signal strings unchanged — the description leg is a no-op."""
+    source = await make_document(db_session, ALPHA_SOURCE)  # no blurb, no chunks
+    neighbor = await make_document(db_session, ALPHA_NEIGHBOR)
+    prompts: list[str] = []
+    service = make_service(
+        session_factory, scripted_association_model([pick(neighbor.id)], prompts=prompts)
+    )
+
+    result = await service.associate_document(source.id, tenant_id=DEFAULT_TENANT_ID)
+
+    assert [item.document_id for item in result.associations] == [neighbor.id]
+    assert result.associations[0].signal == "shared tags: alpha"
+    assert "similar description" not in prompts[0]
+
+
+def test_merge_candidates_unions_three_legs_deterministically():
+    """Vector-ranked first, then description-ranked, then tag-only; multi-leg
+    documents appear once with `"; "`-joined signals in leg order."""
+    doc_a, doc_b, doc_c, doc_d = (uuid4() for _ in range(4))
+    vector_rows = [
+        NeighborDocumentRow(
+            document_id=doc_a, title="A", tags=["x"], description="blurb a", distance=0.1
+        ),
+        NeighborDocumentRow(
+            document_id=doc_b, title="B", tags=["y"], description="blurb b", distance=0.2
+        ),
+    ]
+    description_rows = [
+        DescriptionNeighborRow(
+            document_id=doc_b, title="B", tags=["y"], description="blurb b", distance=0.3
+        ),
+        DescriptionNeighborRow(
+            document_id=doc_c, title="C", tags=["z"], description="blurb c", distance=0.4
+        ),
+    ]
+    tag_rows = [
+        TagOverlapRow(
+            document_id=doc_c,
+            title="C",
+            tags=["z", "alpha"],
+            shared_tags=["alpha"],
+            description="blurb c",
+        ),
+        TagOverlapRow(
+            document_id=doc_d,
+            title="D",
+            tags=["alpha"],
+            shared_tags=["alpha"],
+            description="",
+        ),
+    ]
+
+    candidates = _merge_candidates(vector_rows, description_rows, tag_rows)
+
+    assert [candidate.document_id for candidate in candidates] == [doc_a, doc_b, doc_c, doc_d]
+    a, b, c, d = candidates
+    assert a.signal == "similar content (cosine distance 0.1000)"
+    assert a.description == "blurb a"
+    assert b.signal == (
+        "similar content (cosine distance 0.2000); similar description (cosine distance 0.3000)"
+    )
+    assert c.signal == "similar description (cosine distance 0.4000); shared tags: alpha"
+    assert d.signal == "shared tags: alpha"
+    assert d.description == ""
 
 
 async def test_unindexed_source_degrades_to_tag_only_candidates(db_session, session_factory):

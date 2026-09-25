@@ -16,7 +16,9 @@ must be grounded in knowledge retrieved from it during this run through the
    is unique. Cite the blocks you used
    with those exact bracketed numbers, placed right after the statements they
    support (for example: `Zorblat is a test term [1].`). Every factual claim
-   needs at least one citation.
+   needs at least one citation. A block's optional `Summary:` line is the
+   document's own front-matter blurb — usable for orientation and citation
+   decisions, still subordinate to the block content.
 3. **Admit insufficiency.** If the retrieved context does not contain the
    answer — including when the tool returns no results or only loosely
    related material — say so plainly in one short sentence and state what

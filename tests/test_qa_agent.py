@@ -18,8 +18,8 @@ from app.models.tenant import DEFAULT_TENANT_ID
 from app.rag.retriever import Retriever
 from app.schemas.chat import AnswerDeltaEvent, DoneEvent, RunStartedEvent, SourcesEvent
 from app.services.chat import ChatService
-from corpus import KOTLIN_SECTION, neighbor_scripted_provider, seed_corpus
-from fakes import scripted_chat_model
+from corpus import KOTLIN_CONTENT, KOTLIN_SECTION, neighbor_scripted_provider, seed_corpus
+from fakes import GATES_OFF, scripted_chat_model
 
 pytestmark = [pytest.mark.db, pytest.mark.es]
 
@@ -103,6 +103,66 @@ async def test_run_id_is_echoed_across_the_stream(
     run_ids = {event.run_id for event in events if isinstance(event, (RunStartedEvent, DoneEvent))}
     assert len(run_ids) == 1
     assert run_ids.pop()
+
+
+# --- context-block Summary line (the document's front-matter blurb) ---
+
+
+async def test_context_blocks_render_summary_line_only_when_description_present(
+    seed_indexed,
+    session_factory: async_sessionmaker[AsyncSession],
+    es_client: AsyncElasticsearch,
+    es_index_name: str,
+):
+    """Both branches pinned through the real tool: a described document's
+    block carries `Summary: {blurb}` under the header; description-less
+    blocks stay byte-identical to the pre-description shape (no line, no
+    blank-line drift)."""
+    provider = neighbor_scripted_provider()
+    described = (
+        "---\ntitle: Described Notes\ntags: [described]\n"
+        "description: A hand-written blurb.\n---\n\n"
+        f"# Described\n\n{('zorblat ' * 130).strip()}"
+    )
+    await seed_indexed(provider, KOTLIN_CONTENT)  # no description
+    await seed_indexed(provider, described)
+    tool_results: list[str] = []
+    service = ChatService(
+        Retriever(
+            session_factory=session_factory,
+            es_client=es_client,
+            embedding_provider=None,
+            es_index=es_index_name,
+            **GATES_OFF,
+        ),
+        scripted_chat_model(
+            tool_calls=["zorblat"], answer_parts=["[1]."], tool_results=tool_results
+        ),
+        mode="bm25",
+    )
+
+    events = [
+        event
+        async for event in service.ask("What is zorblat?", limit=8, tenant_id=DEFAULT_TENANT_ID)
+    ]
+
+    assert len(events) >= 1
+    tool_text = tool_results[0]
+    blocks = tool_text.split("\n\n")
+    described_block = next(block for block in blocks if "Described Notes" in block)
+    plain_block = next(block for block in blocks if "Kotlin Notes" in block)
+    assert (
+        "Described Notes (chunk 0; tags: described)\nSummary: A hand-written blurb.\n"
+        in described_block
+    )
+    # The empty branch collapses: header line directly followed by content.
+    assert plain_block.startswith("[1] Kotlin Notes (chunk 0; tags: kotlin)\n")
+    assert "Summary:" not in plain_block
+    # The described blurb also reaches the streamed source item.
+    sources = [event for event in events if isinstance(event, SourcesEvent)]
+    by_title = {item.document_title: item for item in sources[0].items}
+    assert by_title["Described Notes"].document_description == "A hand-written blurb."
+    assert by_title["Kotlin Notes"].document_description == ""
 
 
 # --- live provider smoke (deselected by default: -m "not live_llm") ---

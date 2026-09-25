@@ -6,7 +6,8 @@ chunk-aware passes — long documents map-reduce style with the production
 chunker (one model pass per chunk, sequentially, then one combine pass) with a
 progress event per pass, and the user-visible final pass streamed as
 `summary_delta` fragments; association gathers its deterministic candidates
-(pgvector neighbors + tag overlap) BEFORE any model call, so the LLM only
+(pgvector content neighbors + description-embedding similarity + tag overlap)
+BEFORE any model call, so the LLM only
 curates what the database surfaced, and its structured output is streamed as
 `association_item` events — one per joined pick, with a trailing hold-back so
 a still-truncating partial-JSON element is never emitted (everything joins
@@ -57,7 +58,7 @@ from app.core.exceptions import (
 from app.models.document import Document
 from app.rag.chunker import chunk_markdown
 from app.rag.retriever import Retriever
-from app.repositories.document import DocumentRepository, TagOverlapRow
+from app.repositories.document import DescriptionNeighborRow, DocumentRepository, TagOverlapRow
 from app.repositories.document_chunk import DocumentChunkRepository, NeighborDocumentRow
 from app.schemas.agent_stream import (
     AgentDoneEvent,
@@ -189,7 +190,9 @@ class SummarizeService:
             yield SummaryResultEvent(**cached.model_dump())
             yield AgentDoneEvent(run_id=run_id, outcome="success", latency_ms=latency_ms)
             return
-        deps = SummarizeDeps(title=document.title, tags=list(document.tags))
+        deps = SummarizeDeps(
+            title=document.title, tags=list(document.tags), description=document.description
+        )
         # Front-matter-only (or whitespace-only) bodies chunk to nothing; the
         # degenerate path summarizes the RAW stored content in one pass. Raw is
         # deliberate: the stripped body would be empty, and the title/tags
@@ -542,7 +545,9 @@ class AssociationService:
             yield AgentDoneEvent(run_id=run_id, outcome="success", latency_ms=latency_ms)
             return
 
-        deps = AssociationDeps(title=document.title, tags=list(document.tags))
+        deps = AssociationDeps(
+            title=document.title, tags=list(document.tags), description=document.description
+        )
         prompt = render_association_prompt(deps, excerpt, candidates)
         log.info("agent_run_started", agent="association", candidate_count=len(candidates))
         by_id = {candidate.document_id: candidate for candidate in candidates}
@@ -655,12 +660,16 @@ class AssociationService:
     async def _gather(
         self, doc_id: UUID, *, tenant_id: UUID
     ) -> tuple[Document, list[AssociationCandidate], str]:
-        """Load the live source, both candidate legs, and a bounded excerpt.
+        """Load the live source, all candidate legs, and a bounded excerpt.
 
         One session for the whole read set. The document load comes first: a
         missing or soft-deleted source must 404 before any other work. The
         vector leg needs the source's own chunks — no chunks means it returns
-        nothing and the run continues on tag candidates alone.
+        nothing and the run continues on the other legs alone. The
+        description leg reads the source's stored blurb embedding — a NULL
+        column (empty description, or not re-indexed since the column
+        landed) means it finds nothing, the same "leg unavailable" reading
+        as an unindexed vector leg; no embed call happens at query time.
         """
         async with self._session_factory() as session:
             documents = DocumentRepository(session)
@@ -671,18 +680,42 @@ class AssociationService:
             vector_rows = await chunks.find_neighbor_documents(
                 doc_id, tenant_id=tenant_id, limit=CANDIDATE_LIMIT
             )
+            description_rows: Sequence[DescriptionNeighborRow] = (
+                await documents.find_by_description_similarity(
+                    document.description_embedding,
+                    tenant_id=tenant_id,
+                    exclude_id=doc_id,
+                    limit=CANDIDATE_LIMIT,
+                )
+                if document.description_embedding is not None
+                else []
+            )
             tag_rows = await documents.find_by_tag_overlap(
                 document.tags, tenant_id=tenant_id, exclude_id=doc_id, limit=CANDIDATE_LIMIT
             )
             excerpt = await chunks.first_chunk_content(doc_id, tenant_id=tenant_id)
         if excerpt is None:
             excerpt = document.content[:EXCERPT_CHAR_LIMIT]
-        return document, _merge_candidates(vector_rows, tag_rows), excerpt
+        return (
+            document,
+            _merge_candidates(vector_rows, description_rows, tag_rows),
+            excerpt,
+        )
 
 
 def _vector_signal(distance: float) -> str:
     """Human-readable vector-leg signal for prompts and responses."""
     return f"similar content (cosine distance {distance:.4f})"
+
+
+def _description_signal(distance: float) -> str:
+    """Human-readable description-leg signal for prompts and responses.
+
+    Mirror of `_vector_signal` over the blurb embeddings — distinguishable
+    in prompts and API responses, and readable as "the blurbs are similar",
+    not "the documents share content".
+    """
+    return f"similar description (cosine distance {distance:.4f})"
 
 
 def _tag_signal(shared_tags: Sequence[str]) -> str:
@@ -691,38 +724,50 @@ def _tag_signal(shared_tags: Sequence[str]) -> str:
 
 
 def _merge_candidates(
-    vector_rows: Sequence[NeighborDocumentRow], tag_rows: Sequence[TagOverlapRow]
+    vector_rows: Sequence[NeighborDocumentRow],
+    description_rows: Sequence[DescriptionNeighborRow],
+    tag_rows: Sequence[TagOverlapRow],
 ) -> list[AssociationCandidate]:
-    """Union both legs into one candidate list, vector-ranked first.
+    """Union all three legs into one candidate list, in leg order.
 
-    A document surfaced by both legs appears once with both signals; a
-    document only the tag leg found keeps its own signal. Leg order is
-    deterministic (distance then id; recency then id), so the prompt order is
-    too.
+    Vector-ranked first, then description-ranked, then tag-only. A document
+    surfaced by several legs appears once, with its signals `"; "`-joined in
+    the same leg order. Every leg projects the owning document's columns, so
+    title/tags/description are always available without a follow-up read.
+    Leg order is deterministic (distance then id; recency then id), so the
+    prompt order is too.
     """
-    tag_shared = {tag_row.document_id: tag_row.shared_tags for tag_row in tag_rows}
-    candidates: dict[UUID, AssociationCandidate] = {}
+    titles: dict[UUID, str] = {}
+    tags: dict[UUID, list[str]] = {}
+    descriptions: dict[UUID, str] = {}
+    signals: dict[UUID, list[str]] = {}
     for vector_row in vector_rows:
-        shared = tag_shared.get(vector_row.document_id)
-        signal = _vector_signal(vector_row.distance)
-        if shared:
-            signal = f"{signal}; {_tag_signal(shared)}"
-        candidates[vector_row.document_id] = AssociationCandidate(
-            document_id=vector_row.document_id,
-            title=vector_row.title,
-            tags=list(vector_row.tags),
-            signal=signal,
+        titles[vector_row.document_id] = vector_row.title
+        tags[vector_row.document_id] = list(vector_row.tags)
+        descriptions[vector_row.document_id] = vector_row.description
+        signals.setdefault(vector_row.document_id, []).append(_vector_signal(vector_row.distance))
+    for description_row in description_rows:
+        titles[description_row.document_id] = description_row.title
+        tags[description_row.document_id] = list(description_row.tags)
+        descriptions[description_row.document_id] = description_row.description
+        signals.setdefault(description_row.document_id, []).append(
+            _description_signal(description_row.distance)
         )
     for tag_row in tag_rows:
-        if tag_row.document_id in candidates:
-            continue
-        candidates[tag_row.document_id] = AssociationCandidate(
-            document_id=tag_row.document_id,
-            title=tag_row.title,
-            tags=list(tag_row.tags),
-            signal=_tag_signal(tag_row.shared_tags),
+        titles[tag_row.document_id] = tag_row.title
+        tags[tag_row.document_id] = list(tag_row.tags)
+        descriptions[tag_row.document_id] = tag_row.description
+        signals.setdefault(tag_row.document_id, []).append(_tag_signal(tag_row.shared_tags))
+    return [
+        AssociationCandidate(
+            document_id=document_id,
+            title=titles[document_id],
+            tags=tags[document_id],
+            signal="; ".join(document_signals),
+            description=descriptions.get(document_id, ""),
         )
-    return list(candidates.values())
+        for document_id, document_signals in signals.items()
+    ]
 
 
 def _join_pick(

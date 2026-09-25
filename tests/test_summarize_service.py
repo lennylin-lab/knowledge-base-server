@@ -111,6 +111,65 @@ async def test_long_document_map_reduces_over_chunk_summaries(db_session, sessio
     assert "within 250 tokens" in prompts[3]
 
 
+async def test_description_line_renders_on_direct_pass_when_present(db_session, session_factory):
+    created = await make_document(
+        db_session,
+        "---\ntitle: Blurb Note\ntags: [alpha]\ndescription: Author-written blurb.\n---\n\n"
+        "One short paragraph about zorblat.",
+    )
+    prompts: list[str] = []
+    service = make_service(
+        session_factory, scripted_summarize_model(["Scripted summary."], prompts=prompts)
+    )
+
+    await service.summarize_document(created.id, tenant_id=DEFAULT_TENANT_ID)
+
+    assert len(prompts) == 1
+    # The blurb rides UNDER the Tags line, before the summary instruction.
+    header = prompts[0].split("\n\n")[0]
+    assert header.splitlines() == [
+        "# Document: Blurb Note",
+        "Tags: alpha",
+        "Description: Author-written blurb.",
+        "Summarize the content below within 250 tokens.",
+    ]
+
+
+async def test_description_line_renders_on_reduce_pass_when_present(db_session, session_factory):
+    created = await make_document(
+        db_session,
+        "---\ntitle: Long Note\ntags: [long]\ndescription: Author-written blurb.\n---\n\n"
+        f"{long_content(3)}",
+    )
+    prompts: list[str] = []
+    service = make_service(
+        session_factory,
+        scripted_summarize_model(["s-one", "s-two", "s-three", "Final reduce."], prompts=prompts),
+    )
+
+    await service.summarize_document(created.id, tenant_id=DEFAULT_TENANT_ID)
+
+    assert len(prompts) == 4
+    # Every pass — the three map passes AND the combine pass — saw the line.
+    for prompt in prompts:
+        assert "Description: Author-written blurb." in prompt.split("\n\n")[0]
+
+
+async def test_description_line_absent_when_document_has_no_description(
+    db_session, session_factory
+):
+    created = await make_document(db_session, SHORT_DOC)
+    prompts: list[str] = []
+    service = make_service(
+        session_factory, scripted_summarize_model(["Scripted summary."], prompts=prompts)
+    )
+
+    await service.summarize_document(created.id, tenant_id=DEFAULT_TENANT_ID)
+
+    assert len(prompts) == 1
+    assert "Description:" not in prompts[0]  # collapsed, no blank-line drift
+
+
 async def test_missing_document_raises_not_found_before_any_model_call(session_factory):
     prompts: list[str] = []
     service = make_service(session_factory, scripted_summarize_model(["never"], prompts=prompts))

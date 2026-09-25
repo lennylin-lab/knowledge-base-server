@@ -43,6 +43,7 @@ def to_search_hit(chunk: RetrievedChunk) -> SearchHit:
         document_id=chunk.key.document_id,
         document_title=chunk.document_title,
         document_tags=list(chunk.document_tags),
+        document_description=chunk.document_description,
         chunk_index=chunk.key.chunk_index,
         content=chunk.content,
         score=chunk.score,
@@ -130,16 +131,24 @@ def format_context_blocks(hits: list[SearchHit], *, start: int = 1) -> str:
     bracket numbers in the answer line up with the streamed source list.
     Numbering is run-global (`start` continues across tool calls) because
     clients concatenate `sources` events — restarting at `[1]` per batch
-    would make citations ambiguous.
+    would make citations ambiguous. A document's non-empty front-matter
+    blurb renders as a `Summary:` line under the header; blocks without one
+    are byte-identical to the pre-description shape.
     """
     if not hits:
         return _NO_RESULTS
-    return "\n\n".join(
-        f"[{number}] {hit.document_title} "
-        f"(chunk {hit.chunk_index}; tags: {', '.join(hit.document_tags) or 'none'})\n"
-        f"{hit.content}"
-        for number, hit in enumerate(hits, start=start)
-    )
+    blocks: list[str] = []
+    for number, hit in enumerate(hits, start=start):
+        header = (
+            f"[{number}] {hit.document_title} "
+            f"(chunk {hit.chunk_index}; tags: {', '.join(hit.document_tags) or 'none'})"
+        )
+        lines = [header]
+        if hit.document_description:
+            lines.append(f"Summary: {hit.document_description}")
+        lines.append(hit.content)
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks)
 
 
 async def search_knowledge(ctx: RunContext[ChatDeps], query: str) -> str:

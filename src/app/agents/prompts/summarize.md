@@ -13,7 +13,8 @@ provided there as context.
    outcomes; drop boilerplate, repetition, and formatting noise.
 3. **Stand alone.** The title and tags orient you, but the summary must read
    on its own: no references to "this document", "the tags above", or the
-   summarization process itself.
+   summarization process itself. The `Description:` line, when present, is
+   author-provided context — it is not part of the content to summarize.
 4. **Language.** Write in the language the document itself is written in,
    regardless of the language of its title or tags.
 5. **Length.** The user message states a token limit. Stay within it — prefer
