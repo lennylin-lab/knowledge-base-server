@@ -6,12 +6,14 @@ import uuid
 from datetime import datetime
 from enum import StrEnum
 
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import DateTime, ForeignKey, Index, Text, func
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.dialects.postgresql import ARRAY, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
+from app.models.document_chunk import EMBEDDING_DIM
 from app.utils.ids import uuid7
 
 
@@ -40,6 +42,14 @@ class Document(Base):
         # Tenant listing keyset: every read filters tenant_id, then orders by
         # id DESC (uuid7 creation order) — the composite serves the scan.
         Index("ix_documents_tenant_id", "tenant_id", "id"),
+        # Association description leg: HNSW cosine over the blurb embedding
+        # (same shape as document_chunks.embedding).
+        Index(
+            "ix_documents_description_embedding_hnsw",
+            "description_embedding",
+            postgresql_using="hnsw",
+            postgresql_ops={"description_embedding": "vector_cosine_ops"},
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid7)
@@ -56,6 +66,12 @@ class Document(Base):
     tags: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False, server_default="{}")
     # Optional header blurb from front matter (`description:`); empty when absent.
     description: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    # Document-level embedding of the blurb ALONE (association description
+    # leg; the blurb embeds symmetrically on source and candidate sides, so
+    # no title prefix). NULL until a pipeline run saw a non-empty blurb; an
+    # empty blurb clears it on re-index (replace semantics). Untyped
+    # mapped_column on purpose (same policy as DocumentChunk.embedding).
+    description_embedding = mapped_column(Vector(EMBEDDING_DIM), nullable=True)
     index_status: Mapped[IndexStatus] = mapped_column(
         # values_callable: persist the lowercase *values* ("pending"), not the
         # member names ("PENDING") — the server_default below must match.

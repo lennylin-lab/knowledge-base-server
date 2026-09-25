@@ -36,10 +36,11 @@ QUERIES = [
     "a longer natural-language question about distributed locks in redis",
 ]
 
-# Indexed chunks embed as `embedding_input(title, chunk)` — title + heading
-# breadcrumb + chunk text (rag/indexer.py). The probe reflects that wrapped
-# form so the measured distribution matches what the gates see after a
-# reindex. Queries are NOT enriched (no query-instruct prefix by design).
+# Indexed chunks embed as `embedding_input(title, chunk, description=...)` —
+# title + description line (empty for these probe docs, so it collapses) +
+# heading breadcrumb + chunk text (rag/indexer.py). The probe reflects that
+# wrapped form so the measured distribution matches what the gates see after
+# a reindex. Queries are NOT enriched (no query-instruct prefix by design).
 _RAW_CHUNKS = [
     (
         "Redis 缓存实践",

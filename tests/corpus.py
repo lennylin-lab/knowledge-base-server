@@ -3,9 +3,11 @@
 Single-section bodies (>= chunker target 800, <= max 1600 chars) index as
 exactly one chunk whose text equals the section verbatim (no whitespace for
 the chunker to strip). The scripted provider keys on the pipeline's
-EMBEDDING INPUTS — `embedding_input(title, chunk)` = title + heading
+EMBEDDING INPUTS — `embedding_input(title, chunk, description=...)` = title
++ description line (corpus docs have none, so it collapses) + heading
 breadcrumb + chunk text (see `rag/indexer.py`) — derived here through the
-same production functions, so the vector leg gets known neighbors.
+same production functions, so the vector leg gets known neighbors even as
+the input shape evolves.
 """
 
 from __future__ import annotations

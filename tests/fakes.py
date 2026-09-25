@@ -132,6 +132,7 @@ class RecordingEsStore:
         document_id: UUID,
         title: str,
         tags: list[str],
+        description: str,
         chunks: list[Chunk],
     ) -> None:
         self.replace_calls.append(
@@ -141,6 +142,7 @@ class RecordingEsStore:
                 "document_id": document_id,
                 "title": title,
                 "tags": list(tags),
+                "description": description,
                 "chunks": list(chunks),
             }
         )

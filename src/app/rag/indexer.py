@@ -50,22 +50,30 @@ class ReplaceChunksFn(Protocol):
         document_id: UUID,
         title: str,
         tags: Sequence[str],
+        description: str,
         chunks: Sequence[Chunk],
     ) -> None: ...
 
 
-def embedding_input(title: str, chunk: Chunk) -> str:
-    """Embedding text for one chunk: `title + heading_path + chunk text`.
+def embedding_input(title: str, chunk: Chunk, *, description: str = "") -> str:
+    """Embedding text for one chunk: `title + description + heading_path +
+    chunk text`.
 
-    The breadcrumb enriches the VECTOR only — PG stores `chunk.text` alone and
-    retrieval returns that unmodified text as `content` (no PG schema change:
-    the vector lives in the same row as the plain text, only its input
-    changes). Empty breadcrumbs collapse instead of leaving a blank line.
-    Tests script vector maps against this exact string (see tests/corpus.py).
+    The blurb and the breadcrumb enrich the VECTOR only — PG stores
+    `chunk.text` alone and retrieval returns that unmodified text as
+    `content` (no PG schema change: the vector lives in the same row as the
+    plain text, only its input changes). Empty description and empty
+    breadcrumbs collapse instead of leaving blank lines. Tests script vector
+    maps against this exact string (see tests/corpus.py).
     """
+    lines = [title]
+    if description:
+        lines.append(description)
     if chunk.heading_path:
-        return f"{title}\n{chunk.heading_path}\n\n{chunk.text}"
-    return f"{title}\n\n{chunk.text}"
+        lines.append(chunk.heading_path)
+    lines.append("")  # blank line between the header block and the body
+    lines.append(chunk.text)
+    return "\n".join(lines)
 
 
 class IndexingPipeline:
@@ -145,16 +153,28 @@ class IndexingPipeline:
                 log.info("index_job_skipped_stale")
                 return None
             title, tags = document.title, document.tags
+            description = document.description
             chunks = chunk_markdown_structured(document.content)
-            # The embedding input carries title + breadcrumb context; PG still
-            # stores the plain chunk text (no schema change, only vector input).
-            vectors = await self._embedding_provider.embed_texts(
-                [embedding_input(title, chunk) for chunk in chunks]
-            )
-            # Chunks are staging: commit them, status untouched — a later
-            # stage failure must still mark the document `failed`.
+            # ONE embed batch computes everything: the document-level blurb
+            # vector (first, only when the description is non-empty) plus
+            # every chunk input (title + description + breadcrumb + text).
+            # The chunk embedding input carries identity context; PG still
+            # stores the plain chunk text (no schema change, only vector
+            # input).
+            texts = ([description] if description else []) + [
+                embedding_input(title, chunk, description=description) for chunk in chunks
+            ]
+            vectors = await self._embedding_provider.embed_texts(texts)
+            description_vector = vectors[0] if description else None
+            chunk_vectors = vectors[1:] if description else vectors
+            # Replace semantics on every re-index: an edited-away description
+            # must not leave a stale blurb vector behind.
+            document.description_embedding = description_vector
+            # Chunks are staging: commit them (with the document's blurb
+            # vector), status untouched — a later stage failure must still
+            # mark the document `failed`.
             await DocumentChunkRepository(session).replace_for_document(
-                document.id, [chunk.text for chunk in chunks], vectors
+                document.id, [chunk.text for chunk in chunks], chunk_vectors
             )
             await session.commit()
         await self._ensure_index(self._es_client, self._es_index)
@@ -165,6 +185,7 @@ class IndexingPipeline:
             document_id=document.id,
             title=title,
             tags=tags,
+            description=description,
             chunks=chunks,
         )
         async with self._session_factory() as session:

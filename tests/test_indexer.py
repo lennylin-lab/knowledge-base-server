@@ -21,8 +21,8 @@ from app.core.exceptions import LLMProviderError, SearchIndexError
 from app.models.document import Document, IndexStatus
 from app.models.document_chunk import EMBEDDING_DIM, DocumentChunk
 from app.models.tenant import DEFAULT_TENANT_ID
-from app.rag.chunker import chunk_markdown
-from app.rag.indexer import IndexingPipeline
+from app.rag.chunker import Chunk, chunk_markdown
+from app.rag.indexer import IndexingPipeline, embedding_input
 from app.repositories.document import DocumentRepository
 from app.repositories.document_chunk import DocumentChunkRepository
 from app.schemas.document import DocumentCreate, DocumentUpdate
@@ -35,6 +35,32 @@ pytestmark = pytest.mark.db
 TWO_SECTIONS = f"# One\n\n{'a' * 900}\n\n# Two\n\n{'b' * 900}"
 ONE_SECTION = f"# Only\n\n{'c' * 900}"
 THREE_SECTION = f"# Third\n\n{'d' * 900}"
+
+
+# --- embedding_input golden strings (the vector leg's scripted-key shape) ---
+
+
+def test_embedding_input_golden_string_with_description():
+    chunk = Chunk(text="body text", heading_path="A > B")
+    assert (
+        embedding_input("Title", chunk, description="The blurb.")
+        == "Title\nThe blurb.\nA > B\n\nbody text"
+    )
+    # No breadcrumb: the description line sits directly under the title.
+    assert (
+        embedding_input("Title", Chunk(text="body text", heading_path=""), description="Blurb")
+        == "Title\nBlurb\n\nbody text"
+    )
+
+
+def test_embedding_input_golden_string_without_description_collapses_the_line():
+    chunk = Chunk(text="body text", heading_path="A > B")
+    # Byte-identical to the pre-description shape: no blank line is gained.
+    assert embedding_input("Title", chunk) == "Title\nA > B\n\nbody text"
+    assert embedding_input("Title", chunk, description="") == "Title\nA > B\n\nbody text"
+    assert embedding_input("Title", Chunk(text="body text", heading_path="")) == (
+        "Title\n\nbody text"
+    )
 
 
 # (doc_id, version) pairs as the real service enqueuer emits them (the
@@ -132,6 +158,7 @@ async def test_process_document_marks_done_and_stores_chunks_everywhere(
     assert call["document_id"] == doc_id
     assert call["title"] == "Indexed"
     assert call["tags"] == ["x", "y"]
+    assert call["description"] == ""  # no front-matter blurb on this corpus
     assert len(call["chunks"]) == 2
 
 
@@ -214,6 +241,93 @@ async def test_zero_chunk_document_completes_done(session_factory, fake_embeddin
     assert result is IndexStatus.DONE
     assert await chunk_rows(session_factory, doc_id) == []
     assert es_store.replace_calls[0]["chunks"] == []
+
+
+# --- document-level description embedding (one batch, replace semantics) ---
+
+
+async def test_description_embedding_rides_the_same_embed_batch_and_stores(
+    session_factory, fake_embedding_provider
+):
+    es_store = RecordingEsStore()
+    pipeline = make_pipeline(session_factory, fake_embedding_provider, es_store)
+    body = "x" * 900
+    doc_id = await seed_document(
+        session_factory,
+        f"---\ntitle: Blurb Doc\ndescription: A hand-written blurb.\n---\n\n# Only\n\n{body}",
+    )
+
+    assert await pipeline.process_document(doc_id, DEFAULT_TENANT_ID) is IndexStatus.DONE
+
+    # ONE embed call: the blurb vector FIRST, then every chunk input — the
+    # chunk inputs carry the description line between title and breadcrumb.
+    assert len(fake_embedding_provider.calls) == 1
+    batch = fake_embedding_provider.calls[0]
+    assert batch[0] == "A hand-written blurb."
+    assert batch[1] == f"Blurb Doc\nA hand-written blurb.\nOnly\n\n# Only\n\n{body}"
+    assert len(batch) == 2
+
+    # The blurb vector landed on the document row in the staging transaction.
+    async with session_factory() as session:
+        document = await session.get(Document, doc_id)
+        assert document is not None
+        assert document.description_embedding is not None
+        assert len(document.description_embedding) == EMBEDDING_DIM
+
+    # The ES write carries the blurb for the BM25 leg.
+    assert es_store.replace_calls[0]["description"] == "A hand-written blurb."
+
+
+async def test_empty_description_embeds_chunks_only_and_keeps_column_null(
+    session_factory, fake_embedding_provider
+):
+    es_store = RecordingEsStore()
+    pipeline = make_pipeline(session_factory, fake_embedding_provider, es_store)
+    doc_id = await seed_document(session_factory, f"---\ntitle: Plain Doc\n---\n\n{ONE_SECTION}")
+
+    assert await pipeline.process_document(doc_id, DEFAULT_TENANT_ID) is IndexStatus.DONE
+
+    # No description: no leading entry, chunk inputs unchanged (no blank line).
+    batch = fake_embedding_provider.calls[0]
+    assert len(batch) == 1
+    assert not batch[0].startswith("Plain Doc\n\n\n")
+    assert batch[0] == f"Plain Doc\nOnly\n\n# Only\n\n{'c' * 900}"
+    async with session_factory() as session:
+        document = await session.get(Document, doc_id)
+        assert document is not None
+        assert document.description_embedding is None
+    assert es_store.replace_calls[0]["description"] == ""
+
+
+async def test_edited_away_description_clears_the_stored_vector(
+    session_factory, fake_embedding_provider
+):
+    es_store = RecordingEsStore()
+    pipeline = make_pipeline(session_factory, fake_embedding_provider, es_store)
+    doc_id = await seed_document(
+        session_factory, f"---\ntitle: Blurb Doc\ndescription: Old blurb.\n---\n\n{ONE_SECTION}"
+    )
+    assert await pipeline.process_document(doc_id, DEFAULT_TENANT_ID) is IndexStatus.DONE
+    async with session_factory() as session:
+        document = await session.get(Document, doc_id)
+        assert document is not None
+        assert document.description_embedding is not None
+
+    async with session_factory() as session:
+        await DocumentService(session).update_document(
+            doc_id,
+            DocumentUpdate(content=f"---\ntitle: Blurb Doc\n---\n\n{ONE_SECTION}"),
+            tenant_id=DEFAULT_TENANT_ID,
+        )
+    assert await pipeline.process_document(doc_id, DEFAULT_TENANT_ID) is IndexStatus.DONE
+
+    # Replace semantics: the stale blurb vector is gone and the ES write
+    # carries the empty description.
+    async with session_factory() as session:
+        document = await session.get(Document, doc_id)
+        assert document is not None
+        assert document.description_embedding is None
+    assert es_store.replace_calls[1]["description"] == ""
 
 
 async def test_missing_document_is_a_noop(session_factory, fake_embedding_provider):
