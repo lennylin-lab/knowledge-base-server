@@ -49,6 +49,11 @@ async def test_ensure_index_creates_explicit_mapping_and_is_idempotent(es_client
         "analyzer": "ik_max_word",
         "search_analyzer": "ik_smart",
     }
+    assert properties["description"] == {
+        "type": "text",
+        "analyzer": "ik_max_word",
+        "search_analyzer": "ik_smart",
+    }
     assert properties["chunk_text"] == {
         "type": "text",
         "analyzer": "ik_max_word",
@@ -165,6 +170,7 @@ async def test_replace_indexes_chunks_with_deterministic_ids(es_client, es_index
         document_id=doc_id,
         title="Indexed Note",
         tags=["kotlin", "fp"],
+        description="Front-matter blurb.",
         chunks=[
             Chunk(text="first chunk", heading_path="Kotlin notes > coroutines"),
             _chunk("second chunk"),
@@ -174,12 +180,15 @@ async def test_replace_indexes_chunks_with_deterministic_ids(es_client, es_index
     assert await _count_for(es_client, es_index_name, str(doc_id)) == 2
     first = await es_client.get(index=es_index_name, id=f"{doc_id}:0")
     assert first["_source"]["chunk_text"] == "first chunk"
-    # The breadcrumb rides along on every ES doc (retrieval signal only —
-    # `content` is hydrated from PG, which stores the plain text).
+    # The breadcrumb and the document-level blurb ride along on every ES doc
+    # (retrieval signals only — `content` is hydrated from PG, which stores
+    # the plain text without either).
     assert first["_source"]["heading_path"] == "Kotlin notes > coroutines"
+    assert first["_source"]["description"] == "Front-matter blurb."
     stored = await es_client.get(index=es_index_name, id=f"{doc_id}:1")
     assert stored["_source"]["chunk_text"] == "second chunk"
     assert stored["_source"]["heading_path"] == ""
+    assert stored["_source"]["description"] == "Front-matter blurb."
     assert stored["_source"]["chunk_index"] == 1
     assert stored["_source"]["title"] == "Indexed Note"
     assert stored["_source"]["tags"] == ["kotlin", "fp"]
@@ -199,6 +208,7 @@ async def test_replace_shrinks_without_leaving_orphans(es_client, es_index_name)
         document_id=doc_id,
         title="A",
         tags=[],
+        description="",
         chunks=[_chunk("a"), _chunk("b"), _chunk("c")],
     )
     await replace_document_chunks(
@@ -208,6 +218,7 @@ async def test_replace_shrinks_without_leaving_orphans(es_client, es_index_name)
         document_id=other_id,
         title="B",
         tags=[],
+        description="",
         chunks=[_chunk("other")],
     )
 
@@ -218,6 +229,7 @@ async def test_replace_shrinks_without_leaving_orphans(es_client, es_index_name)
         document_id=doc_id,
         title="A",
         tags=[],
+        description="",
         chunks=[_chunk("only a")],
     )
 
@@ -239,6 +251,7 @@ async def test_replace_with_no_chunks_clears_the_document(es_client, es_index_na
         document_id=doc_id,
         title="A",
         tags=[],
+        description="",
         chunks=[_chunk("a"), _chunk("b")],
     )
     await replace_document_chunks(
@@ -248,6 +261,7 @@ async def test_replace_with_no_chunks_clears_the_document(es_client, es_index_na
         document_id=doc_id,
         title="A",
         tags=[],
+        description="",
         chunks=[],
     )
 
@@ -263,6 +277,7 @@ async def test_missing_index_failure_is_wrapped_as_search_index_error(es_client,
             document_id=uuid4(),
             title="A",
             tags=[],
+            description="",
             chunks=[_chunk("x")],
         )
 

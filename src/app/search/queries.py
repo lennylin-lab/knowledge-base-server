@@ -19,6 +19,13 @@ _TITLE_BOOST = 2
 # drowning prose.
 _CODE_BOOST = 1.5
 _HEADING_BOOST = 1.5
+# The document-level front-matter blurb joins the identity group below title:
+# a title match is a deliberate naming signal, a description match is an
+# author paraphrase. Calibrated against live-ES probes (task
+# 09-25-description-rag-association, design.md § Calibration Record); like
+# the heading breadcrumb it shares the identity group's best_fields max, so a
+# blurb repeating the title text cannot double-count it.
+_DESCRIPTION_BOOST = 1.5
 
 # Term-coverage gate default, mirroring `Settings.SEARCH_BM25_MIN_COVERAGE`
 # (a drift-guard unit test keeps the two in sync). The retriever passes the
@@ -28,7 +35,11 @@ DEFAULT_BM25_MIN_COVERAGE = "70%"
 
 # Fields stay analyzer-free: every query inherits each field's analyzers from
 # the mapping (`search/es.py::_CHUNK_MAPPINGS` is the single declaration site).
-_IDENTITY_FIELDS = [f"title^{_TITLE_BOOST}", f"heading_path^{_HEADING_BOOST}"]
+_IDENTITY_FIELDS = [
+    f"title^{_TITLE_BOOST}",
+    f"heading_path^{_HEADING_BOOST}",
+    f"description^{_DESCRIPTION_BOOST}",
+]
 
 
 def bm25_chunk_query(
@@ -48,11 +59,14 @@ def bm25_chunk_query(
     identifier scored no higher than one matching only the strongest single
     field):
 
-    - document identity — `title` and `heading_path` as one `best_fields`
-      group (max within the group): `heading_path` is the markdown ancestor
-      breadcrumb and textually CONTAINS the title (each document's H1 is its
-      title), so additive scoring would count a title match two or three
-      times;
+    - document identity — `title`, `heading_path`, and `description` as one
+      `best_fields` group (max within the group): `heading_path` is the
+      markdown ancestor breadcrumb and textually CONTAINS the title (each
+      document's H1 is its title), so additive scoring would count a title
+      match two or three times; the description blurb is IK-tokenized like
+      the other identity fields and stays covered by the same group-level
+      `minimum_should_match` — max-semantics also bounds the duplication
+      case where a blurb repeats its title;
     - prose body — `chunk_text` (IK-analyzed);
     - identifiers / code keywords — `chunk_text.code` (no stopword list,
       identifier-aware).
@@ -62,8 +76,9 @@ def bm25_chunk_query(
     not silently require `should` matches).
 
     `min_coverage` applies an ES `minimum_should_match` to the `chunk_text`
-    leaf and to the title/heading identity group — both IK-tokenized, so a
-    percentage of the query's terms is well-defined there. On the identity
+    leaf and to the title/heading/description identity group — all
+    IK-tokenized, so a percentage of the query's terms is well-defined
+    there. On the identity
     group it stops a single ubiquitous function word (a lone "的" title hit)
     from satisfying the outer `minimum_should_match: 1` and activating the
     whole BM25 leg above genuine prose evidence; ES rounds the percentage

@@ -85,7 +85,8 @@ _CHUNK_SETTINGS: dict[str, dict[str, dict[str, dict[str, object]]]] = {
 # segmentation — ik_max_word at index time (fine-grained, maximizes recall),
 # ik_smart at search time (coarse-grained, avoids query-term explosion).
 # `chunk_text.code` is the programming-term escape hatch; `heading_path`
-# carries each chunk's heading breadcrumb into the BM25 leg.
+# carries each chunk's heading breadcrumb and `description` the document-level
+# front-matter blurb into the BM25 leg.
 _CHUNK_MAPPINGS: dict[str, dict[str, dict[str, object]]] = {
     "properties": {
         "document_id": {"type": "keyword"},
@@ -95,6 +96,7 @@ _CHUNK_MAPPINGS: dict[str, dict[str, dict[str, object]]] = {
         "title": {"type": "text", "analyzer": "ik_max_word", "search_analyzer": "ik_smart"},
         "tags": {"type": "keyword"},
         "heading_path": {"type": "text", "analyzer": "ik_max_word", "search_analyzer": "ik_smart"},
+        "description": {"type": "text", "analyzer": "ik_max_word", "search_analyzer": "ik_smart"},
         "chunk_text": {
             "type": "text",
             "analyzer": "ik_max_word",
@@ -141,6 +143,7 @@ async def replace_document_chunks(
     document_id: UUID,
     title: str,
     tags: Sequence[str],
+    description: str,
     chunks: Sequence[Chunk],
 ) -> None:
     """Idempotently replace one document's ES docs: delete-by-document, bulk-index.
@@ -150,9 +153,9 @@ async def replace_document_chunks(
     completion: ES is near-real-time, and a re-index arriving inside the
     refresh interval must still see (and delete) the previous version's docs —
     without this, replace would leak orphans. Each doc stores the chunk's
-    `heading_path` breadcrumb alongside the text (retrieval signal only —
-    content is hydrated from PG) and the owning `tenant_id` (the search-side
-    term filter's field).
+    `heading_path` breadcrumb and the document-level `description` blurb
+    alongside the text (retrieval signals only — content is hydrated from PG)
+    and the owning `tenant_id` (the search-side term filter's field).
     """
     try:
         await client.delete_by_query(
@@ -174,6 +177,7 @@ async def replace_document_chunks(
                             "tenant_id": tenant_id,
                             "title": title,
                             "tags": list(tags),
+                            "description": description,
                             "chunk_index": chunk_index,
                             "chunk_text": chunk.text,
                             "heading_path": chunk.heading_path,

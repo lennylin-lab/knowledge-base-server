@@ -23,12 +23,17 @@ def test_query_shape_without_tag():
                 "should": [
                     # Group 1 — document identity, max WITHIN the group:
                     # heading_path textually contains title, so additive
-                    # scoring here would double-count a title match. Threads
-                    # the same term-coverage gate as the prose leaf.
+                    # scoring here would double-count a title match; max
+                    # semantics also bound a blurb repeating its title.
+                    # Threads the same term-coverage gate as the prose leaf.
                     {
                         "multi_match": {
                             "query": "zorblat notes",
-                            "fields": ["title^2", "heading_path^1.5"],
+                            "fields": [
+                                "title^2",
+                                "heading_path^1.5",
+                                "description^1.5",
+                            ],
                             "type": "best_fields",
                             "minimum_should_match": DEFAULT_BM25_MIN_COVERAGE,
                         }
@@ -69,7 +74,23 @@ def test_identity_group_takes_max_not_sum():
     group = _boolean(bm25_chunk_query("notes", size=5))["should"][0]
 
     assert group["multi_match"]["type"] == "best_fields"
-    assert group["multi_match"]["fields"] == ["title^2", "heading_path^1.5"]
+    assert group["multi_match"]["fields"] == [
+        "title^2",
+        "heading_path^1.5",
+        "description^1.5",
+    ]
+
+
+def test_description_boost_is_below_title_and_module_pinned():
+    # The document-level blurb joins the identity group below title (a title
+    # match is a deliberate naming signal, a blurb match a paraphrase) and
+    # shares the module constants with the query body — pinning the constant
+    # here pins the calibration record (design.md § Calibration Record).
+    from app.search import queries
+
+    assert queries._DESCRIPTION_BOOST == 1.5
+    assert queries._DESCRIPTION_BOOST < queries._TITLE_BOOST
+    assert f"description^{queries._DESCRIPTION_BOOST}" in queries._IDENTITY_FIELDS
 
 
 # --- coverage gate (SEARCH_BM25_MIN_COVERAGE) ---

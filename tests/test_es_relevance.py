@@ -38,14 +38,16 @@ pytestmark = pytest.mark.es
 async def _search_hydrated(
     es_client: AsyncElasticsearch, index: str, q: str
 ) -> list[dict[str, Any]]:
-    """Run the BM25 leg and hydrate title/heading per hit for rank assertions."""
-    body = {**bm25_chunk_query(q, size=50), "source": ["title", "heading_path"]}
+    """Run the BM25 leg and hydrate title/heading/description per hit for rank
+    assertions."""
+    body = {**bm25_chunk_query(q, size=50), "source": ["title", "heading_path", "description"]}
     response = await es_client.search(index=index, **body)
     return [
         {
             "score": float(hit["_score"]),
             "title": hit["_source"]["title"],
             "heading": hit["_source"]["heading_path"],
+            "description": hit["_source"]["description"],
         }
         for hit in response["hits"]["hits"]
     ]
@@ -191,6 +193,7 @@ async def test_title_match_is_not_double_counted_via_breadcrumb(es_client, es_in
             document_id=uuid4(),
             title=title,
             tags=[],
+            description="",
             chunks=[Chunk(text=text, heading_path=heading)],
         )
     await es_client.indices.refresh(index=es_index_name)
@@ -201,3 +204,118 @@ async def test_title_match_is_not_double_counted_via_breadcrumb(es_client, es_in
     body_code_rank = next(rank for rank, hit in enumerate(hits, 1) if hit["title"] == "omega")
     title_only_rank = next(rank for rank, hit in enumerate(hits, 1) if hit["title"] == "alpha")
     assert body_code_rank < title_only_rank
+
+
+# --- R8: description-field calibration probes (09-25-description-rag-association)
+# Disposable synthetic corpora per the C1 pattern; the boost they calibrate is
+# pinned by tests/test_es_queries.py and recorded in the task design.md
+# § Calibration Record. Re-run these probes before changing
+# `_DESCRIPTION_BOOST`.
+
+
+async def test_description_only_term_recalls_the_document(es_client, es_index_name):
+    # A term that appears ONLY in a document's description (absent from
+    # title/breadcrumb/body) must still recall that document's chunk — the
+    # reason the blurb joined the ES mapping and the identity group.
+    await ensure_index(es_client, es_index_name)
+    await replace_document_chunks(
+        es_client,
+        index=es_index_name,
+        tenant_id=str(DEFAULT_TENANT_ID),
+        document_id=uuid4(),
+        title="omega",
+        tags=[],
+        description="bluefin",
+        chunks=[Chunk(text="omega body", heading_path="omega")],
+    )
+    await replace_document_chunks(
+        es_client,
+        index=es_index_name,
+        tenant_id=str(DEFAULT_TENANT_ID),
+        document_id=uuid4(),
+        title="tango",
+        tags=[],
+        description="",
+        chunks=[Chunk(text="golf body", heading_path="tango")],
+    )
+    await es_client.indices.refresh(index=es_index_name)
+
+    hits = await _search_hydrated(es_client, es_index_name, "bluefin")
+
+    assert hits, "description-only term must recall the document"
+    assert all(hit["title"] == "omega" for hit in hits)
+
+
+async def test_description_duplication_does_not_displace_body_evidence(es_client, es_index_name):
+    # No over-boost on duplication. C1-shaped corpus with identical per-field
+    # statistics for the probe term:
+    #
+    #   doc A: title "delta", heading "delta", body "omega",
+    #          description "delta"  (blurb repeats the title verbatim)
+    #   doc B: title "omega", heading "omega", body "delta", description ""
+    #
+    # Query "delta": A's identity evidence is best_fields MAX(title^2,
+    # description^b) = 2.0x — the blurb must not ADD on top of the title
+    # (additive group or b >= 2.5 would give A >= 3.5x and displace B's
+    # 2.5x body 1.0x + code 1.5x sum).
+    await ensure_index(es_client, es_index_name)
+    for title, heading, text, description in (
+        ("delta", "delta", "omega", "delta"),
+        ("omega", "omega", "delta", ""),
+    ):
+        await replace_document_chunks(
+            es_client,
+            index=es_index_name,
+            tenant_id=str(DEFAULT_TENANT_ID),
+            document_id=uuid4(),
+            title=title,
+            tags=[],
+            description=description,
+            chunks=[Chunk(text=text, heading_path=heading)],
+        )
+    await es_client.indices.refresh(index=es_index_name)
+
+    hits = await _search_hydrated(es_client, es_index_name, "delta")
+
+    assert hits, "probe term must match both documents"
+    body_rank = next(rank for rank, hit in enumerate(hits, 1) if hit["title"] == "omega")
+    identity_rank = next(rank for rank, hit in enumerate(hits, 1) if hit["title"] == "delta")
+    assert body_rank < identity_rank, (
+        "duplicated description must stay max-grouped: body+code evidence outranks it"
+    )
+
+
+async def test_empty_description_documents_keep_their_scores(es_client, es_index_name):
+    # Empty-description parity: two structurally identical documents, one
+    # with a (non-matching) blurb, one without. On a body-term query both
+    # must be recalled with EQUAL scores — an empty description contributes
+    # nothing and a non-matching blurb must not perturb its sibling (no
+    # blank-line/dynamic-mapping artifacts from the new field).
+    await ensure_index(es_client, es_index_name)
+    await replace_document_chunks(
+        es_client,
+        index=es_index_name,
+        tenant_id=str(DEFAULT_TENANT_ID),
+        document_id=uuid4(),
+        title="tango",
+        tags=[],
+        description="",
+        chunks=[Chunk(text="golf club", heading_path="tango")],
+    )
+    await replace_document_chunks(
+        es_client,
+        index=es_index_name,
+        tenant_id=str(DEFAULT_TENANT_ID),
+        document_id=uuid4(),
+        title="tango",
+        tags=[],
+        description="papaya",
+        chunks=[Chunk(text="golf club", heading_path="tango")],
+    )
+    await es_client.indices.refresh(index=es_index_name)
+
+    hits = await _search_hydrated(es_client, es_index_name, "golf")
+
+    assert len(hits) == 2, "both siblings must be recalled"
+    assert {hit["description"] for hit in hits} == {"", "papaya"}
+    assert hits[0]["score"] == pytest.approx(hits[1]["score"], rel=1e-6)
