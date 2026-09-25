@@ -272,6 +272,7 @@ def _stored_hit(n: int) -> dict[str, object]:
         "document_id": str(uuid.UUID(f"00000000-0000-0000-0000-{n:012d}")),
         "document_title": f"Doc {n}",
         "document_tags": [f"tag-{n}"],
+        "document_description": f"Blurb {n}.",
         "chunk_index": n,
         "content": f"full chunk body {n} — must never be echoed back",
         "score": 0.5 + n,
@@ -304,10 +305,35 @@ async def test_get_session_exposes_assistant_sources_in_citation_order(db_client
             "document_id": str(uuid.UUID(f"00000000-0000-0000-0000-{n:012d}")),
             "document_title": f"Doc {n}",
             "document_tags": [f"tag-{n}"],
+            "document_description": f"Blurb {n}.",
             "chunk_index": n,
         }
         for n in (1, 2, 3)
     ]
+
+
+async def test_get_session_sources_without_description_field_project_empty_blurb(
+    db_client, db_session
+):
+    """Stored sources predating the `document_description` field still read.
+
+    The default ("") covers the missing key — one more old-payload
+    compatibility guarantee, same as the cached-outcome one.
+    """
+    legacy_hit = {
+        key: value for key, value in _stored_hit(1).items() if key != "document_description"
+    }
+    seeded = await _seed_session(
+        db_session,
+        messages=[(MessageRole.ASSISTANT, "answer", [legacy_hit])],
+    )
+
+    resp = await db_client.get(f"/api/v1/chat/sessions/{seeded.id}")
+
+    assert resp.status_code == 200
+    sources = resp.json()["messages"][0]["sources"]
+    assert sources[0]["document_description"] == ""
+    assert sources[0]["document_title"] == "Doc 1"
 
 
 async def test_get_session_paginated_exposes_assistant_sources_in_citation_order(
@@ -326,7 +352,13 @@ async def test_get_session_paginated_exposes_assistant_sources_in_citation_order
     assert resp.status_code == 200
     sources = resp.json()["items"][1]["sources"]
     assert [s["document_title"] for s in sources] == ["Doc 1", "Doc 2"]
-    assert set(sources[0]) == {"document_id", "document_title", "document_tags", "chunk_index"}
+    assert set(sources[0]) == {
+        "document_id",
+        "document_title",
+        "document_tags",
+        "document_description",
+        "chunk_index",
+    }
 
 
 async def test_get_session_tolerates_malformed_stored_sources(db_client, db_session):

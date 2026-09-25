@@ -80,10 +80,31 @@ async def test_bm25_leg_ranks_distinctive_term_first_without_provider(
     top = outcome.items[0]
     assert top.document_title == "Kotlin Notes"
     assert top.document_tags == ["kotlin"]
+    assert top.document_description == ""  # corpus docs carry no blurb
     assert top.content == KOTLIN_SECTION
     assert top.key.chunk_index == 0
     assert top.es_rank == 1
     assert top.vector_rank is None
+
+
+async def test_described_document_flows_its_blurb_through_hydration(
+    seed_indexed, session_factory, es_client, es_index_name
+):
+    provider = neighbor_scripted_provider()
+    described = (
+        "---\ntitle: Described Notes\ntags: [described]\n"
+        "description: A hand-written blurb.\n---\n\n"
+        f"# Described\n\n{('zorblat ' * 130).strip()}"
+    )
+    described_id = await seed_indexed(provider, described)
+    retriever = make_retriever(
+        session_factory, es_client, es_index_name, provider=None, **GATES_OFF
+    )
+
+    outcome = await retriever.retrieve("zorblat", tenant_id=DEFAULT_TENANT_ID)
+
+    top = next(item for item in outcome.items if item.key.document_id == described_id)
+    assert top.document_description == "A hand-written blurb."
 
 
 async def test_vector_leg_top_ranks_scripted_neighbor(

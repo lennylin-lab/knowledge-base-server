@@ -336,6 +336,7 @@ class RetrievedChunk:
     content: str
     document_title: str
     document_tags: list[str]
+    document_description: str = ""
     es_score: float | None = None
     vector_distance: float | None = None
 
@@ -376,6 +377,7 @@ class SearchOutcome:
                         "content": item.content,
                         "document_title": item.document_title,
                         "document_tags": item.document_tags,
+                        "document_description": item.document_description,
                         "es_score": item.es_score,
                         "vector_distance": item.vector_distance,
                     }
@@ -407,6 +409,10 @@ class SearchOutcome:
                     content=item["content"],
                     document_title=item["document_title"],
                     document_tags=item["document_tags"],
+                    # Pre-description payloads lack the key: the empty default
+                    # keeps old cached outcomes readable (recomputed on next
+                    # epoch bump anyway).
+                    document_description=item.get("document_description", ""),
                     es_score=item["es_score"],
                     vector_distance=item["vector_distance"],
                 )
@@ -609,6 +615,7 @@ class Retriever:
                     content=row.content,
                     document_title=row.document_title,
                     document_tags=row.document_tags,
+                    document_description=row.document_description,
                 )
             )
         mode: SearchMode = "hybrid" if vector_leg.ran else "bm25"

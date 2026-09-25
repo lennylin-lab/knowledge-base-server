@@ -25,6 +25,7 @@ class ChunkRow(NamedTuple):
     content: str
     document_title: str
     document_tags: list[str]
+    document_description: str = ""
     distance: float | None = None
 
 
@@ -34,6 +35,7 @@ class NeighborDocumentRow(NamedTuple):
     document_id: UUID
     title: str
     tags: list[str]
+    description: str
     distance: float
 
 
@@ -48,6 +50,7 @@ _LIVE_CHUNK_SELECT = (
         DocumentChunk.content,
         Document.title.label("document_title"),
         Document.tags.label("document_tags"),
+        Document.description.label("document_description"),
     )
     .join(Document, Document.id == DocumentChunk.document_id)
     .where(Document.deleted_at.is_(None))
@@ -186,6 +189,7 @@ class DocumentChunkRepository:
                     document_id=row.document_id,
                     title=row.document_title,
                     tags=list(row.document_tags),
+                    description=row.document_description,
                     distance=row.distance,
                 )
                 current = best.get(row.document_id)
@@ -221,5 +225,6 @@ def _as_chunk_row(row: Row[Any], *, distance: float | None = None) -> ChunkRow:
         content=row.content,
         document_title=row.document_title,
         document_tags=list(row.document_tags),
+        document_description=row.document_description,
         distance=distance,
     )

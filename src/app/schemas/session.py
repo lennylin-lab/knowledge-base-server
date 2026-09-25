@@ -22,6 +22,9 @@ class SourceRef(BaseModel):
     document_id: UUID
     document_title: str
     document_tags: list[str]
+    # The owning document's front-matter blurb ("" when none or when the
+    # stored source predates the field — the default covers old rows).
+    document_description: str = ""
     chunk_index: int
 
 

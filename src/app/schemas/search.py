@@ -20,6 +20,10 @@ class SearchHit(BaseModel):
     document_id: UUID
     document_title: str
     document_tags: list[str]
+    # The owning document's front-matter blurb; "" when the document has none
+    # (the default also keeps old cached payloads and stored session sources
+    # — which predate the field — validating unchanged).
+    document_description: str = ""
     chunk_index: int
     content: str
     score: float

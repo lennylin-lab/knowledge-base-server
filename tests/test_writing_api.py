@@ -93,6 +93,7 @@ async def test_suggest_streams_sse_content_type_and_event_sequence(writing_clien
         "document_id",
         "document_title",
         "document_tags",
+        "document_description",
         "chunk_index",
         "content",
         "score",

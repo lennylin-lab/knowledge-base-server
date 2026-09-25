@@ -45,6 +45,7 @@ class SearchService:
                     document_id=item.key.document_id,
                     document_title=item.document_title,
                     document_tags=list(item.document_tags),
+                    document_description=item.document_description,
                     chunk_index=item.key.chunk_index,
                     content=item.content,
                     score=item.score,

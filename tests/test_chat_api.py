@@ -104,6 +104,7 @@ async def test_chat_streams_sse_content_type_and_event_sequence(chat_client):
         "document_id",
         "document_title",
         "document_tags",
+        "document_description",
         "chunk_index",
         "content",
         "score",

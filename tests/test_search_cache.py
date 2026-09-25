@@ -48,6 +48,7 @@ class StubRetrieverWorld:
                 content="chunk body",
                 document_title="Title",
                 document_tags=["t"],
+                document_description="Cached blurb.",
                 distance=0.1,
             )
             return _VectorLeg(rows=[row], ran=True)
@@ -127,8 +128,27 @@ async def test_outcome_json_round_trip_field_exact(world):
     assert a.content == b.content
     assert a.document_title == b.document_title
     assert a.document_tags == b.document_tags
+    assert a.document_description == b.document_description == "Cached blurb."
     assert a.es_score == b.es_score
     assert a.vector_distance == b.vector_distance
+
+
+async def test_outcome_json_round_trip_tolerates_payloads_without_description(world):
+    """Old cached payloads (pre-description key) restore with the default."""
+    cache = FakeCache()
+    retriever = world.make_retriever(cache)
+    outcome = await retriever.retrieve("q", tenant_id=DEFAULT_TENANT_ID)
+
+    raw = outcome.to_json()
+    import json as _json
+
+    payload = _json.loads(raw)
+    for item in payload["items"]:
+        del item["document_description"]
+    restored = SearchOutcome.from_json(_json.dumps(payload).encode("utf-8"))
+
+    assert restored.items[0].document_description == ""
+    assert restored.items[0].content == outcome.items[0].content
 
 
 async def test_hit_and_miss_events_are_logged_without_query_text(world):

@@ -40,6 +40,7 @@ ITEM_FIELDS = {
     "document_id",
     "document_title",
     "document_tags",
+    "document_description",
     "chunk_index",
     "content",
     "score",
