@@ -95,6 +95,15 @@ safe. Instances of this migration so far:
   phrases (they returned 0 hits). Query shape changed from a single
   `multi_match` to additive field groups with a term-coverage gate; only the
   analyzers force this reindex.
+- **Description joins retrieval & association**
+  (`09-25-description-rag-association`): the ES mapping gains a
+  `description` text field (IK analyzers) written into every chunk doc, the
+  BM25 identity group expands to `title^2 + heading_path^1.5 +
+  description^1.5`, and chunk embedding inputs gain the description line —
+  plus Alembic `0013` adds the nullable `documents.description_embedding`
+  HNSW column (`uv run alembic upgrade head` first). The sweep re-embeds
+  chunks AND descriptions; association's description-recall leg reads the
+  new column (documents stay invisible to that leg until swept).
 
 ## Quality gates
 
