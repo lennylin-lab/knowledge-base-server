@@ -67,6 +67,31 @@ async def test_create_document_with_invalid_front_matter_returns_422_envelope(db
     assert "front matter" in error["message"]
 
 
+async def test_create_document_with_over_long_description_returns_422_envelope(db_client):
+    resp = await db_client.post(
+        "/api/v1/documents",
+        json={"content": f"---\ndescription: {'x' * 501}\n---\nbody"},
+    )
+
+    assert resp.status_code == 422
+    error = resp.json()["error"]
+    assert error["code"] == "validation_failed"
+    assert error["details"]["field"] == "description"
+    assert error["details"]["max_chars"] == 500
+
+
+async def test_patch_document_with_over_long_description_returns_422_envelope(db_client):
+    created = (await db_client.post("/api/v1/documents", json={"content": FM_DOC})).json()
+
+    resp = await db_client.patch(
+        f"/api/v1/documents/{created['id']}",
+        json={"content": f"---\ntitle: Contract Note\ndescription: {'y' * 501}\n---\nbody"},
+    )
+
+    assert resp.status_code == 422
+    assert resp.json()["error"]["details"]["field"] == "description"
+
+
 async def test_get_document_returns_200_with_content(db_client):
     created = (await db_client.post("/api/v1/documents", json={"content": FM_DOC})).json()
 

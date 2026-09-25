@@ -14,7 +14,7 @@ from app.core.exceptions import ConflictError, NotFoundError, ValidationError
 from app.models.document import Document, IndexStatus
 from app.models.tenant import DEFAULT_TENANT_ID
 from app.schemas.document import DocumentCreate, DocumentUpdate
-from app.services.document import DocumentService, ReindexEnqueuer
+from app.services.document import DESCRIPTION_MAX_CHARS, DocumentService, ReindexEnqueuer
 
 pytestmark = pytest.mark.db
 
@@ -64,13 +64,7 @@ async def test_create_extracts_title_and_tags_from_front_matter(db_session):
 
 async def test_create_extracts_description_from_front_matter(db_session):
     service = make_service(db_session)
-    content = (
-        "---\n"
-        "title: FM Title\n"
-        "tags: [kotlin]\n"
-        "description: A short summary.\n"
-        "---\nbody"
-    )
+    content = "---\ntitle: FM Title\ntags: [kotlin]\ndescription: A short summary.\n---\nbody"
 
     result = await service.create_document(
         DocumentCreate(content=content), tenant_id=DEFAULT_TENANT_ID
@@ -94,6 +88,65 @@ async def test_create_trims_description_and_rejects_non_string(db_session):
             tenant_id=DEFAULT_TENANT_ID,
         )
     assert exc_info.value.details["field"] == "description"
+
+
+async def test_create_description_over_cap_is_rejected_with_field_details(db_session):
+    service = make_service(db_session)
+
+    with pytest.raises(ValidationError) as exc_info:
+        await service.create_document(
+            DocumentCreate(
+                content=f"---\ndescription: {'x' * (DESCRIPTION_MAX_CHARS + 1)}\n---\nbody"
+            ),
+            tenant_id=DEFAULT_TENANT_ID,
+        )
+
+    assert exc_info.value.details["field"] == "description"
+    assert exc_info.value.details["max_chars"] == DESCRIPTION_MAX_CHARS
+
+
+async def test_create_description_at_cap_boundary_is_accepted(db_session):
+    service = make_service(db_session)
+
+    result = await service.create_document(
+        DocumentCreate(content=f"---\ndescription: {'x' * DESCRIPTION_MAX_CHARS}\n---\nbody"),
+        tenant_id=DEFAULT_TENANT_ID,
+    )
+
+    assert len(result.description) == DESCRIPTION_MAX_CHARS
+
+
+async def test_create_description_cap_counts_stripped_value_not_raw(db_session):
+    # The cap measures the STRIPPED value the pipeline stores (str length,
+    # not UTF-8 bytes): quoted YAML padding is stripped before the check, so
+    # a raw 504-char scalar whose stripped value is exactly 500 passes.
+    service = make_service(db_session)
+
+    result = await service.create_document(
+        DocumentCreate(content=f"---\ndescription: '  {'x' * DESCRIPTION_MAX_CHARS}  '\n---\nbody"),
+        tenant_id=DEFAULT_TENANT_ID,
+    )
+
+    assert len(result.description) == DESCRIPTION_MAX_CHARS
+
+
+async def test_update_over_cap_description_is_rejected(db_session):
+    service = make_service(db_session)
+    created = await service.create_document(
+        DocumentCreate(content="---\ntitle: Keep\n---\nbody"), tenant_id=DEFAULT_TENANT_ID
+    )
+
+    with pytest.raises(ValidationError) as exc_info:
+        await service.update_document(
+            created.id,
+            DocumentUpdate(content=f"---\ntitle: Keep\ndescription: {'y' * 501}\n---\nbody"),
+            tenant_id=DEFAULT_TENANT_ID,
+        )
+
+    assert exc_info.value.details["field"] == "description"
+    # The rejected write left the stored description untouched.
+    refetched = await service.get_document(created.id, tenant_id=DEFAULT_TENANT_ID)
+    assert refetched.description == ""
 
 
 async def test_create_title_falls_back_to_request_then_untitled(db_session):

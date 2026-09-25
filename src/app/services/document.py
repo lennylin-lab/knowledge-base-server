@@ -27,6 +27,13 @@ from app.utils.cursor import decode_id_cursor, encode_id_cursor
 
 logger = structlog.get_logger(__name__)
 
+# Front-matter `description` length cap (chars of the STRIPPED value — prompt
+# and index consumers count chars, not bytes). Rejection, not truncation: a
+# longer blurb fails the write like any other invalid front matter, so user
+# data is never silently mutated. Enforced at save time only — rows stored
+# before this cap keep their longer descriptions until their next save.
+DESCRIPTION_MAX_CHARS = 500
+
 # The service stays framework-free: how indexing gets scheduled (FastAPI
 # BackgroundTasks, a queue, ...) is the injecting caller's concern. The
 # enqueued `tenant_id` scopes the background run (the pipeline's document
@@ -63,7 +70,9 @@ def _parse_front_matter(content: str, request_title: str | None) -> tuple[str, l
     Title resolution: front-matter title (non-empty str) → request title →
     "Untitled". Tags come only from front matter; anything but an absent
     field or a list of strings is a validation failure. Description is an
-    optional string from front matter; absent or whitespace-only → "".
+    optional string from front matter; absent or whitespace-only → "". A
+    description longer than DESCRIPTION_MAX_CHARS is rejected (never
+    truncated).
     """
     try:
         metadata, _ = frontmatter.parse(content)
@@ -91,6 +100,11 @@ def _parse_front_matter(content: str, request_title: str | None) -> tuple[str, l
             details={"field": "description"},
         )
     description = raw_description.strip()
+    if len(description) > DESCRIPTION_MAX_CHARS:
+        raise ValidationError(
+            f"Invalid front matter: 'description' exceeds {DESCRIPTION_MAX_CHARS} characters",
+            details={"field": "description", "max_chars": DESCRIPTION_MAX_CHARS},
+        )
 
     return resolved_title, _normalize_tags(raw_tags), description
 
