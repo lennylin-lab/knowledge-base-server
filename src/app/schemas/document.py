@@ -43,6 +43,7 @@ class DocumentRead(BaseModel):
     id: UUID
     title: str
     tags: list[str]
+    description: str
     index_status: IndexStatus
     created_at: datetime
     updated_at: datetime

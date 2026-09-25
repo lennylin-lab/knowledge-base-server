@@ -107,5 +107,6 @@ class DocumentInResult(BaseModel):
     id: UUID
     title: str
     tags: list[str]
+    description: str
     index_status: IndexStatus
     updated_at: datetime

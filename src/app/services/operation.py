@@ -273,10 +273,11 @@ class AgentOperationService:
             )
 
         draft = DraftContent.model_validate(operation.draft)
-        title, tags = _parse_front_matter(draft.content, draft.title)
+        title, tags, description = _parse_front_matter(draft.content, draft.title)
         document.content = draft.content
         document.title = title
         document.tags = tags
+        document.description = description
         document.content_hash = _content_hash(draft.content)
         document.index_status = IndexStatus.PENDING
         await self._documents.update(document)

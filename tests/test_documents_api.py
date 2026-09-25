@@ -8,7 +8,13 @@ import pytest
 
 pytestmark = pytest.mark.db
 
-FM_DOC = "---\ntitle: Contract Note\ntags: [api, smoke]\n---\n\n# Body\n"
+FM_DOC = (
+    "---\n"
+    "title: Contract Note\n"
+    "tags: [api, smoke]\n"
+    "description: API contract smoke doc.\n"
+    "---\n\n# Body\n"
+)
 NO_FM_DOC = "Just some markdown, no front matter."
 FM_DOC_HASH = hashlib.sha256(FM_DOC.encode("utf-8")).hexdigest()
 
@@ -20,6 +26,7 @@ async def test_create_document_returns_201_and_derived_columns(db_client):
     body = resp.json()
     assert body["title"] == "Contract Note"
     assert body["tags"] == ["api", "smoke"]
+    assert body["description"] == "API contract smoke doc."
     assert body["index_status"] == "pending"
     assert "content" not in body
 

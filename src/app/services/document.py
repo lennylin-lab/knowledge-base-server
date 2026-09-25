@@ -57,12 +57,13 @@ def _normalize_tags(raw_tags: Iterable[str]) -> list[str]:
     return tags
 
 
-def _parse_front_matter(content: str, request_title: str | None) -> tuple[str, list[str]]:
-    """Derive (title, tags) from front matter in `content`.
+def _parse_front_matter(content: str, request_title: str | None) -> tuple[str, list[str], str]:
+    """Derive (title, tags, description) from front matter in `content`.
 
     Title resolution: front-matter title (non-empty str) → request title →
     "Untitled". Tags come only from front matter; anything but an absent
-    field or a list of strings is a validation failure.
+    field or a list of strings is a validation failure. Description is an
+    optional string from front matter; absent or whitespace-only → "".
     """
     try:
         metadata, _ = frontmatter.parse(content)
@@ -81,7 +82,17 @@ def _parse_front_matter(content: str, request_title: str | None) -> tuple[str, l
             details={"field": "tags"},
         )
 
-    return resolved_title, _normalize_tags(raw_tags)
+    raw_description = metadata.get("description", "")
+    if raw_description is None:
+        raw_description = ""
+    if not isinstance(raw_description, str):
+        raise ValidationError(
+            "Invalid front matter: 'description' must be a string",
+            details={"field": "description"},
+        )
+    description = raw_description.strip()
+
+    return resolved_title, _normalize_tags(raw_tags), description
 
 
 class DocumentService:
@@ -134,12 +145,13 @@ class DocumentService:
         of the new row (required: there is no default-to-a-tenant fallback in
         the service layer).
         """
-        title, tags = _parse_front_matter(payload.content, payload.title)
+        title, tags, description = _parse_front_matter(payload.content, payload.title)
         document = Document(
             tenant_id=tenant_id,
             title=title,
             content=payload.content,
             tags=tags,
+            description=description,
             content_hash=_content_hash(payload.content),
         )
         document = await self._repo.create(document)
@@ -222,7 +234,7 @@ class DocumentService:
         reindex = True
 
         if payload.content is not None:
-            title, tags = _parse_front_matter(payload.content, payload.title)
+            title, tags, description = _parse_front_matter(payload.content, payload.title)
             new_hash = _content_hash(payload.content)
             content_unchanged = document.content_hash == new_hash
             title_unchanged = title == document.title
@@ -232,6 +244,7 @@ class DocumentService:
                 document.content = payload.content
                 document.title = title
                 document.tags = tags
+                document.description = description
                 document.content_hash = new_hash
         elif payload.title is not None:
             resolved_title = payload.title.strip() or "Untitled"

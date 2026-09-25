@@ -26,8 +26,9 @@ class IndexStatus(StrEnum):
 class Document(Base):
     """A Markdown knowledge document.
 
-    `content` (front matter included) is the source of truth; `title` and
-    `tags` are derived read-model columns maintained by the service layer.
+    `content` (front matter included) is the source of truth; `title`,
+    `tags`, and `description` are derived read-model columns maintained by
+    the service layer.
     """
 
     __tablename__ = "documents"
@@ -53,6 +54,8 @@ class Document(Base):
     # "unknown, treat as changed" — pre-backfill rows reindex once.
     content_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
     tags: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False, server_default="{}")
+    # Optional header blurb from front matter (`description:`); empty when absent.
+    description: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
     index_status: Mapped[IndexStatus] = mapped_column(
         # values_callable: persist the lowercase *values* ("pending"), not the
         # member names ("PENDING") — the server_default below must match.

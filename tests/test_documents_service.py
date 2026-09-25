@@ -58,7 +58,42 @@ async def test_create_extracts_title_and_tags_from_front_matter(db_session):
 
     assert result.title == "FM Title"
     assert result.tags == ["kotlin", "fp"]
+    assert result.description == ""
     assert result.index_status == IndexStatus.PENDING
+
+
+async def test_create_extracts_description_from_front_matter(db_session):
+    service = make_service(db_session)
+    content = (
+        "---\n"
+        "title: FM Title\n"
+        "tags: [kotlin]\n"
+        "description: A short summary.\n"
+        "---\nbody"
+    )
+
+    result = await service.create_document(
+        DocumentCreate(content=content), tenant_id=DEFAULT_TENANT_ID
+    )
+
+    assert result.description == "A short summary."
+
+
+async def test_create_trims_description_and_rejects_non_string(db_session):
+    service = make_service(db_session)
+
+    trimmed = await service.create_document(
+        DocumentCreate(content="---\ndescription: '  padded  '\n---\nbody"),
+        tenant_id=DEFAULT_TENANT_ID,
+    )
+    assert trimmed.description == "padded"
+
+    with pytest.raises(ValidationError) as exc_info:
+        await service.create_document(
+            DocumentCreate(content="---\ndescription: [nope]\n---\nbody"),
+            tenant_id=DEFAULT_TENANT_ID,
+        )
+    assert exc_info.value.details["field"] == "description"
 
 
 async def test_create_title_falls_back_to_request_then_untitled(db_session):
