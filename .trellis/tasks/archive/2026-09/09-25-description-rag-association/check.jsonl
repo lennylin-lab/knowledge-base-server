@@ -1,0 +1,5 @@
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Full quality gate: format, lint, mypy, pytest marks; forbidden patterns"}
+{"file": ".trellis/spec/backend/search-guidelines.md", "reason": "Verify mapping/BM25/embedding changes honor the search-layer contracts (analyzer site, group shape, coverage, runbook)"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "document_description and description_embedding cross 6 layers; check field naming/presence at every hop"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "New boost constant, signal helper, and leg merge must reuse existing patterns (_TITLE_BOOST style, _vector_signal mirror)"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "Check migration 0013 style, HNSW index conventions, NULLability semantics"}

@@ -1,0 +1,6 @@
+{"file": ".trellis/spec/backend/search-guidelines.md", "reason": "Binding ES contracts: mapping is the only analyzer declaration site, BM25 three-group shape + coverage placement, embedding_input contract, reindex runbook, calibration-record convention"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "Alembic migration + pgvector column/index conventions for the new documents.description_embedding migration (0013)"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "ValidationError pattern and response envelope for the 500-char description rejection"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Toolchain gates (ruff/mypy/pytest marks), offline AI test strategy, review checklist"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "Layering matrix for touching service/agent/rag/repository/search layers in one feature"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Feature spans 6+ layers with one new field flowing through; use for the field-drift spot check"}
