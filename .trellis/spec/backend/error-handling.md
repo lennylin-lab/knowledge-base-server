@@ -134,7 +134,7 @@ envelope via a `RequestValidationError` handler.
 | Failure | Exception | HTTP | Notes |
 |---------|-----------|------|-------|
 | Provider 5xx / connection / timeout after retries | `LLMProviderError` | 502 | message generic; provider + model go to logs |
-| Provider rate limit | `LLMRateLimitedError` | 429 | include `Retry-After` when provider gives one |
+| Provider rate limit | `LLMRateLimitedError` | 429 | `Retry-After` threaded by the gateway mapper (`AppError.retry_after_seconds`, seconds) and emitted as a response header by the shared handler — see the Gateway mapping section below |
 | Context window exceeded | `ValidationError` | 422 | chunking/retrieval bug — fix there, don't truncate silently |
 | External MCP tool failure | `MCPToolError` | 502 | `details: {"tool": "web_search"}`; agent may retry or degrade |
 | Vector leg unavailable at search time (no key configured, or provider error mid-search) | — | 200 | **degrade, never 5xx**: warn (`vector_search_disabled`/`vector_search_degraded`), continue BM25-only, response `mode: "bm25"` |
@@ -241,6 +241,90 @@ progress events and no model call. The pre-stream rule is unchanged: the
 services load the document (404 gate on missing/soft-deleted) BEFORE the
 first yield, and the endpoints use chat's priming pattern, so missing
 documents still get the JSON 404 envelope — never a broken stream.
+
+## Gateway error envelope mapping
+
+Established 2026-09-29 (task `09-29-gateway-error-mapping`). When a provider
+call goes through knowledge-base-gateway, the Gateway's stable envelope
+`{"error": {"code", "message", "request_id"}}` (docs/gateway-integration.md
+§8 + v1.2/v1.3) is parsed and mapped to DISTINGUISHABLE domain errors.
+
+### Contracts
+
+- **One mapper, one place**: `llm/gateway_errors.py::map_provider_error(exc)
+  -> AppError` is the ONLY site that knows provider exception shapes
+  (`ModelHTTPError`, `openai.APIStatusError`/`RateLimitError`,
+  `ModelAPIError`). Services raise whatever the mapper returns — they never
+  re-implement mapping, and the former private `_as_app_error` copies (chat,
+  agents) and cross-service imports (operation) are gone. Idempotent on
+  `AppError` input.
+- **One subclass per failure mode, status on the class**: the mapping table
+  lands as direct `AppError` subclasses in `core/exceptions.py` —
+  `GatewayInvalidRequestError` (422 `gateway_invalid_request`),
+  `CapabilityNotSupportedError` (502 `capability_not_supported`),
+  `GatewayUpstreamRejectedError` (502 `gateway_upstream_rejected`),
+  `LLMGatewayAuthFailedError` (503 `llm_gateway_auth_failed` — a deployment
+  problem, deliberately NOT 401), `ModelNotAllowedError` (403
+  `model_not_allowed`), `UpstreamUnavailableError` (503
+  `upstream_unavailable`), `UpstreamTimeoutError` (504
+  `upstream_timeout`), `EmbeddingDimMismatchError` (502
+  `embedding_dim_mismatch`). All three 429-semantic codes
+  (`rate_limit_exceeded`, `quota_exceeded`, and `upstream_rate_limited` even
+  when delivered on HTTP 503) reuse `LLMRateLimitedError` (429
+  `rate_limited`) — back-off semantics, not a new class; quota vs rate-limit
+  is data: `details.reason = "quota"`. The new classes deliberately do NOT
+  subclass `LLMProviderError` so `rag/worker.py::is_transient_index_error`'s
+  explicit transient allowlist (rate-limited, upstream-unavailable,
+  upstream-timeout, search-index, `OSError`) stays authoritative.
+- **Fallback is today's behavior**: unknown `error.code`, non-dict body,
+  missing `error` key, and transport-layer failures map by status — 429 →
+  `LLMRateLimitedError`, everything else → `LLMProviderError` — with the old
+  fixed messages and NO details (byte-identical to the pre-mapper
+  `_as_app_error`).
+- **Details are safe ids only**: `details` may carry `gateway_code`,
+  `gateway_request_id` (only when the Gateway supplied them) and the 429
+  `reason`. The Gateway's `error.message` and any upstream content NEVER
+  enter a client-visible `message`, an SSE payload, or a log — every mapped
+  message is a static per-class/table literal; the log event is
+  `gateway_error_mapped` (warning) with `gateway_code` /
+  `gateway_request_id` / `status_code` only.
+- **Retry-After**: the mapper parses it on 429-mapped failures (pydantic-ai's
+  lowercased `ModelHTTPError.headers` / `retry_after`; the SDK httpx response
+  on the embedding path — delay-seconds AND HTTP-date forms) into
+  `AppError.retry_after_seconds`; the shared `app_error_handler` emits a
+  `Retry-After: <ceil seconds>` header when set (envelope body unchanged).
+  Legacy no-envelope 429s get it too.
+- **SSE**: `ErrorEvent` carries an optional additive `details`
+  (`gateway_code`/`gateway_request_id`/`reason`) — serialized with a
+  `when_used="json"` wrap serializer that OMITS the key when `None`, so
+  pre-Gateway streams stay byte-identical (python-mode `model_dump()` still
+  shows `None`; sse.py's `model_dump_json()` is the wire). JSON pre-stream
+  errors and SSE terminal errors read the same mapped `AppError`, so their
+  codes cannot diverge.
+- **ARQ alignment**: a mapped permanent failure (auth-failed,
+  model-not-allowed, capability, invalid-request, upstream-rejected,
+  dim-mismatch) settles `index_status=failed` on the first attempt without
+  consulting the `openai.AuthenticationError` cause chain;
+  `llm/errors.py::is_permanent_provider_error` remains for legacy
+  `LLMProviderError`-with-SDK-cause paths (non-Gateway deployments).
+
+### Tests Required
+
+- `tests/test_gateway_errors.py`: per-code fixture matrix (all 17 documented
+  codes → class + code + status; `upstream_rate_limited`-on-503; unknown
+  code / non-dict body / missing `error` / transport fallbacks; Retry-After
+  parse/absent/non-429 suppression; quota reason; AppError idempotency;
+  SDK-path fixtures with stubbed httpx responses; log-privacy assertion).
+- Per-stream: terminal `error` code == JSON envelope code for the same
+  failure (`test_summarize_service.py::test_gateway_failure_yields_identical_
+  code_in_envelope_and_stream` is the pin); gateway text absent from
+  messages.
+- `tests/test_error_envelope.py`: `Retry-After` header present iff
+  `retry_after_seconds` set.
+- Worker: auth-shaped failure settles `failed` first attempt (no `Retry`);
+  upstream-unavailable raises `Retry`.
+
+---
 
 ## Rules
 
