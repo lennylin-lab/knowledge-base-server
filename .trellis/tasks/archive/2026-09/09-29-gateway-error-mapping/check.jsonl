@@ -1,0 +1,5 @@
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Verify taxonomy additions follow one-class-per-mode, envelope unchanged, SSE discipline kept, no gateway text in messages"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Verify gateway_error_mapped event carries ids only, no message/upstream content"}
+{"file": ".trellis/spec/backend/chat-guidelines.md", "reason": "Verify SSE stream failure rules and event ordering unaffected; ErrorEvent extension additive"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "details/gateway_code naming identical across mapper, envelopes, SSE events, tests"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "Check no residual private error-mapping copies remain in services"}

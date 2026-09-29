@@ -1,0 +1,7 @@
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Binding contracts: one subclass per failure mode with status on the class, single envelope shape, SSE terminal error discipline, priming pattern, Retry-After convention to implement"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Structured log event rules for gateway_error_mapped (gateway_code/request_id only; gateway message and upstream content never logged)"}
+{"file": ".trellis/spec/backend/chat-guidelines.md", "reason": "SSE event vocabulary and stream failure rules shared by chat/writing/draft; ErrorEvent is the one error dialect"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "llm/ layer boundary: SDK exception shapes known only there; service-agent-repository layering for the call-site consolidation"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Toolchain gates and offline test strategy for the fixture matrix"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "Task consolidates two duplicated _as_app_error copies plus operation.py's private import into one mapper; new helper must be searched-for before creation"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "New codes/details/retry-after flow through llm -> services -> schemas -> SSE/JSON surfaces; field drift check needed"}
