@@ -39,9 +39,7 @@ from dataclasses import dataclass
 from dataclasses import field as dataclasses_field
 from uuid import UUID, uuid4
 
-import openai
 import structlog
-from pydantic_ai.exceptions import ModelAPIError, ModelHTTPError
 from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
@@ -64,12 +62,8 @@ from app.agents.qa import (
     format_context_blocks,
 )
 from app.agents.rewrite import build_rewrite_agent
-from app.core.exceptions import (
-    AppError,
-    LLMProviderError,
-    LLMRateLimitedError,
-    NotFoundError,
-)
+from app.core.exceptions import NotFoundError
+from app.llm.gateway_errors import map_provider_error
 from app.llm.tokens import build_token_counter
 from app.models.chat import ChatMessage, ChatSession, MessageRole
 from app.rag.retriever import Retriever
@@ -589,7 +583,7 @@ class ChatService:
                     sources=collector.hits if self._carry_sources_forward else [],
                 )
         except Exception as exc:
-            failure = _as_app_error(exc)
+            failure = map_provider_error(exc)
             logger.exception(
                 "agent_run_failed",
                 agent="qa",
@@ -598,7 +592,9 @@ class ChatService:
                 tool_calls=collector.tool_calls,
                 latency_ms=round((time.perf_counter() - started) * 1000, 2),
             )
-            yield ErrorEvent(code=failure.code, message=failure.message)
+            yield ErrorEvent(
+                code=failure.code, message=failure.message, details=failure.details or None
+            )
             return
 
         latency_ms = round((time.perf_counter() - started) * 1000, 2)
@@ -923,30 +919,3 @@ def _drain(pending: list[list[SearchHit]]) -> list[list[SearchHit]]:
     batches = list(pending)
     pending.clear()
     return batches
-
-
-def _as_app_error(exc: Exception) -> AppError:
-    """Map a streaming failure onto the error taxonomy for the error event.
-
-    Provider failures surface from the agent run wrapped in pydantic-ai's own
-    types (`ModelHTTPError` for HTTP >= 400, `ModelAPIError` for
-    connection/timeout — the production model never lets raw SDK exceptions
-    through) or, on paths that bypass pydantic-ai, as raw SDK exceptions;
-    both are wrapped here. `AppError` subclasses (e.g. `SearchIndexError`
-    raised inside the retrieval tool) already carry the right code/message.
-    Unknown exceptions get the generic internal error — details go to logs,
-    never to the stream.
-    """
-    if isinstance(exc, AppError):
-        return exc
-    if isinstance(exc, ModelHTTPError):
-        if exc.status_code == 429:
-            return LLMRateLimitedError("LLM provider rate limit exceeded")
-        return LLMProviderError("LLM provider request failed")
-    if isinstance(exc, ModelAPIError):
-        return LLMProviderError("LLM provider request failed")
-    if isinstance(exc, openai.RateLimitError):
-        return LLMRateLimitedError("LLM provider rate limit exceeded")
-    if isinstance(exc, openai.APIError):
-        return LLMProviderError("LLM provider request failed")
-    return AppError("Internal server error")

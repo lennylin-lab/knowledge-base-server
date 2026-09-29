@@ -362,6 +362,49 @@ async def test_model_http_429_maps_to_rate_limited_error_event():
     assert error.code == "rate_limited"
 
 
+async def test_gateway_envelope_failure_maps_code_and_details_into_the_error_event():
+    """Gateway-shaped ModelHTTPError: the terminal event carries the mapped
+    code, the safe gateway details, and never the gateway's own message —
+    the same mapping the JSON envelope would produce (AC2/AC5)."""
+    gateway_failure = ModelHTTPError(
+        status_code=403,
+        model_name="gateway",
+        body={
+            "error": {
+                "code": "model_not_allowed",
+                "message": "secret gateway text",
+                "request_id": "gw-chat-1",
+            }
+        },
+    )
+    service = ChatService(
+        StubRetriever(),
+        scripted_chat_model(
+            answer_parts=["never"],
+            fail_during_answer=gateway_failure,
+            fail_after_parts=0,
+        ),
+        mode="hybrid",
+    )
+
+    with capture_logs() as logs:
+        events = await _collect(service, QUESTION)
+
+    error = events[-1]
+    assert isinstance(error, ErrorEvent)
+    assert error.code == "model_not_allowed"
+    assert error.details == {
+        "gateway_code": "model_not_allowed",
+        "gateway_request_id": "gw-chat-1",
+    }
+    assert "secret gateway text" not in error.message
+    assert not any(isinstance(event, DoneEvent) for event in events)
+    # The mapped ids are auditable in logs; the gateway text is not.
+    mapped = next(entry for entry in logs if entry["event"] == "gateway_error_mapped")
+    assert mapped["gateway_request_id"] == "gw-chat-1"
+    assert all("secret gateway text" not in str(entry) for entry in logs)
+
+
 async def test_provider_failure_before_any_output_is_a_terminal_error_event():
     service = ChatService(
         StubRetriever(),

@@ -25,9 +25,7 @@ from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass
 from uuid import UUID, uuid4
 
-import openai
 import structlog
-from pydantic_ai.exceptions import ModelAPIError, ModelHTTPError
 from pydantic_ai.models import Model
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai.tools import Tool
@@ -49,12 +47,8 @@ from app.agents.summarize import (
 )
 from app.agents.writing import WritingDeps, build_writing_agent, render_writing_prompt
 from app.core.cache import Cache, cache_key
-from app.core.exceptions import (
-    AppError,
-    LLMProviderError,
-    LLMRateLimitedError,
-    NotFoundError,
-)
+from app.core.exceptions import AppError, NotFoundError
+from app.llm.gateway_errors import map_provider_error
 from app.models.document import Document
 from app.rag.chunker import chunk_markdown
 from app.rag.retriever import Retriever
@@ -162,7 +156,9 @@ class SummarizeService:
         except AppError as failure:
             if not yielded:
                 raise  # pre-stream (document load): the HTTP envelope still applies
-            yield ErrorEvent(code=failure.code, message=failure.message)
+            yield ErrorEvent(
+                code=failure.code, message=failure.message, details=failure.details or None
+            )
 
     async def _summarize_events(
         self, doc_id: UUID, *, tenant_id: UUID
@@ -272,7 +268,7 @@ class SummarizeService:
             input_tokens += tokens_in
             output_tokens += tokens_out
         except Exception as exc:
-            failure = _as_app_error(exc)
+            failure = map_provider_error(exc)
             # Run-level audit event, not a boundary log: it closes the
             # agent_run_started trail with run-scoped context (run_id, latency,
             # error_class, traceback). Re-raising lets the stream wrapper turn
@@ -398,34 +394,6 @@ class SummarizeService:
             outcome.output_tokens = usage.output_tokens or 0
 
 
-def _as_app_error(exc: Exception) -> AppError:
-    """Map a failed run onto the error taxonomy — same mapping as chat's.
-
-    Chat converts the mapping into a terminal SSE event because its stream is
-    already open; sync endpoints re-raise instead so the shared handler
-    returns the matching HTTP envelope. Details stay in logs either way.
-
-    The production model (OpenAIChatModel) wraps provider SDK failures in
-    pydantic-ai's own types before a service ever sees them: HTTP >= 400
-    becomes `ModelHTTPError`, connection/timeout becomes `ModelAPIError` —
-    so the taxonomy keys off the wrapped status, and the raw-SDK branches
-    below only serve paths that bypass pydantic-ai (FunctionModel tests).
-    """
-    if isinstance(exc, AppError):
-        return exc
-    if isinstance(exc, ModelHTTPError):
-        if exc.status_code == 429:
-            return LLMRateLimitedError("LLM provider rate limit exceeded")
-        return LLMProviderError("LLM provider request failed")
-    if isinstance(exc, ModelAPIError):
-        return LLMProviderError("LLM provider request failed")
-    if isinstance(exc, openai.RateLimitError):
-        return LLMRateLimitedError("LLM provider rate limit exceeded")
-    if isinstance(exc, openai.APIError):
-        return LLMProviderError("LLM provider request failed")
-    return AppError("Internal server error")
-
-
 # Both candidate legs are bounded to this size (PRD: ~10 per leg) — enough
 # signal for the model without an unbounded prompt.
 CANDIDATE_LIMIT = 10
@@ -491,7 +459,9 @@ class AssociationService:
         except AppError as failure:
             if not yielded:
                 raise  # pre-stream (gather/document load): HTTP envelope applies
-            yield ErrorEvent(code=failure.code, message=failure.message)
+            yield ErrorEvent(
+                code=failure.code, message=failure.message, details=failure.details or None
+            )
 
     async def _association_events(
         self, doc_id: UUID, *, tenant_id: UUID
@@ -594,7 +564,7 @@ class AssociationService:
                 usage_input_tokens = usage.input_tokens or 0
                 usage_output_tokens = usage.output_tokens or 0
         except Exception as exc:
-            failure = _as_app_error(exc)
+            failure = map_provider_error(exc)
             # Run-level audit event closing the agent_run_started trail (see
             # the summarize twin); re-raising feeds the terminal `error` event
             # or the sync wrapper's envelope.
@@ -904,7 +874,7 @@ class WritingService:
             for finished_event in bridge.drain_finished():
                 yield finished_event
         except Exception as exc:
-            failure = _as_app_error(exc)
+            failure = map_provider_error(exc)
             logger.exception(
                 "agent_run_failed",
                 agent="writing",
@@ -913,7 +883,9 @@ class WritingService:
                 tool_calls=collector.tool_calls,
                 latency_ms=round((time.perf_counter() - started) * 1000, 2),
             )
-            yield ErrorEvent(code=failure.code, message=failure.message)
+            yield ErrorEvent(
+                code=failure.code, message=failure.message, details=failure.details or None
+            )
             return
 
         latency_ms = round((time.perf_counter() - started) * 1000, 2)

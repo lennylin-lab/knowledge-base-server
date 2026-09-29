@@ -18,7 +18,12 @@ from pydantic_ai.models.function import FunctionModel
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from structlog.testing import capture_logs
 
-from app.core.exceptions import LLMProviderError, LLMRateLimitedError, NotFoundError
+from app.core.exceptions import (
+    LLMGatewayAuthFailedError,
+    LLMProviderError,
+    LLMRateLimitedError,
+    NotFoundError,
+)
 from app.models.tenant import DEFAULT_TENANT_ID
 from app.schemas.agent_stream import (
     AgentDoneEvent,
@@ -317,6 +322,56 @@ async def test_model_http_429_maps_to_llm_rate_limited(db_session, session_facto
     failed = next(entry for entry in logs if entry["event"] == "agent_run_failed")
     assert failed["outcome"] == "rate_limited"
     assert failed["error_class"] == "ModelHTTPError"
+
+
+async def test_gateway_failure_yields_identical_code_in_envelope_and_stream(
+    db_session, session_factory
+):
+    """The one shared mapper: the sync path's raised error (JSON envelope)
+    and the stream path's terminal `error` event carry the SAME code and
+    details for the same scripted gateway failure (AC2), and the gateway's
+    own message never surfaces on either (AC5)."""
+    created = await make_document(db_session, SHORT_DOC)
+
+    _failure = ModelHTTPError(
+        status_code=401,
+        model_name="gateway",
+        body={
+            "error": {
+                "code": "api_key_revoked",
+                "message": "secret gateway text",
+                "request_id": "gw-sum-1",
+            }
+        },
+    )
+
+    service = SummarizeService(
+        failing_summarize_model(_failure),
+        MODEL_NAME,
+        session_factory=session_factory,
+    )
+
+    with pytest.raises(LLMGatewayAuthFailedError) as envelope:
+        await service.summarize_document(created.id, tenant_id=DEFAULT_TENANT_ID)
+    assert envelope.value.code == "llm_gateway_auth_failed"
+    assert envelope.value.details == {
+        "gateway_code": "api_key_revoked",
+        "gateway_request_id": "gw-sum-1",
+    }
+    assert "secret gateway text" not in envelope.value.message
+
+    stream_service = SummarizeService(
+        failing_summarize_model(_failure),
+        MODEL_NAME,
+        session_factory=session_factory,
+    )
+    events = await drain(
+        stream_service.summarize_document_stream(created.id, tenant_id=DEFAULT_TENANT_ID)
+    )
+    assert isinstance(events[-1], ErrorEvent)
+    assert events[-1].code == envelope.value.code
+    assert events[-1].details == envelope.value.details
+    assert "secret gateway text" not in events[-1].message
 
 
 async def test_front_matter_only_document_summarizes_raw_content_in_one_pass(

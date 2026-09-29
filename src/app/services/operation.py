@@ -41,6 +41,7 @@ from app.core.exceptions import (
     ConflictError,
     NotFoundError,
 )
+from app.llm.gateway_errors import map_provider_error
 from app.models.document import Document, IndexStatus
 from app.models.operation import AgentOperation, DocumentRevision, OperationState
 from app.rag.retriever import Retriever
@@ -66,7 +67,6 @@ from app.schemas.operation import (
     OperationTransition,
     RevisionRead,
 )
-from app.services.agents import _as_app_error
 from app.services.document import ReindexEnqueuer, _content_hash, _parse_front_matter
 
 logger = structlog.get_logger(__name__)
@@ -377,7 +377,9 @@ class AgentOperationService:
         except AppError as failure:
             if not yielded:
                 raise  # pre-stream (config gate / document load): envelope applies
-            yield ErrorEvent(code=failure.code, message=failure.message)
+            yield ErrorEvent(
+                code=failure.code, message=failure.message, details=failure.details or None
+            )
 
     async def _draft_events(
         self, document_id: UUID, instruction: str | None, *, tenant_id: UUID, limit: int
@@ -438,7 +440,7 @@ class AgentOperationService:
                 assert run_result is not None  # iteration always ends at the result
                 output = run_result.output
         except Exception as exc:
-            failure = _as_app_error(exc)
+            failure = map_provider_error(exc)
             # Terminal state commits BEFORE the terminal event (the wrapper
             # turns this raise into the single `error`): the failed operation
             # is durable and resumable even if the client stops reading.

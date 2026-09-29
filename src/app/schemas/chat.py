@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SerializerFunctionWrapHandler, model_serializer
 
 from app.schemas.search import SearchHit
 
@@ -69,10 +69,24 @@ class ErrorEvent(BaseModel):
 
     Payload mirrors the error envelope's `{code, message}` pair — SSE cannot
     change the status code once the stream has started (error-handling spec).
+    `details` carries the mapped gateway failure's safe identifiers
+    (`gateway_code`, `gateway_request_id`, 429 `reason`) when one was
+    supplied; it is omitted from the wire entirely when absent, so
+    pre-gateway streams keep their exact frames (the shared serializer dumps
+    all fields, hence the wrap serializer below).
     """
 
     code: str
     message: str
+    details: dict[str, Any] | None = None
+
+    @model_serializer(mode="wrap", when_used="json")
+    def _serialize_model(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        payload: dict[str, Any] = handler(self)
+        if self.details is None:
+            # None must not become `"details": null` on the wire.
+            payload.pop("details", None)
+        return payload
 
 
 StatusPhase = Literal["rewriting_query", "generating"]

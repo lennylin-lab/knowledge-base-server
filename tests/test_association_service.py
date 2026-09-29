@@ -15,6 +15,7 @@ from uuid import UUID, uuid4
 import httpx
 import openai
 import pytest
+from pydantic_ai.exceptions import ModelHTTPError
 from pydantic_ai.models.function import FunctionModel
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -656,6 +657,41 @@ async def test_stream_provider_failure_emits_single_terminal_error(db_session, s
     assert events[-1].code == "llm_provider_error"
     assert "upstream exploded" not in events[-1].message
     assert not any(entry["event"] == "agent_run_finished" for entry in logs)
+
+
+async def test_stream_gateway_failure_carries_code_and_details(db_session, session_factory):
+    """Gateway-shaped provider failure: the terminal event carries the mapped
+    code and the safe gateway details — identical to the sync envelope's —
+    and never the gateway's own message (AC2/AC5)."""
+    source = await make_document(db_session, ALPHA_SOURCE)
+    await make_document(db_session, ALPHA_NEIGHBOR)
+    service = make_service(
+        session_factory,
+        scripted_association_model(
+            [],
+            fail=ModelHTTPError(
+                status_code=503,
+                model_name="gateway",
+                body={
+                    "error": {
+                        "code": "no_route_available",
+                        "message": "secret gateway text",
+                        "request_id": "gw-assoc-1",
+                    }
+                },
+            ),
+        ),
+    )
+
+    events = await drain(service.associate_document_stream(source.id, tenant_id=DEFAULT_TENANT_ID))
+
+    assert isinstance(events[-1], ErrorEvent)
+    assert events[-1].code == "upstream_unavailable"
+    assert events[-1].details == {
+        "gateway_code": "no_route_available",
+        "gateway_request_id": "gw-assoc-1",
+    }
+    assert "secret gateway text" not in events[-1].message
 
 
 async def test_stream_missing_document_raises_before_first_event(session_factory):

@@ -11,6 +11,7 @@ from __future__ import annotations
 import httpx
 import openai
 import structlog
+from pydantic_ai.exceptions import ModelHTTPError
 from structlog.testing import capture_logs
 
 from app.agents.writing import DEFAULT_INSTRUCTION, render_writing_prompt
@@ -295,6 +296,43 @@ async def test_provider_failure_mid_stream_ends_with_terminal_error_event():
     # Provider internals stay out of the stream; they went to logs only.
     assert "upstream exploded" not in error.message
     assert not any(isinstance(event, DoneEvent) for event in events)
+
+
+async def test_gateway_envelope_failure_maps_code_and_details_into_the_error_event():
+    """Gateway-shaped provider failure on the writing stream: mapped code,
+    safe gateway details on the terminal event, gateway text nowhere (AC2/AC5)."""
+    gateway_failure = ModelHTTPError(
+        status_code=400,
+        model_name="gateway",
+        body={
+            "error": {
+                "code": "invalid_tool_arguments",
+                "message": "secret gateway text",
+                "request_id": "gw-write-1",
+            }
+        },
+    )
+    service = WritingService(
+        StubRetriever(),
+        scripted_chat_model(
+            tool_calls=["zorblat"],
+            answer_parts=["never"],
+            fail_during_answer=gateway_failure,
+            fail_after_parts=0,
+        ),
+        mode="hybrid",
+    )
+
+    events = await _collect(service, DRAFT)
+
+    error = events[-1]
+    assert isinstance(error, ErrorEvent)
+    assert error.code == "gateway_invalid_request"
+    assert error.details == {
+        "gateway_code": "invalid_tool_arguments",
+        "gateway_request_id": "gw-write-1",
+    }
+    assert "secret gateway text" not in error.message
 
 
 async def test_search_index_error_from_the_tool_is_never_answered_around():

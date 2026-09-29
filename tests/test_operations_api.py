@@ -20,6 +20,7 @@ import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from openai import APIStatusError
+from pydantic_ai.exceptions import ModelHTTPError
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -406,6 +407,39 @@ async def test_draft_provider_failure_emits_single_error_leaves_failed_resumable
     resumed = await db_client.post(f"/api/v1/operations/{row.id}/resume", json={})
     assert resumed.status_code == 200
     assert resumed.json()["state"] == "completed"
+    app.dependency_overrides.clear()
+
+
+async def test_draft_gateway_failure_error_event_carries_mapped_code_and_details(
+    app, db_client, session_factory, install_scripted_draft
+):
+    """A gateway-shaped provider failure maps to the dedicated wire code with
+    the safe gateway details on the SSE `error` event — same mapping the JSON
+    envelope uses; the gateway's own message never appears (AC2/AC5)."""
+    document = await _seed_document(db_client)
+    gateway_failure = ModelHTTPError(
+        status_code=400,
+        model_name="gateway",
+        body={
+            "error": {
+                "code": "capability_not_supported",
+                "message": "secret gateway text",
+                "request_id": "gw-draft-1",
+            }
+        },
+    )
+    install_scripted_draft(fail=gateway_failure)
+
+    resp = await db_client.post(f"/api/v1/operations/draft?document_id={document['id']}")
+
+    assert resp.status_code == 200
+    events = parse_sse(resp.text)
+    assert [name for name, _ in events] == ["run_started", "error"]
+    assert events[-1][1] == {
+        "code": "capability_not_supported",
+        "message": "LLM gateway does not support the requested capability",
+        "details": {"gateway_code": "capability_not_supported", "gateway_request_id": "gw-draft-1"},
+    }
     app.dependency_overrides.clear()
 
 
