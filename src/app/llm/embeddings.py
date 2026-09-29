@@ -17,7 +17,8 @@ from openai import AsyncOpenAI, Omit
 
 from app.core.cache import Cache, cache_key
 from app.core.config import EMBEDDING_DIM_FALLBACK, Settings
-from app.core.exceptions import LLMProviderError, LLMRateLimitedError
+from app.core.exceptions import LLMProviderError
+from app.llm.gateway_errors import map_provider_error
 
 logger = structlog.get_logger(__name__)
 
@@ -92,12 +93,12 @@ class OpenAIEmbeddingProvider:
                 # Omit() keeps the parameter absent unless a width is configured.
                 dimensions=self._dimensions if self._dimensions is not None else Omit(),
             )
-        except openai.RateLimitError as exc:
-            raise LLMRateLimitedError("Embedding provider rate limit exceeded") from exc
         except openai.APIError as exc:
-            # Retries are exhausted at this point (SDK max_retries). Message
-            # stays generic; provider details belong to logs, not responses.
-            raise LLMProviderError("Embedding provider request failed") from exc
+            # Rate limits included (`RateLimitError` is an `APIError`): the
+            # taxonomy mapping lives in llm/gateway_errors.py only. Retries
+            # are exhausted at this point (SDK max_retries); the mapped
+            # message stays generic — provider details belong to logs.
+            raise map_provider_error(exc) from exc
         vectors = [item.embedding for item in response.data]
         if len(vectors) != len(texts):
             raise LLMProviderError(

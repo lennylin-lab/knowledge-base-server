@@ -14,16 +14,22 @@ import pytest
 from openai import Omit
 
 from app.core.config import Settings
-from app.core.exceptions import LLMProviderError, LLMRateLimitedError
+from app.core.exceptions import (
+    EmbeddingDimMismatchError,
+    LLMProviderError,
+    LLMRateLimitedError,
+)
 from app.llm.embeddings import EmbeddingProvider, OpenAIEmbeddingProvider
 from app.llm.models import get_chat_model
 from fakes import FakeEmbeddingProvider, hermetic_settings
 
 
-def _status_error(exc_type: type[openai.APIStatusError], status: int) -> openai.APIStatusError:
+def _status_error(
+    exc_type: type[openai.APIStatusError], status: int, body: object = None
+) -> openai.APIStatusError:
     request = httpx.Request("POST", "http://provider.test/embeddings")
     response = httpx.Response(status_code=status, request=request)
-    return exc_type(f"{status}", response=response, body=None)
+    return exc_type(f"{status}", response=response, body=body)
 
 
 class StubEmbeddings:
@@ -139,6 +145,31 @@ async def test_provider_maps_provider_status_error():
 
         with pytest.raises(LLMProviderError):
             await provider.embed_texts(["a"])
+
+
+async def test_provider_maps_gateway_dim_mismatch_code():
+    """Gateway envelope code beats the generic provider-error fallback (AC3):
+    `embedding_dim_mismatch` is configuration drift, distinguishable on the
+    API surface instead of a 502 `llm_provider_error`."""
+    body = {
+        "error": {
+            "code": "embedding_dim_mismatch",
+            "message": "secret gateway detail",
+            "request_id": "gw-dim-1",
+        }
+    }
+    stub = StubEmbeddings(error=_status_error(openai.APIStatusError, 500, body))
+    provider = make_provider(stub)
+
+    with pytest.raises(EmbeddingDimMismatchError) as exc_info:
+        await provider.embed_texts(["a"])
+
+    assert exc_info.value.status_code == 502
+    assert exc_info.value.details == {
+        "gateway_code": "embedding_dim_mismatch",
+        "gateway_request_id": "gw-dim-1",
+    }
+    assert "secret gateway detail" not in exc_info.value.message
 
 
 async def test_provider_maps_connection_error():
