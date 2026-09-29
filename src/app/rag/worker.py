@@ -35,7 +35,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.config import Settings, get_settings
 from app.core.database import SessionFactory
-from app.core.exceptions import LLMProviderError, LLMRateLimitedError, SearchIndexError
+from app.core.exceptions import (
+    LLMProviderError,
+    LLMRateLimitedError,
+    SearchIndexError,
+    UpstreamTimeoutError,
+    UpstreamUnavailableError,
+)
 from app.core.logging import configure_logging
 from app.llm.errors import is_permanent_provider_error
 from app.models.document import IndexStatus
@@ -56,17 +62,31 @@ INDEX_DOCUMENT_TASK = "index_document"
 type IndexRunner = Callable[[UUID, UUID, datetime | None], Awaitable[IndexStatus | None]]
 
 
+# Explicit transient allowlist (mapped gateway failures included): a retry
+# has a realistic chance of helping only for these. The permanent gateway
+# classes (auth-failed, model_not_allowed, capability, invalid-request,
+# dim-mismatch, upstream-rejected) extend AppError directly — never
+# LLMProviderError — so they cannot silently inherit retry-worthiness.
+_TRANSIENT_INDEX_ERRORS: tuple[type[BaseException], ...] = (
+    LLMRateLimitedError,
+    UpstreamUnavailableError,
+    UpstreamTimeoutError,
+    SearchIndexError,
+)
+
+
 def is_transient_index_error(exc: BaseException) -> bool:
     """True when a retry has a realistic chance of helping.
 
-    Rate limits, provider outages, search-index failures and network-level
-    errors qualify (`ConnectionError` and `TimeoutError` — asyncio timeouts
-    included — are `OSError` subclasses). Auth-shaped provider errors and
-    arbitrary bugs (`KeyError`, `ValueError`, ...) do not: retrying cannot
-    fix credentials or code, so they settle `failed` immediately instead of
-    burning the attempt budget.
+    Rate limits, upstream outages/timeouts, search-index failures and
+    network-level errors qualify (`ConnectionError` and `TimeoutError` —
+    asyncio timeouts included — are `OSError` subclasses). Mapped gateway
+    permanencies, auth-shaped legacy `LLMProviderError`s (the SDK cause
+    chain via `is_permanent_provider_error` — non-Gateway deployments) and
+    arbitrary bugs (`KeyError`, `ValueError`, ...) do not: they settle
+    `failed` immediately instead of burning the attempt budget.
     """
-    if isinstance(exc, (LLMRateLimitedError, SearchIndexError, OSError)):
+    if isinstance(exc, (*_TRANSIENT_INDEX_ERRORS, OSError)):
         return True
     return isinstance(exc, LLMProviderError) and not is_permanent_provider_error(exc)
 

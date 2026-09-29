@@ -22,9 +22,16 @@ from structlog.testing import capture_logs
 
 import app.rag.worker as worker_module
 from app.core.exceptions import (
+    CapabilityNotSupportedError,
+    EmbeddingDimMismatchError,
+    GatewayInvalidRequestError,
+    LLMGatewayAuthFailedError,
     LLMProviderError,
     LLMRateLimitedError,
+    ModelNotAllowedError,
     SearchIndexError,
+    UpstreamTimeoutError,
+    UpstreamUnavailableError,
 )
 from app.models.document import IndexStatus
 from app.models.tenant import DEFAULT_TENANT_ID
@@ -143,6 +150,22 @@ def test_permanent_error_classes_settle_immediately() -> None:
     assert not is_transient_index_error(ValueError("bad width"))
 
 
+def test_mapped_gateway_permanencies_settle_immediately() -> None:
+    """The new gateway classes extend AppError directly — the explicit
+    transient allowlist never retries them, with no reliance on the SDK
+    cause chain (AC6)."""
+    assert not is_transient_index_error(LLMGatewayAuthFailedError("gateway key invalid"))
+    assert not is_transient_index_error(ModelNotAllowedError("model not allowed"))
+    assert not is_transient_index_error(EmbeddingDimMismatchError("dim mismatch"))
+    assert not is_transient_index_error(GatewayInvalidRequestError("bad request"))
+    assert not is_transient_index_error(CapabilityNotSupportedError("no tools"))
+
+
+def test_mapped_gateway_transient_classes_qualify_for_retry() -> None:
+    assert is_transient_index_error(UpstreamUnavailableError("no route"))
+    assert is_transient_index_error(UpstreamTimeoutError("upstream timed out"))
+
+
 # --- run_index_job: retry vs settle vs skip vs done (real pipeline doubles) ---
 
 
@@ -216,6 +239,41 @@ async def test_permanent_error_settles_failed_on_first_attempt(
 
     assert await status_of(session_factory, doc_id) is IndexStatus.FAILED
     assert events(logs, "index_job_retry") == []  # no retry burn on 401-shaped failures
+
+
+@pytest.mark.db
+async def test_gateway_auth_shaped_failure_settles_failed_on_first_attempt(
+    session_factory: SessionMaker, fake_embedding_provider: FakeEmbeddingProvider
+) -> None:
+    """A mapped gateway auth failure settles `failed` immediately — no Retry,
+    no reliance on the openai cause chain (AC6)."""
+    doc_id = await seed_document(session_factory)
+    fake_embedding_provider.error = LLMGatewayAuthFailedError("gateway key invalid")
+    pipeline = make_pipeline(session_factory, fake_embedding_provider)
+
+    with capture_logs() as logs:
+        await run_job(pipeline, session_factory, doc_id, job_try=1)
+
+    assert await status_of(session_factory, doc_id) is IndexStatus.FAILED
+    assert events(logs, "index_job_retry") == []
+    finished = events(logs, "index_job_finished")
+    assert len(finished) == 1
+    assert finished[0]["error_class"] == "LLMGatewayAuthFailedError"
+
+
+@pytest.mark.db
+async def test_upstream_unavailable_failure_still_retries(
+    session_factory: SessionMaker, fake_embedding_provider: FakeEmbeddingProvider
+) -> None:
+    doc_id = await seed_document(session_factory)
+    fake_embedding_provider.error = UpstreamUnavailableError("no route available")
+    pipeline = make_pipeline(session_factory, fake_embedding_provider)
+
+    with pytest.raises(Retry) as retry_info:
+        await run_job(pipeline, session_factory, doc_id, job_try=1)
+
+    assert retry_info.value.defer_score == 5_000
+    assert await status_of(session_factory, doc_id) is IndexStatus.PENDING
 
 
 @pytest.mark.db
