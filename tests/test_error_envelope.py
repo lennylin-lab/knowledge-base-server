@@ -9,7 +9,7 @@ from uuid import UUID
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
-from app.core.exceptions import NotFoundError
+from app.core.exceptions import LLMRateLimitedError, NotFoundError
 
 
 @asynccontextmanager
@@ -74,3 +74,38 @@ async def test_request_validation_error_returns_422_envelope(app: FastAPI) -> No
     body = resp.json()["error"]
     assert body["code"] == "validation_failed"
     assert body["details"]["errors"]  # pydantic error list is preserved
+
+
+async def test_rate_limited_error_with_retry_after_emits_header_body_unchanged(
+    app: FastAPI,
+) -> None:
+    @app.get("/limited")
+    async def limited() -> dict[str, str]:
+        exc = LLMRateLimitedError("LLM provider rate limit exceeded")
+        exc.retry_after_seconds = 7.5
+        raise exc
+
+    async with envelope_client(app) as client:
+        resp = await client.get("/limited")
+
+    assert resp.status_code == 429
+    # RFC 9110 delay-seconds: whole seconds, rounded up.
+    assert resp.headers["Retry-After"] == "8"
+    body = resp.json()["error"]
+    assert body == {
+        "code": "rate_limited",
+        "message": "LLM provider rate limit exceeded",
+        "details": {},
+    }
+
+
+async def test_rate_limited_error_without_retry_after_omits_header(app: FastAPI) -> None:
+    @app.get("/limited")
+    async def limited() -> dict[str, str]:
+        raise LLMRateLimitedError("LLM provider rate limit exceeded")
+
+    async with envelope_client(app) as client:
+        resp = await client.get("/limited")
+
+    assert resp.status_code == 429
+    assert "Retry-After" not in resp.headers
