@@ -712,3 +712,29 @@ Implemented GitHub issue #4 on feat/description-rag-association: 500-char front-
 ### Status
 
 [OK] **Completed**
+
+
+## Session 34: Gateway error codes map to distinct API error codes (issue #5)
+<!-- trellis-session: v=2 fp=f2697db93b94a20e -->
+
+**Date**: 2026-09-29
+**Task**: Gateway error codes map to distinct API error codes (issue #5)
+**Branch**: `feat/gateway-error-mapping`
+
+### Summary
+
+Implemented GitHub issue #5 on feat/gateway-error-mapping: 8 new direct-AppError subclasses in core/exceptions.py (gateway_invalid_request 422, capability_not_supported 502, gateway_upstream_rejected 502, llm_gateway_auth_failed 503, model_not_allowed 403, upstream_unavailable 503, upstream_timeout 504, embedding_dim_mismatch 502) with AppError.retry_after_seconds + Retry-After header emission; new llm/gateway_errors.py::map_provider_error parses the gateway envelope (all 17 documented codes, tolerant parse, byte-identical legacy fallback for unknown/transport) and logs gateway_error_mapped with ids only; both duplicated _as_app_error copies deleted (chat/agents) along with operation.py's private cross-module import; embeddings SDK path routed through the mapper; ErrorEvent gained optional details via a wrap model_serializer that omits the key when None (pre-gateway SSE byte-identical); ARQ worker is_transient_index_error is an explicit transient allowlist so mapped permanent failures settle failed on the first attempt. Gates: ruff clean, mypy src 85 files clean, pytest 797 passed / 1 failed (test_es_relevance probe failing identically at HEAD - dev ES index lacks description-bearing docs, environmental; rerun the runbook reindex). trellis-check verified all 9 items incl. the 17-code table against the three gateway docs; AC7 spec section added to error-handling.md. Deviations accepted: embeddings error messages unified to generic mapper text (class/status unchanged, message not pinned); legacy 429 fallback also honors Retry-After.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `9304c91` | feat(errors): add gateway error classes and retry-after plumbing |
+| `6ab3a1f` | feat(llm): map gateway error envelopes to distinct app errors |
+| `2594ab4` | feat(agents): route all provider failures through the shared mapper and carry error details |
+| `269e104` | feat(worker): align index retry classification with mapped gateway codes |
+| `2cef485` | docs(spec): capture gateway error mapping contracts |
+
+### Status
+
+[OK] **Completed**

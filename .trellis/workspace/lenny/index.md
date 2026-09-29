@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 33
-- **Last Active**: 2026-09-25
+- **Total Sessions**: 34
+- **Last Active**: 2026-09-29
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~714 | Active |
+| `journal-1.md` | ~740 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 34 | 2026-09-29 | Gateway error codes map to distinct API error codes (issue #5) | `9304c91`, `6ab3a1f`, `2594ab4`, `269e104`, `2cef485` | `feat/gateway-error-mapping` |
 | 33 | 2026-09-25 | Description joins retrieval, agents, and association recall (issue #4) | `c9d61e5`, `a25cc9f`, `da3134f`, `9136296`, `d971e1a`, `d069400`, `b8a9e03` | `feat/description-rag-association` |
 | 30 | 2026-09-19 | Expose ChatMessage.sources for citation replay | `da28939`, `df260ac` | `main` |
 | 29 | 2026-09-19 | Session messages keyset pagination + citation-link design | `1cf9097` | `main` |
