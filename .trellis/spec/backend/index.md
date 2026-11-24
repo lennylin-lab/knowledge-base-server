@@ -29,7 +29,10 @@ Web Search), RAG, hybrid retrieval, and OpenAI-compatible model adapters.
 | Layering | `router → service → agent → (rag | mcp | repository)` |
 
 Frontend lives in a separate repository; this workspace has no frontend
-spec on purpose.
+spec on purpose. Cross-repo architecture and change handoffs live in
+`../knowledge-base-docs/` (`architecture.md` and
+`subsystems/server/list.md`), while repo-local `docs/` holds server-only
+documentation (see `../guides/cross-workspace-docs-guide.md`).
 
 ---
 

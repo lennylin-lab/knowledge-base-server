@@ -186,6 +186,9 @@ that reproduces the bug first.
    `_MAX_RETRIES` — same defaults across embeddings and chat).
 10. Prompt changes edit files under `agents/prompts/` (reviewable diff),
     not inline f-strings buried in Python.
+11. Cross-workspace docs synced per `.trellis/spec/guides/cross-workspace-docs-guide.md`
+    (adapted items checked `- [x]` in `../knowledge-base-docs/subsystems/server/list.md`;
+    outgoing contract changes published to affected target subsystems; repo-only docs kept in `docs/`).
 
 ## Forbidden Patterns
 
