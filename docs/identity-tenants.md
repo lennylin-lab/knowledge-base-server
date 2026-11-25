@@ -2,9 +2,10 @@
 
 Operational guide for user authentication (OIDC/Keycloak-compatible) and
 tenant RBAC in `knowledge-base-server`. Companion to
-`docs/gateway-integration.md` (model access) — this document covers business
-identity and authorization only. It contains no secrets; every placeholder
-below must be replaced from your own secret store.
+`../knowledge-base-docs/architecture.md` and the Gateway integration docs under
+`../knowledge-base-docs/subsystems/server/list.md` (model access) — this
+document covers repo-local business identity and authorization only. It contains
+no secrets; every placeholder below must be replaced from your own secret store.
 
 ## 1. Model
 
@@ -42,6 +43,7 @@ documents / sessions / operations (all rows carry tenant_id)
 | `KB_OIDC_JWKS_CACHE_TTL_S` | Bounded JWKS key-cache refresh window. | 300 |
 | `KB_OIDC_HTTP_TIMEOUT_S` | Timeout for discovery/JWKS fetches. | 5.0 |
 | `KB_TENANT_DEFAULT_SLUG` | The default tenant slug resolved for every request (single-tenant MVP). | `default` |
+| `KB_TENANT_DEFAULT_NAME` | Display name for the default tenant (used when backfilling). | `Default tenant` |
 | `KB_SERVICE_ACCOUNT_KEY` | Bearer key for internal service-account routes. Empty = path rejects everything. | empty |
 | `KB_SERVICE_ACCOUNT_SUBJECT` | Audit subject recorded on service-account principals. | `service-account` |
 
@@ -58,7 +60,7 @@ Roles live in `tenant_memberships.role`; the matrix is enforced once, in
 allowed; cross-tenant resource ids answer a non-leaky **404** (identical to a
 missing id).
 
-| Role | Read docs/sessions/ops, search | Create/update/delete docs, delete sessions | Chat / writing | Create/resume operations | Apply operations | Membership admin |
+| Role | Read docs/sessions/ops, search, doc summary/associations | Create/update/delete docs, delete sessions | Chat / writing | Draft/create/resume operations | Apply operations | Membership admin |
 | --- | --- | --- | --- | --- | --- | --- |
 | `tenant_admin` | yes | yes | yes | yes | yes | yes (no routes yet) |
 | `editor` | yes | yes | yes | yes | yes | no |
@@ -67,8 +69,8 @@ missing id).
 | `service_account` | no user-resource routes at all — internal routes only | | | | | |
 
 Deliberate choices pinned by tests (`tests/test_rbac.py`): viewer chat
-creation is disabled (design.md "read/create if enabled" — off by default);
-service-account principals pass no user-resource scope dependency.
+creation is disabled by default; service-account principals pass no
+user-resource scope dependency.
 
 ## 4. Enabling OIDC (Keycloak-compatible)
 
@@ -79,10 +81,10 @@ service-account principals pass no user-resource scope dependency.
    admin channel, never commit real subjects):
 
    ```sql
-   INSERT INTO users (subject, email, display_name)
-   VALUES ('<oidc-sub>', '<email>', '<display name>');
-   INSERT INTO tenant_memberships (tenant_id, user_id, role)
-   SELECT t.id, u.id, 'editor'
+   INSERT INTO users (id, subject, email, display_name)
+   VALUES (gen_random_uuid(), '<oidc-sub>', '<email>', '<display name>');
+   INSERT INTO tenant_memberships (id, tenant_id, user_id, role)
+   SELECT gen_random_uuid(), t.id, u.id, 'editor'
    FROM tenants t, users u
    WHERE t.slug = 'default' AND u.subject = '<oidc-sub>';
    ```

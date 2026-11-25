@@ -246,8 +246,9 @@ documents still get the JSON 404 envelope — never a broken stream.
 
 Established 2026-09-29 (task `09-29-gateway-error-mapping`). When a provider
 call goes through knowledge-base-gateway, the Gateway's stable envelope
-`{"error": {"code", "message", "request_id"}}` (docs/gateway-integration.md
-§8 + v1.2/v1.3) is parsed and mapped to DISTINGUISHABLE domain errors.
+`{"error": {"code", "message", "request_id"}}` (see
+`../knowledge-base-docs/subsystems/server/list.md`, Gateway v1.1–v1.3) is parsed
+and mapped to DISTINGUISHABLE domain errors.
 
 ### Contracts
 

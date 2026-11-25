@@ -495,8 +495,8 @@ filed upstream rather than worked around.
   from the server side (candidate future task).
 - Streaming usage now counts toward gateway quotas (v1.2); 429s carry
   `Retry-After` and must not be retried inside the quota window.
-- Operational details live in `docs/gateway-integration.md` and
-  `docs/gateway-v1.2-integration.md`.
+- Operational details live in `../knowledge-base-docs/subsystems/server/list.md`
+  (Gateway v1.1–v1.3 integration guides).
 
 ---
 
