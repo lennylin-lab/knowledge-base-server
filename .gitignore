@@ -36,6 +36,6 @@ mcp-config/
 .DS_Store
 pyrightconfig.json
 
-# Pre-fetched Elasticsearch plugin (fetch before `docker compose build`;
+# Pre-fetched Elasticsearch plugin (for local ES image builds / CI release;
 # see docker/elasticsearch/Dockerfile)
 docker/elasticsearch/*.zip

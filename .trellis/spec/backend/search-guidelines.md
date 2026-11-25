@@ -11,27 +11,32 @@
 
 ### 1. Scope / Trigger
 
-- Trigger: infra integration — the compose ES image is *built*, not pulled,
-  and bakes in the `analysis-ik` plugin. Any ES work depends on this setup.
+- Trigger: infra integration — Elasticsearch requires the `analysis-ik` plugin
+  baked into a custom image built from `docker/elasticsearch/Dockerfile` and
+  published to GHCR by `.github/workflows/release.yml`. This repository's
+  compose files do **not** run Elasticsearch; external storage deployments
+  (`knowledge-base-database` and `knowledge-base-deploy`) consume the published
+  image.
 
 ### 2. Signatures
 
-- Compose build (single source of the ES version):
+- Release workflow image build (single source of the ES version in `.github/workflows/release.yml`):
 
   ```yaml
-  elasticsearch:
-    build:
-      context: ./docker/elasticsearch
-      args: { ES_VERSION: "8.17.3" }
-    image: kb-elasticsearch:8.17.3-ik
+  env:
+    ES_VERSION: "8.17.3"
+    ES_IMAGE: ghcr.io/lennylin-lab/knowledge-base-server/elasticsearch
   ```
 
+  Published tags: `ghcr.io/lennylin-lab/knowledge-base-server/elasticsearch:8.17.3-ik` and `:latest`.
+
 - Plugin install is hermetic: the version-locked zip is fetched into
-  `docker/elasticsearch/` (git-ignored) *before* `docker compose build`:
+  `docker/elasticsearch/` (git-ignored) *before* `docker build`:
 
   ```bash
   curl -fL --retry 5 -o docker/elasticsearch/elasticsearch-analysis-ik-8.17.3.zip \
     https://release.infinilabs.com/analysis-ik/stable/elasticsearch-analysis-ik-8.17.3.zip
+  docker build --build-arg ES_VERSION=8.17.3 -t kb-elasticsearch:8.17.3-ik ./docker/elasticsearch
   ```
 
   Dockerfile: `COPY elasticsearch-analysis-ik-*.zip` →
@@ -42,16 +47,21 @@
 - **Version lock**: plugin artifact version == `ES_VERSION` build arg == base
   image tag. The installer validates `elasticsearch.version` compatibility at
   build time, so drift fails the build (never a silently-wrong image).
-- **Bumping the ES version** touches exactly two places: the compose build
-  arg and the refetched zip filename/URL.
+- **Bumping the ES version or changing mappings/analyzers**: update `ES_VERSION`
+  in `.github/workflows/release.yml` (and refetched zip URL for local image tests),
+  AND submit cross-workspace change notes to **both**
+  `../knowledge-base-docs/subsystems/database/` and
+  `../knowledge-base-docs/subsystems/deploy/` (with unchecked `- [ ]` entries in
+  both `list.md` files) so `database` and `deploy` update their ES image/runtime
+  and runbook steps.
 - `get.infini.cloud` is an alternative distribution channel but measured
   ~1.6 KB/s on this network; `release.infinilabs.com` is the fetch default.
   The GitHub repo publishes NO version-tagged release assets.
 
 ### 4. Validation & Error Matrix
 
-- Missing zip in build context -> `COPY` fails the build (README fetch
-  command is the fix).
+- Missing zip in build context -> `COPY` fails the build (fetch command above is
+  the fix).
 - Plugin absent / wrong ES version at `RUN elasticsearch-plugin install` ->
   build fails with the installer's compatibility error.
 - Analyzer missing at runtime (external ES without IK) -> first
@@ -60,11 +70,12 @@
 
 ### 5. Good/Base/Bad Cases
 
-- Good: fresh clone → fetch zip → `docker compose up -d` → index created
-  with IK analyzers.
+- Good: external ES running `ghcr.io/lennylin-lab/knowledge-base-server/elasticsearch:8.17.3-ik`
+  → `KB_ELASTICSEARCH_URL` configured in `.env` → index created with IK analyzers.
 - Base: existing install → README runbook (drop index, reset
   `done→pending`, `python -m app.cli reindex`).
-- Bad: setting `analyzer` in query bodies, or editing mappings anywhere but
+- Bad: re-adding an `elasticsearch` container to this repo's compose files,
+  setting `analyzer` in query bodies, or editing mappings anywhere but
   `search/es.py::_CHUNK_MAPPINGS`.
 
 ### 6. Tests Required

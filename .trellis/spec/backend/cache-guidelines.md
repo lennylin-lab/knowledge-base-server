@@ -14,6 +14,12 @@
 - Governing rule: **the cache is best-effort and must be invisible to
   correctness**. With `KB_CACHE_ENABLED=false` or empty `KB_REDIS_URL`, the
   app is byte-identical to pre-cache behavior (pinned by `tests/test_cache.py`).
+- External storage ownership: `knowledge-base-server` compose files do not
+  orchestrate Redis. External Redis is managed by `knowledge-base-database` and
+  `knowledge-base-deploy`; whenever a change alters Redis engine/auth/TLS/
+  persistence/key-prefix requirements, submit cross-workspace change notes to
+  both `../knowledge-base-docs/subsystems/database/` and
+  `../knowledge-base-docs/subsystems/deploy/`.
 
 ### 2. Signatures
 

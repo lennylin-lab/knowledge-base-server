@@ -86,7 +86,9 @@ jobs:
 
             ## Deploy
 
-            On the server (`.env` with production `KB_*` values required):
+            On the server (`.env` with production `KB_*` values, including external
+            `KB_DATABASE_URL`, `KB_ELASTICSEARCH_URL`, and optional `KB_REDIS_URL`
+            from `knowledge-base-database` / `knowledge-base-deploy`):
 
             ```bash
             git pull   # or copy docker-compose.prod.yml + scripts/deploy.sh

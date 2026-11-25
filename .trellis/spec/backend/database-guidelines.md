@@ -19,6 +19,12 @@
   `create_all()` outside tests. Extension creation
   (`CREATE EXTENSION IF NOT EXISTS vector`) ships as the first migration and
   requires the extension available in the PG image (dev + CI).
+- **External storage ownership**: `knowledge-base-server` compose files do not
+  orchestrate PostgreSQL, Elasticsearch, or Redis. External storage is managed
+  by `knowledge-base-database` and `knowledge-base-deploy`; whenever a change
+  alters PG engine/extension/role/database-provisioning requirements, submit
+  cross-workspace change notes to both `../knowledge-base-docs/subsystems/database/`
+  and `../knowledge-base-docs/subsystems/deploy/`.
 
 ---
 

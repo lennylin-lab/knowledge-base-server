@@ -23,6 +23,15 @@ Authoritative rules, `list.md` structure, and the change-note template live in `
 
 ---
 
+## Storage Dependency Policy (No Local Storage Orchestration)
+
+- `knowledge-base-server` deployment orchestration (`docker-compose.yml`, `docker-compose.prod.yml`, `scripts/deploy.sh`) MUST NOT include storage services (`postgres`, `elasticsearch`, `redis`). External storage is owned by `knowledge-base-database` and `knowledge-base-deploy` (while `docker/elasticsearch/Dockerfile` and `.github/workflows/release.yml` continue publishing the ES+IK image to GHCR).
+- Whenever a change in this repo adds or modifies storage dependencies — PostgreSQL version/extensions/roles/init requirements, Redis version/auth/persistence/key-prefix requirements, or Elasticsearch version/IK plugin image/mapping/reindex requirements — **both** `database` and `deploy` are mandatory handoff targets:
+  - Write `../knowledge-base-docs/subsystems/database/<YYYY-MM-DD>/<slug>.md` and register `- [ ]` in `../knowledge-base-docs/subsystems/database/list.md`.
+  - Write `../knowledge-base-docs/subsystems/deploy/<YYYY-MM-DD>/<slug>.md` and register `- [ ]` in `../knowledge-base-docs/subsystems/deploy/list.md`.
+
+---
+
 ## Before Check / Finish (Outgoing Changes & Completion)
 
 - [ ] If this task adapted an incoming item from `../knowledge-base-docs/subsystems/server/list.md`, mark that checklist entry `- [x]` after tests pass.

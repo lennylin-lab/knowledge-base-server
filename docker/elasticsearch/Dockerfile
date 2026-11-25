@@ -1,5 +1,7 @@
-# ES_VERSION must match the `ES_VERSION` build arg in docker-compose.yml — the
-# analysis-ik artifact is version-locked to Elasticsearch.
+# ES_VERSION must match `ES_VERSION` in .github/workflows/release.yml — the
+# analysis-ik artifact is version-locked to Elasticsearch. This image is
+# published to GHCR for external storage deployments (knowledge-base-database /
+# knowledge-base-deploy); this repository's compose files do not run ES.
 ARG ES_VERSION
 FROM docker.elastic.co/elasticsearch/elasticsearch:${ES_VERSION}
 

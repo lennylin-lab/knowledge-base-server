@@ -1,58 +1,52 @@
+# Local / standalone container orchestration for knowledge-base-server.
+#
+# Storage services (PostgreSQL + pgvector, Elasticsearch + analysis-ik, Redis)
+# are NOT orchestrated here — provision them externally (e.g. via
+# `knowledge-base-database` or `knowledge-base-deploy`) and configure
+# KB_DATABASE_URL, KB_ELASTICSEARCH_URL, and optional KB_REDIS_URL in `.env`.
+#
+# For containers reaching storage exposed on the Docker host (including Linux),
+# use `host.docker.internal` in `.env` (mapped via `extra_hosts` below) or
+# point directly to external hosts / networks.
+#
+# Usage:
+#   docker compose up -d --build                        # API container
+#   docker compose --profile queue up -d --build        # + ARQ worker (needs KB_REDIS_URL)
+#   docker compose --profile mcp up -d --build mcp-context7  # MCP sidecar only (host-run API)
+
 services:
-  postgres:
-    image: pgvector/pgvector:pg16
-    environment:
-      POSTGRES_USER: kb
-      POSTGRES_PASSWORD: kb
-      POSTGRES_DB: kb
-    ports:
-      - "5432:5432"
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U kb -d kb"]
-      interval: 5s
-      timeout: 3s
-      retries: 12
-
-  elasticsearch:
+  app:
     build:
-      context: ./docker/elasticsearch
-      args:
-        ES_VERSION: "8.17.3"
-    image: kb-elasticsearch:8.17.3-ik
+      context: .
+      dockerfile: Dockerfile
+    env_file: .env
     environment:
-      discovery.type: single-node
-      xpack.security.enabled: "false"
-      ES_JAVA_OPTS: "-Xms512m -Xmx512m"
-    ports:
-      - "9200:9200"
+      # Bind-mounted below. An empty (or absent, auto-created) ./mcp-config
+      # dir means "no mcp.json" — MCP stays disabled, startup stays clean.
+      KB_MCP_CONFIG_PATH: ${KB_MCP_CONFIG_PATH:-/mcp-config/mcp.json}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
-      - esdata:/usr/share/elasticsearch/data
-    healthcheck:
-      test: ["CMD-SHELL", "curl -fs http://localhost:9200/_cluster/health || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 12
-
-  # Task-queue mode for indexing (opt-in): set KB_REDIS_URL=redis://localhost:6379
-  # and run `python -m app.cli worker`. Nothing depends on this service — with
-  # the default empty KB_REDIS_URL the app indexes via in-process background
-  # tasks. Restart/supervision policy is the deployment's job; add
-  # `restart: unless-stopped` here if you want compose to supervise the worker.
-  redis:
-    image: redis:7-alpine
+      - ./mcp-config:/mcp-config:ro
     ports:
-      - "6379:6379"
-    healthcheck:
-      test: ["CMD-SHELL", "redis-cli ping | grep PONG"]
-      interval: 5s
-      timeout: 3s
-      retries: 12
+      - "${KB_APP_PORT:-8000}:8000"
+
+  # Opt-in ARQ worker — requires KB_REDIS_URL in `.env`:
+  #   docker compose --profile queue up -d --build
+  worker:
+    profiles: ["queue"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file: .env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command: ["python", "-m", "app.cli", "worker"]
 
   # stdio→HTTP MCP sidecar (opt-in): docker compose --profile mcp up -d --build
-  # mcp-context7. Serves http://127.0.0.1:9300/mcp for the host-run API; the
-  # app-side mcp.json entry is the "url" form. See docs/mcp-sidecars.md.
+  # mcp-context7. Serves http://127.0.0.1:9300/mcp for the host-run API (or
+  # http://mcp-context7:9300/mcp on the compose network); the app-side mcp.json
+  # entry is the "url" form. See docs/mcp-sidecars.md.
   mcp-context7:
     profiles: ["mcp"]
     build:
@@ -64,7 +58,3 @@ services:
     image: kb-mcp-context7:supergateway-3.4.3
     ports:
       - "127.0.0.1:9300:9300"
-
-volumes:
-  pgdata:
-  esdata:

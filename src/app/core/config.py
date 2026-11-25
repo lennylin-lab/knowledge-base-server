@@ -183,9 +183,9 @@ class Settings(BaseSettings):
 
     # --- indexing queue (ARQ + Redis) ---
     # Empty (default) = indexing runs as in-process background tasks after
-    # each write; local development stays zero-dependency. Set to the compose
-    # Redis (redis://localhost:6379) and run `python -m app.cli worker` to
-    # route indexing through the ARQ task queue with automatic retries.
+    # each write; local development stays zero-dependency. Set to an external
+    # Redis URL (e.g. redis://localhost:6379) and run `python -m app.cli worker`
+    # to route indexing through the ARQ task queue with automatic retries.
     REDIS_URL: str = ""
     # Queue-level retry policy for indexing jobs: attempts per job, and the
     # delay before the first retry (doubling each attempt: 5s, 10s, 20s ...).

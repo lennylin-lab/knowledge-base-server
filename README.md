@@ -9,14 +9,14 @@ Elasticsearch 8 + Pydantic AI agents. Managed with [uv](https://docs.astral.sh/u
 ## Prerequisites
 
 - [uv](https://docs.astral.sh/uv/getting-started/installation/) 0.11+
-- Docker with the compose plugin
-- Linux only: Elasticsearch needs `vm.max_map_count >= 262144`. Check with
-  `cat /proc/sys/vm/max_map_count`; if lower, raise it (persists across reboots
-  via sysctl):
-
-  ```bash
-  sudo sysctl -w vm.max_map_count=262144
-  ```
+- External storage services (not orchestrated by this repo; provision via
+  `knowledge-base-database` or `knowledge-base-deploy`):
+  - PostgreSQL 16+ with the `pgvector` extension (`kb` database)
+  - Elasticsearch 8.17.3 with the `analysis-ik` plugin (image published by this
+    repo to GHCR: `ghcr.io/lennylin-lab/knowledge-base-server/elasticsearch:8.17.3-ik`)
+  - Redis 7.4+ (optional — for ARQ indexing queue and cache)
+- Docker with the compose plugin (only needed for containerized app/worker
+  rollouts or opt-in MCP sidecars such as `mcp-context7`)
 
 ## Quickstart
 
@@ -24,23 +24,25 @@ Elasticsearch 8 + Pydantic AI agents. Managed with [uv](https://docs.astral.sh/u
 # 1. Install dependencies (creates .venv, writes/uses uv.lock)
 uv sync
 
-# 2. Local settings
-cp .env.example .env   # adjust if needed; defaults match docker-compose.yml
+# 2. Local settings — point KB_DATABASE_URL, KB_ELASTICSEARCH_URL (and optional
+#    KB_REDIS_URL) at your external storage services
+cp .env.example .env
 
-# 3. Fetch the Elasticsearch IK analyzer plugin (version-locked to the ES
-#    version pinned in docker-compose.yml), then start PostgreSQL (pgvector)
-#    + Elasticsearch. The image is built locally; the plugin installs from
-#    the fetched zip (infini's download mirrors can throttle to KB/s).
-curl -fL --retry 5 -o docker/elasticsearch/elasticsearch-analysis-ik-8.17.3.zip \
-  https://release.infinilabs.com/analysis-ik/stable/elasticsearch-analysis-ik-8.17.3.zip
-docker compose up -d
-docker compose ps      # wait until both report healthy
-
-# 4. Apply database migrations
+# 3. Apply database migrations against the external PostgreSQL instance
 uv run alembic upgrade head
 
-# 5. Run the API
+# 4. Run the API
 uv run uvicorn app.main:app --reload
+```
+
+Optional containerized run (app, opt-in ARQ worker, and opt-in MCP sidecar —
+all connect to external storage via `.env`; see
+[`docs/mcp-sidecars.md`](docs/mcp-sidecars.md)):
+
+```bash
+docker compose up -d --build                        # API container
+docker compose --profile queue up -d --build        # + ARQ worker (needs KB_REDIS_URL)
+docker compose --profile mcp up -d --build mcp-context7  # MCP sidecar only (host-run API)
 ```
 
 Smoke test:
@@ -61,25 +63,25 @@ that touches any of these, re-index once:
 
 ```bash
 # 1. Drop the index created with the old settings + mapping (recreated with
-#    the current ones during the sweep below)
-curl -XDELETE localhost:9200/kb_documents
+#    the current ones during the sweep below; pass ES credentials if auth is enabled)
+curl -XDELETE "${KB_ELASTICSEARCH_URL:-http://localhost:9200}/kb_documents"
 
-# 2. Queue every already-indexed document for re-indexing
-docker compose exec postgres psql -U kb -d kb -c "UPDATE documents SET index_status = 'pending' WHERE index_status = 'done';"
+# 2. Queue every already-indexed document for re-indexing against the external PG
+psql "${KB_DATABASE_URL/postgresql+asyncpg/postgresql}" -c "UPDATE documents SET index_status = 'pending' WHERE index_status = 'done';"
 
 # 3. Sweep the queue (default limit 50 per run; repeat until `processed: 0`)
 uv run python -m app.cli reindex
 
 # 4. Confirm the corpus is back
-curl -s localhost:9200/kb_documents/_count
+curl -s "${KB_ELASTICSEARCH_URL:-http://localhost:9200}/kb_documents/_count"
 ```
 
 The sweep is idempotent (deterministic document ids), so re-running it is
 safe. Instances of this migration so far:
 
 - **IK analyzer** (`09-06-es-ik-analyzer`): `title`/`chunk_text` switched from
-  `standard` to `ik_max_word`/`ik_smart`. Also required the one-time image
-  rebuild with the plugin baked in (Quickstart step 3).
+  `standard` to `ik_max_word`/`ik_smart`. Requires Elasticsearch with the
+  `analysis-ik` plugin baked in (image published via `.github/workflows/release.yml`).
 - **Code-aware chunking** (`09-06-code-aware-chunking`): fenced code blocks
   stay intact, the index gains index `settings` with a `code` analyzer, a
   `chunk_text.code` subfield, and a `heading_path` field; chunks now embed
@@ -140,5 +142,12 @@ stdio/npx-style servers are bridged to HTTP by opt-in sidecars — see
 - Migrations: `uv run alembic revision --autogenerate -m "add <table> table"`,
   then read and edit the generated file. Every revision needs a working
   downgrade. The URL is read from `KB_DATABASE_URL` (see `alembic/env.py`).
-- Teardown of dev infra: `docker compose down` (keeps volumes) or
-  `docker compose down -v` (wipes data).
+- Storage dependencies: this repository's compose files (`docker-compose.yml`,
+  `docker-compose.prod.yml`) and `scripts/deploy.sh` do **not** run PostgreSQL,
+  Elasticsearch, or Redis. Whenever a change alters storage requirements (PG
+  version/extensions/roles, ES version/IK plugin image/mapping/reindex, Redis
+  requirements/prefixes), publish a change handoff note in
+  `../knowledge-base-docs/subsystems/database/` and
+  `../knowledge-base-docs/subsystems/deploy/` (and register it in both
+  `list.md` files) so `database` and `deploy` handle the storage-side updates.
+- Teardown of local app/worker/sidecar containers: `docker compose --profile queue --profile mcp down` (no storage volumes are managed by this repo).
